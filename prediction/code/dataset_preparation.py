@@ -27,7 +27,7 @@ def find_images_in_f0_directories(directories):
         max_image_path = None
         for root, dirs, files in os.walk(dir_path):
             if root.endswith('/F-30'):  # Only consider the last directory as 'F0'
-                for file in files:
+                for file in files:  
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                         match = re.search(r'RUN(\d+)', file)
                         if match:
