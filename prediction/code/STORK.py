@@ -2,9 +2,8 @@ import os
 import re
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 import tensorflow as tf
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout, concatenate
 from sklearn.metrics import roc_auc_score
@@ -101,9 +100,21 @@ def train_model(data_dir, num_epochs=10, batch_size=32, img_size=299):
     # Load data
     images, labels, ages = load_data(data_dir, img_size)
     
-    # Split the dataset
-    X_train, X_val_test, y_train, y_val_test, age_train, age_val_test = train_test_split(images, labels, ages, test_size=0.3, random_state=42)
-    X_val, X_test, y_val, y_test, age_val, age_test = train_test_split(X_val_test, y_val_test, age_val_test, test_size=0.5, random_state=42)
+    # Split the dataset with stratification
+    X_train, X_temp, y_train, y_temp, age_train, age_temp = train_test_split(
+        images, labels, ages, test_size=0.3, random_state=42, stratify=labels
+    )
+    X_val, X_test, y_val, y_test, age_val, age_test = train_test_split(
+        X_temp, y_temp, age_temp, test_size=0.5, random_state=42, stratify=y_temp
+    )
+    
+    # Check class distribution
+    def check_class_distribution(y_train, y_val, y_test):
+        print("Train set class distribution:", np.bincount(y_train))
+        print("Validation set class distribution:", np.bincount(y_val))
+        print("Test set class distribution:", np.bincount(y_test))
+    
+    check_class_distribution(y_train, y_val, y_test)
     
     # Define the model
     model = build_model((img_size, img_size, 3), num_classes=2)
@@ -146,7 +157,10 @@ def build_decision_tree(X_train, y_train, age_train):
         'min_samples_leaf': [1, 2, 4]
     }
     dt = DecisionTreeClassifier()
-    grid_search = GridSearchCV(dt, param_grid, cv=5, scoring='accuracy')
+    
+    # Use StratifiedKFold for cross-validation
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    grid_search = GridSearchCV(dt, param_grid, cv=skf, scoring='accuracy')
     grid_search.fit(X_train_combined, y_train)
     
     best_dt = grid_search.best_estimator_
@@ -202,6 +216,14 @@ def evaluate_models(X_test, y_test, age_test, X_test_features, dt_model):
     test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
     print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
     
+    # Compute AUC for deep learning model
+    probabilities_dl = dl_model.predict(X_test)
+    if len(np.unique(y_test)) < 2:
+        print("Only one class present in y_test. ROC AUC score is not defined in that case for the Deep Learning Model.")
+    else:
+        auc_dl = roc_auc_score(y_test, probabilities_dl[:, 1])
+        print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
+    
     # Combine image features and age into a single feature matrix
     X_test_combined = np.hstack((X_test_features, age_test.reshape(-1, 1)))
     
@@ -210,10 +232,13 @@ def evaluate_models(X_test, y_test, age_test, X_test_features, dt_model):
     dt_accuracy = np.mean(dt_predictions == y_test)
     print(f"Decision Tree Model Test Accuracy: {dt_accuracy:.4f}")
     
-    # Compute AUC
-    probabilities = dl_model.predict(X_test)
-    auc = roc_auc_score(y_test, probabilities[:, 1])
-    print(f"Deep Learning Model Test AUC: {auc:.4f}")
+    # Compute AUC for decision tree model
+    probabilities_dt = dt_model.predict_proba(X_test_combined)[:, 1]
+    if len(np.unique(y_test)) < 2:
+        print("Only one class present in y_test. ROC AUC score is not defined in that case for the Decision Tree Model.")
+    else:
+        auc_dt = roc_auc_score(y_test, probabilities_dt)
+        print(f"Decision Tree Model Test AUC: {auc_dt:.4f}")
 
 # Main function
 if __name__ == "__main__":
