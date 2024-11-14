@@ -6,5 +6,6 @@
 !**/*.Rmd
 !**/*.py
 !**/*.ipynb
+!**/*.js
 .Rproj.user
 ref_code/
