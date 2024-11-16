@@ -6,11 +6,14 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout, concatenate
-from sklearn.metrics import roc_auc_score
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import roc_auc_score, confusion_matrix
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import GridSearchCV
 from PIL import Image
 import joblib
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # 1. Data Loading and Preprocessing
 def load_data(data_dir, img_size=299):
@@ -86,10 +89,10 @@ def build_model(input_shape, num_classes):
     
     return model
 
-# 3. Train Deep Learning Model
-def train_model(data_dir, num_epochs=10, batch_size=32, img_size=299):
+# 3. Train Deep Learning Model with Data Augmentation
+def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_size=299):
     """
-    Train the deep learning model.
+    Train the deep learning model with data augmentation.
     
     Parameters:
     - data_dir: Path to the dataset directory
@@ -119,12 +122,23 @@ def train_model(data_dir, num_epochs=10, batch_size=32, img_size=299):
     # Define the model
     model = build_model((img_size, img_size, 3), num_classes=2)
     
-    # Train the model
+    # Data augmentation
+    datagen = ImageDataGenerator(
+        rotation_range=20,  # Random rotation
+        width_shift_range=0.1,  # Width shift
+        height_shift_range=0.1,  # Height shift
+        shear_range=0.1,  # Shear intensity
+        zoom_range=0.1,  # Zoom range
+        horizontal_flip=True,  # Horizontal flip
+        fill_mode='nearest'  # Fill mode
+    )
+    
+    # Train the model with data augmentation
     history = model.fit(
-        X_train, y_train,
+        datagen.flow(X_train, y_train, batch_size=batch_size),
         validation_data=(X_val, y_val),
         epochs=num_epochs,
-        batch_size=batch_size
+        steps_per_epoch=len(X_train) // batch_size
     )
     
     # Save the model
@@ -224,6 +238,13 @@ def evaluate_models(X_test, y_test, age_test, X_test_features, dt_model):
         auc_dl = roc_auc_score(y_test, probabilities_dl[:, 1])
         print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
     
+    # Compute confusion matrix for deep learning model
+    y_pred_dl = np.argmax(probabilities_dl, axis=1)
+    cm_dl = confusion_matrix(y_test, y_pred_dl)
+    print("Deep Learning Model Confusion Matrix:")
+    print(cm_dl)
+    # plot_confusion_matrix(cm_dl, ['class_0', 'class_1'], "Deep Learning Model Confusion Matrix")
+    
     # Combine image features and age into a single feature matrix
     X_test_combined = np.hstack((X_test_features, age_test.reshape(-1, 1)))
     
@@ -239,13 +260,36 @@ def evaluate_models(X_test, y_test, age_test, X_test_features, dt_model):
     else:
         auc_dt = roc_auc_score(y_test, probabilities_dt)
         print(f"Decision Tree Model Test AUC: {auc_dt:.4f}")
+    
+    # Compute confusion matrix for decision tree model
+    cm_dt = confusion_matrix(y_test, dt_predictions)
+    print("Decision Tree Model Confusion Matrix:")
+    print(cm_dt)
+    # plot_confusion_matrix(cm_dt, ['class_0', 'class_1'], "Decision Tree Model Confusion Matrix")
+
+# Helper function to plot confusion matrix
+# def plot_confusion_matrix(cm, classes, title):
+#     """
+#     Plot the confusion matrix.
+    
+#     Parameters:
+#     - cm: Confusion matrix
+#     - classes: List of class names
+#     - title: Title of the plot
+#     """
+#     plt.figure(figsize=(8, 6))
+#     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+#     plt.title(title)
+#     plt.ylabel('True label')
+#     plt.xlabel('Predicted label')
+#     plt.show()
 
 # Main function
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
     
-    # Train the deep learning model
-    X_train, y_train, age_train, X_test, y_test, age_test = train_model(data_dir)
+    # Train the deep learning model with data augmentation
+    X_train, y_train, age_train, X_test, y_test, age_test = train_model_with_augmentation(data_dir)
     
     # Train the decision tree model
     dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, X_test, y_test, age_test)
