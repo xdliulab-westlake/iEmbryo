@@ -7,8 +7,8 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout, concatenate
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from sklearn.metrics import roc_auc_score, confusion_matrix
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
+from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 from sklearn.model_selection import GridSearchCV
 from PIL import Image
 import joblib
@@ -17,21 +17,10 @@ import matplotlib.pyplot as plt
 
 # 1. Data Loading and Preprocessing
 def load_data(data_dir, img_size=299):
-    """
-    Load the dataset.
-    
-    Parameters:
-    - data_dir: Path to the dataset directory
-    - img_size: Image size, default is 299x299
-    
-    Returns:
-    - images: Array of image data (N, 299, 299, 3)
-    - labels: Array of labels (N,)
-    - ages: Array of ages (N,)
-    """
     images = []
     labels = []
     ages = []
+    qualities = []  # Embryo quality labels
     
     for label, class_name in enumerate(['class_0', 'class_1']):
         class_dir = os.path.join(data_dir, 'train', class_name)
@@ -47,25 +36,20 @@ def load_data(data_dir, img_size=299):
             # Add age information
             age = int(re.search(r'_RUN\d+_(\d+)\.jpeg$', img_file).group(1))
             ages.append(age)
+            
+            # Add quality information
+            quality = 1 if class_name == 'class_1' else 0  # Set quality based on class name
+            qualities.append(quality)
     
     images = np.array(images)
     labels = np.array(labels)
     ages = np.array(ages)
+    qualities = np.array(qualities)  # Embryo quality labels
     
-    return images, labels, ages
+    return images, labels, ages, qualities
 
 # 2. Build Deep Learning Model
 def build_model(input_shape, num_classes):
-    """
-    Build the deep learning model.
-    
-    Parameters:
-    - input_shape: Input shape of the images (height, width, channels)
-    - num_classes: Number of classes
-    
-    Returns:
-    - model: Compiled Keras model
-    """
     # Image input
     image_input = Input(shape=input_shape)
     x = Conv2D(32, (3, 3), activation='relu')(image_input)
@@ -91,24 +75,15 @@ def build_model(input_shape, num_classes):
 
 # 3. Train Deep Learning Model with Data Augmentation
 def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_size=299):
-    """
-    Train the deep learning model with data augmentation.
-    
-    Parameters:
-    - data_dir: Path to the dataset directory
-    - num_epochs: Number of training epochs
-    - batch_size: Batch size
-    - img_size: Image size
-    """
     # Load data
-    images, labels, ages = load_data(data_dir, img_size)
+    images, labels, ages, qualities = load_data(data_dir, img_size)
     
     # Split the dataset with stratification
-    X_train, X_temp, y_train, y_temp, age_train, age_temp = train_test_split(
-        images, labels, ages, test_size=0.3, random_state=42, stratify=labels
+    X_train, X_temp, y_train, y_temp, age_train, age_temp, quality_train, quality_temp = train_test_split(
+        images, labels, ages, qualities, test_size=0.3, random_state=42, stratify=labels
     )
-    X_val, X_test, y_val, y_test, age_val, age_test = train_test_split(
-        X_temp, y_temp, age_temp, test_size=0.5, random_state=42, stratify=y_temp
+    X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
+        X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
     
     # Check class distribution
@@ -142,26 +117,38 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
     )
     
     # Save the model
-    model.save('model.h5')
-    print("Deep Learning Model saved as model.h5")
+    model.save('deep_learning_model.h5')
+    print("Deep Learning Model saved as deep_learning_model.h5")
     
-    return X_train, y_train, age_train, X_test, y_test, age_test
+    return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
 
-# 4. Build Decision Tree Model
-def build_decision_tree(X_train, y_train, age_train):
-    """
-    Build the decision tree model.
+# 4. Evaluate Deep Learning Model
+def evaluate_deep_learning_model(X_test, y_test, model_path):
+    # Load the deep learning model
+    dl_model = tf.keras.models.load_model(model_path)
     
-    Parameters:
-    - X_train: Training image features
-    - y_train: Training labels
-    - age_train: Training ages
+    # Evaluate the deep learning model
+    test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
+    print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
     
-    Returns:
-    - model: Trained decision tree model
-    """
-    # Combine image features and age into a single feature matrix
-    X_train_combined = np.hstack((X_train, age_train.reshape(-1, 1)))
+    # Compute AUC for deep learning model
+    probabilities_dl = dl_model.predict(X_test)
+    if len(np.unique(y_test)) < 2:
+        print("Only one class present in y_test. ROC AUC score is not defined in that case for the Deep Learning Model.")
+    else:
+        auc_dl = roc_auc_score(y_test, probabilities_dl[:, 1])
+        print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
+    
+    # Compute confusion matrix for deep learning model
+    y_pred_dl = np.argmax(probabilities_dl, axis=1)
+    cm_dl = confusion_matrix(y_test, y_pred_dl)
+    print("Deep Learning Model Confusion Matrix:")
+    print(cm_dl)
+
+# 5. Build Decision Tree Model
+def build_decision_tree(X_train, y_train, age_train, quality_train):
+    # Combine image features, age, and quality into a single feature matrix
+    X_train_combined = np.hstack((X_train, age_train.reshape(-1, 1), quality_train.reshape(-1, 1)))
     
     # Define and train the decision tree model
     param_grid = {
@@ -181,21 +168,10 @@ def build_decision_tree(X_train, y_train, age_train):
     
     return best_dt
 
-# 5. Train Decision Tree Model
-def train_decision_tree(X_train, y_train, age_train, X_test, y_test, age_test):
-    """
-    Train the decision tree model.
-    
-    Parameters:
-    - X_train: Training image features
-    - y_train: Training labels
-    - age_train: Training ages
-    - X_test: Test image features
-    - y_test: Test labels
-    - age_test: Test ages
-    """
+# 6. Train Decision Tree Model
+def train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, model_path):
     # Load the deep learning model
-    dl_model = tf.keras.models.load_model('model.h5')
+    dl_model = tf.keras.models.load_model(model_path)
     
     # Get the image features from the deep learning model
     intermediate_layer_model = Model(inputs=dl_model.input, outputs=dl_model.layers[-2].output)
@@ -203,7 +179,7 @@ def train_decision_tree(X_train, y_train, age_train, X_test, y_test, age_test):
     X_test_features = intermediate_layer_model.predict(X_test)
     
     # Train the decision tree model
-    dt_model = build_decision_tree(X_train_features, y_train, age_train)
+    dt_model = build_decision_tree(X_train_features, y_train, age_train, quality_train)
     
     # Save the decision tree model
     joblib.dump(dt_model, 'decision_tree_model.pkl')
@@ -211,46 +187,14 @@ def train_decision_tree(X_train, y_train, age_train, X_test, y_test, age_test):
     
     return dt_model, X_test_features
 
-# 6. Evaluate Models
-def evaluate_models(X_test, y_test, age_test, X_test_features, dt_model):
-    """
-    Evaluate the deep learning and decision tree models.
-    
-    Parameters:
-    - X_test: Test image data
-    - y_test: Test labels
-    - age_test: Test ages
-    - X_test_features: Test image features from the deep learning model
-    - dt_model: Trained decision tree model
-    """
-    # Load the deep learning model
-    dl_model = tf.keras.models.load_model('model.h5')
-    
-    # Evaluate the deep learning model
-    test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
-    print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
-    
-    # Compute AUC for deep learning model
-    probabilities_dl = dl_model.predict(X_test)
-    if len(np.unique(y_test)) < 2:
-        print("Only one class present in y_test. ROC AUC score is not defined in that case for the Deep Learning Model.")
-    else:
-        auc_dl = roc_auc_score(y_test, probabilities_dl[:, 1])
-        print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
-    
-    # Compute confusion matrix for deep learning model
-    y_pred_dl = np.argmax(probabilities_dl, axis=1)
-    cm_dl = confusion_matrix(y_test, y_pred_dl)
-    print("Deep Learning Model Confusion Matrix:")
-    print(cm_dl)
-    # plot_confusion_matrix(cm_dl, ['class_0', 'class_1'], "Deep Learning Model Confusion Matrix")
-    
-    # Combine image features and age into a single feature matrix
-    X_test_combined = np.hstack((X_test_features, age_test.reshape(-1, 1)))
+# 7. Evaluate Decision Tree Model
+def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model):
+    # Combine image features, age, and quality into a single feature matrix
+    X_test_combined = np.hstack((X_test_features, age_test.reshape(-1, 1), quality_test.reshape(-1, 1)))
     
     # Evaluate the decision tree model
     dt_predictions = dt_model.predict(X_test_combined)
-    dt_accuracy = np.mean(dt_predictions == y_test)
+    dt_accuracy = accuracy_score(y_test, dt_predictions)
     print(f"Decision Tree Model Test Accuracy: {dt_accuracy:.4f}")
     
     # Compute AUC for decision tree model
@@ -265,34 +209,33 @@ def evaluate_models(X_test, y_test, age_test, X_test_features, dt_model):
     cm_dt = confusion_matrix(y_test, dt_predictions)
     print("Decision Tree Model Confusion Matrix:")
     print(cm_dt)
-    # plot_confusion_matrix(cm_dt, ['class_0', 'class_1'], "Decision Tree Model Confusion Matrix")
-
-# Helper function to plot confusion matrix
-# def plot_confusion_matrix(cm, classes, title):
-#     """
-#     Plot the confusion matrix.
     
-#     Parameters:
-#     - cm: Confusion matrix
-#     - classes: List of class names
-#     - title: Title of the plot
-#     """
-#     plt.figure(figsize=(8, 6))
-#     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-#     plt.title(title)
-#     plt.ylabel('True label')
-#     plt.xlabel('Predicted label')
-#     plt.show()
+    # Display the decision tree graphically with accuracy and AUC
+    plt.figure(figsize=(20, 10))
+    plot_tree(dt_model, filled=True, feature_names=['feature_' + str(i) for i in range(X_test_features.shape[1])] + ['age', 'quality'], class_names=['class_0', 'class_1'])
+    
+    # Add accuracy and AUC to the plot
+    plt.text(0.5, 0.5, f"Accuracy: {dt_accuracy:.4f}\nAUC: {auc_dt:.4f}", fontsize=12, ha='center', va='center', transform=plt.gca().transAxes)
+    
+    plt.title("Decision Tree Structure")
+    plt.show()
 
 # Main function
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
     
+    with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation.py') as f:
+        code = f.read()
+    exec(code)
+
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, X_test, y_test, age_test = train_model_with_augmentation(data_dir)
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir)
+    
+    # Evaluate the deep learning model
+    evaluate_deep_learning_model(X_test, y_test, 'deep_learning_model.h5')
     
     # Train the decision tree model
-    dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, X_test, y_test, age_test)
+    dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, 'deep_learning_model.h5')
     
-    # Evaluate the models
-    evaluate_models(X_test, y_test, age_test, X_test_features, dt_model)
+    # Evaluate the decision tree model
+    evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model)
