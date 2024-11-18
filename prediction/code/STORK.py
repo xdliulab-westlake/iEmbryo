@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 import joblib
 import numpy as np
 import pandas as pd
@@ -8,9 +9,9 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from PIL import Image
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, AveragePooling2D, Concatenate, Dropout, Dense, BatchNormalization, Activation, GlobalAveragePooling2D
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, AveragePooling2D, Concatenate, Dropout, Dense, GlobalAveragePooling2D
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
 from sklearn.metrics import roc_curve
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import train_test_split, StratifiedKFold
@@ -72,6 +73,8 @@ def build_inception_v1(input_shape, num_classes):
     # Initial convolution
     x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu')(inputs)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+    x = Conv2D(192, (3, 3), padding='same', activation='relu')(x)
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
 
     # Inception modules
     x = inception_module(x, 64, 96, 128, 16, 32, 32)
@@ -111,8 +114,8 @@ def build_inception_v1(input_shape, num_classes):
     return model
 
 # 3. Train Deep Learning Model with Data Augmentation
-def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_size=299):
-    # Load data
+def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_size=299):
+     # Load data
     images, labels, ages, qualities = load_data(data_dir, img_size)
     
     # Split the dataset with stratification
@@ -136,19 +139,25 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
     initial_epoch = 0
     
     # Check if there is an existing model
-    if tf.io.gfile.exists(model_path):
+    if os.path.exists(model_path):
         print("Loading existing model from", model_path)
         model = tf.keras.models.load_model(model_path)
-        initial_epoch = int(model_path.split('_')[-1].split('.')[0])  # Extract the epoch number from the file name
+        
+        # Try to extract the epoch number from the training log
+        if os.path.exists('training.log'):
+            with open('training.log', 'r') as f:
+                lines = f.readlines()
+                if lines:
+                    last_line = lines[-1]
+                    initial_epoch = int(last_line.split(',')[0]) + 1
+        else:
+            print("Training log not found. Setting initial epoch to 0.")
+            initial_epoch = 0
     else:
         model = build_inception_v1((img_size, img_size, 3), num_classes=2)
     
-    # Define checkpoint callback
-    checkpoint = ModelCheckpoint(model_path, 
-                                monitor='val_loss', 
-                                verbose=1, 
-                                save_best_only=True, 
-                                mode='min')
+    # Define CSV logger to log training history
+    csv_logger = CSVLogger('training.log', append=True)
     
     # Data augmentation
     datagen = ImageDataGenerator(
@@ -168,13 +177,14 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
         epochs=num_epochs,
         initial_epoch=initial_epoch,
         steps_per_epoch=len(X_train) // batch_size,
-        callbacks=[checkpoint]
+        callbacks=[csv_logger]
     )
     
-    print("Inception-V1 Model saved as inception_v1_model.h5")
+    # Save the model
+    model.save(model_path)
+    print("Inception-V1 Model saved as", model_path)
     
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
-
 
 # 4. Evaluate Deep Learning Model
 def evaluate_deep_learning_model(X_test, y_test, model_path):
@@ -345,7 +355,8 @@ if __name__ == "__main__":
     X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir)
     
     # Evaluate the deep learning model
-    evaluate_deep_learning_model(X_test, y_test, 'deep_learning_model.h5')
+    latest_model = max(glob.glob('inception_v1_model.h5'), key=os.path.getctime)
+    evaluate_deep_learning_model(X_test, y_test, latest_model)
     
     # Train the decision tree model
     dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, 'deep_learning_model.h5')
