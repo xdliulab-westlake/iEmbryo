@@ -10,6 +10,7 @@ from PIL import Image
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout, concatenate
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import roc_curve
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
@@ -138,6 +139,19 @@ def evaluate_deep_learning_model(X_test, y_test, model_path):
     else:
         auc_dl = roc_auc_score(y_test, probabilities_dl[:, 1])
         print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
+        
+        # Plot ROC curve
+        # fpr, tpr, _ = roc_curve(y_test, probabilities_dl[:, 1])
+        # plt.figure(figsize=(8, 6))
+        # plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (area = {auc_dl:.2f})')
+        # plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
+        # plt.xlim([0.0, 1.0])
+        # plt.ylim([0.0, 1.05])
+        # plt.xlabel('False Positive Rate')
+        # plt.ylabel('True Positive Rate')
+        # plt.title('Receiver Operating Characteristic (ROC) Curve')
+        # plt.legend(loc="lower right")
+        # plt.show()
     
     # Compute confusion matrix for deep learning model
     y_pred_dl = np.argmax(probabilities_dl, axis=1)
@@ -204,6 +218,19 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
     else:
         auc_dt = roc_auc_score(y_test, probabilities_dt)
         print(f"Decision Tree Model Test AUC: {auc_dt:.4f}")
+        
+        # Plot ROC curve
+        # fpr, tpr, _ = roc_curve(y_test, probabilities_dt)
+        # plt.figure(figsize=(8, 6))
+        # plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (area = {auc_dt:.2f})')
+        # plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
+        # plt.xlim([0.0, 1.0])
+        # plt.ylim([0.0, 1.05])
+        # plt.xlabel('False Positive Rate')
+        # plt.ylabel('True Positive Rate')
+        # plt.title('Receiver Operating Characteristic (ROC) Curve')
+        # plt.legend(loc="lower right")
+        # plt.show()
     
     # Compute confusion matrix for decision tree model
     cm_dt = confusion_matrix(y_test, dt_predictions)
