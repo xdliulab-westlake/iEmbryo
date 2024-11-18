@@ -10,6 +10,7 @@ from PIL import Image
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout, concatenate
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import ModelCheckpoint
 from sklearn.metrics import roc_curve
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import train_test_split, StratifiedKFold
@@ -96,7 +97,23 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
     check_class_distribution(y_train, y_val, y_test)
     
     # Define the model
-    model = build_model((img_size, img_size, 3), num_classes=2)
+    model_path = 'deep_learning_model.h5'
+    initial_epoch = 0
+    
+    # Check if there is an existing model
+    if tf.io.gfile.exists(model_path):
+        print("Loading existing model from", model_path)
+        model = tf.keras.models.load_model(model_path)
+        initial_epoch = int(model_path.split('_')[-1].split('.')[0])  # Extract the epoch number from the file name
+    else:
+        model = build_model((img_size, img_size, 3), num_classes=2)
+    
+    # Define checkpoint callback
+    checkpoint = ModelCheckpoint(model_path, 
+                                monitor='val_loss', 
+                                verbose=1, 
+                                save_best_only=True, 
+                                mode='min')
     
     # Data augmentation
     datagen = ImageDataGenerator(
@@ -114,14 +131,15 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
         datagen.flow(X_train, y_train, batch_size=batch_size),
         validation_data=(X_val, y_val),
         epochs=num_epochs,
-        steps_per_epoch=len(X_train) // batch_size
+        initial_epoch=initial_epoch,
+        steps_per_epoch=len(X_train) // batch_size,
+        callbacks=[checkpoint]
     )
     
-    # Save the model
-    model.save('deep_learning_model.h5')
     print("Deep Learning Model saved as deep_learning_model.h5")
     
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
+
 
 # 4. Evaluate Deep Learning Model
 def evaluate_deep_learning_model(X_test, y_test, model_path):
