@@ -256,6 +256,7 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
 
+    # Run dataset_prepration.py
     with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation.py') as f:
         code = f.read()
     exec(code)
