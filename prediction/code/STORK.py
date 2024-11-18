@@ -219,11 +219,43 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
     
     plt.title("Decision Tree Structure")
     plt.show()
+    
+    # Calculate and display the probability of successful pregnancy for each leaf node
+    def calculate_leaf_probabilities(dt_model, X_test_combined, y_test):
+        # Predict the leaf nodes for the test data
+        leaf_nodes = dt_model.apply(X_test_combined)
+        
+        # Group by leaf nodes and calculate the success probability
+        leaf_probabilities = {}
+        for leaf_node in np.unique(leaf_nodes):
+            indices = np.where(leaf_nodes == leaf_node)[0]
+            if len(indices) > 0:
+                positive_samples = np.sum(y_test[indices])
+                total_samples = len(indices)
+                probability = positive_samples / total_samples
+                leaf_probabilities[leaf_node] = {
+                    'total_samples': total_samples,
+                    'positive_samples': positive_samples,
+                    'probability': probability
+                }
+        
+        return leaf_probabilities
+
+    # Call the function to calculate probabilities
+    leaf_probabilities = calculate_leaf_probabilities(dt_model, X_test_combined, y_test)
+    
+    # Print the results
+    for leaf_node, stats in leaf_probabilities.items():
+        print(f"Leaf Node: {leaf_node}")
+        print(f"Total Samples: {stats['total_samples']}")
+        print(f"Positive Samples: {stats['positive_samples']}")
+        print(f"Probability of Successful Pregnancy: {stats['probability']:.4f}")
+        print("-" * 50)
 
 # Main function
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
-    
+
     with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation.py') as f:
         code = f.read()
     exec(code)
@@ -236,6 +268,6 @@ if __name__ == "__main__":
     
     # Train the decision tree model
     dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, 'deep_learning_model.h5')
-    
+
     # Evaluate the decision tree model
     evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model)
