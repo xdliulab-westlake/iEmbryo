@@ -8,7 +8,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from PIL import Image
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Dropout, concatenate
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, AveragePooling2D, Concatenate, Dropout, Dense, BatchNormalization, Activation, GlobalAveragePooling2D
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import ModelCheckpoint
 from sklearn.metrics import roc_curve
@@ -51,28 +51,63 @@ def load_data(data_dir, img_size=299):
     return images, labels, ages, qualities
 
 # 2. Build Deep Learning Model
-def build_model(input_shape, num_classes):
-    # Image input
-    image_input = Input(shape=input_shape)
-    x = Conv2D(32, (3, 3), activation='relu')(image_input)
-    x = MaxPooling2D(pool_size=(2, 2))(x)
-    x = Conv2D(64, (3, 3), activation='relu')(x)
-    x = MaxPooling2D(pool_size=(2, 2))(x)
-    x = Conv2D(128, (3, 3), activation='relu')(x)
-    x = MaxPooling2D(pool_size=(2, 2))(x)
-    x = Flatten()(x)
-    
+def inception_module(x, filters_1x1, filters_3x3_reduce, filters_3x3, filters_5x5_reduce, filters_5x5, filters_pool_proj):
+    conv_1x1 = Conv2D(filters_1x1, (1, 1), padding='same', activation='relu')(x)
+
+    conv_3x3_reduce = Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu')(x)
+    conv_3x3 = Conv2D(filters_3x3, (3, 3), padding='same', activation='relu')(conv_3x3_reduce)
+
+    conv_5x5_reduce = Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu')(x)
+    conv_5x5 = Conv2D(filters_5x5, (5, 5), padding='same', activation='relu')(conv_5x5_reduce)
+
+    maxpool = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
+    pool_proj = Conv2D(filters_pool_proj, (1, 1), padding='same', activation='relu')(maxpool)
+
+    output = Concatenate()([conv_1x1, conv_3x3, conv_5x5, pool_proj])
+    return output
+
+def build_inception_v1(input_shape, num_classes):
+    inputs = Input(shape=input_shape)
+
+    # Initial convolution
+    x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu')(inputs)
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+
+    # Inception modules
+    x = inception_module(x, 64, 96, 128, 16, 32, 32)
+    x = inception_module(x, 128, 128, 192, 32, 96, 64)
+
+    # Reduction
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+
+    # More Inception modules
+    x = inception_module(x, 192, 96, 208, 16, 48, 64)
+    x = inception_module(x, 160, 112, 224, 24, 64, 64)
+    x = inception_module(x, 128, 128, 256, 24, 64, 64)
+    x = inception_module(x, 112, 144, 288, 32, 64, 64)
+    x = inception_module(x, 256, 160, 320, 32, 128, 128)
+
+    # Reduction
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+
+    # Final Inception module
+    x = inception_module(x, 256, 160, 320, 32, 128, 128)
+    x = inception_module(x, 384, 192, 384, 48, 128, 128)
+
+    # Global average pooling
+    x = GlobalAveragePooling2D()(x)
+
     # Fully connected layers
-    x = Dense(512, activation='relu')(x)
+    x = Dense(1024, activation='relu')(x)
     x = Dropout(0.5)(x)
-    x = Dense(num_classes, activation='softmax')(x)
-    
+    outputs = Dense(num_classes, activation='softmax')(x)
+
     # Define the model
-    model = Model(inputs=image_input, outputs=x)
-    
+    model = Model(inputs=inputs, outputs=outputs)
+
     # Compile the model
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    
+
     return model
 
 # 3. Train Deep Learning Model with Data Augmentation
@@ -97,7 +132,7 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
     check_class_distribution(y_train, y_val, y_test)
     
     # Define the model
-    model_path = 'deep_learning_model.h5'
+    model_path = 'inception_v1_model.h5'
     initial_epoch = 0
     
     # Check if there is an existing model
@@ -106,7 +141,7 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
         model = tf.keras.models.load_model(model_path)
         initial_epoch = int(model_path.split('_')[-1].split('.')[0])  # Extract the epoch number from the file name
     else:
-        model = build_model((img_size, img_size, 3), num_classes=2)
+        model = build_inception_v1((img_size, img_size, 3), num_classes=2)
     
     # Define checkpoint callback
     checkpoint = ModelCheckpoint(model_path, 
@@ -136,7 +171,7 @@ def train_model_with_augmentation(data_dir, num_epochs=10, batch_size=32, img_si
         callbacks=[checkpoint]
     )
     
-    print("Deep Learning Model saved as deep_learning_model.h5")
+    print("Inception-V1 Model saved as inception_v1_model.h5")
     
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
 
