@@ -294,7 +294,7 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
         # plt.title('Receiver Operating Characteristic (ROC) Curve')
         # plt.legend(loc="lower right")
         # plt.show()
-    
+
     # Compute confusion matrix for decision tree model
     cm_dt = confusion_matrix(y_test, dt_predictions)
     print("Decision Tree Model Confusion Matrix:")
