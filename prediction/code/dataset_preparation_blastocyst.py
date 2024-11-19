@@ -82,9 +82,30 @@ os.chdir(new_directory)
 data_root = '../images'
 metadata = pd.read_csv("../../data_cleaning/output/merging_data.csv")
 
+# Extract embryo information
+embryo_info_2022 = pd.read_excel("../../embryo_info/embryo_info_2022.xls")
+columns_to_extract = [1, 8, 9, 44, 48]
+column_names = ['PatientID', 'EmbryoNumber', 'EmbryoQuality', 'Outcome', 'FetusNumber']
+embryo_info_2022 = embryo_info_2022.iloc[:, columns_to_extract]
+embryo_info_2022.columns = column_names
+
+embryo_info_2023 = pd.read_excel("../../embryo_info/embryo_info_2023.xls")
+columns_to_extract = [1, 8, 9, 44, 48]
+column_names = ['PatientID', 'EmbryoNumber', 'EmbryoQuality', 'Outcome', 'FetusNumber']
+embryo_info_2023 = embryo_info_2023.iloc[:, columns_to_extract]
+embryo_info_2023.columns = column_names
+
+embryo_info = pd.concat([embryo_info_2022, embryo_info_2023], ignore_index=True)
+
+# Remove embryos without outcome or can not grow into blastocyst 
+embryo_info = embryo_info.dropna(subset=['Outcome'])
+embryo_info = embryo_info[embryo_info['EmbryoNumber'] != 0]
+Pregnance_PatientID = embryo_info['PatientID'].values
+
 # The ID of the good embryo and the bad embryo
 metadata['EmbryoID'] = metadata['EmbryoID'].apply(replace_dots_with_underscores)
-cyst_embryos = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer')]
+embryo_Good = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer')]['EmbryoID'].values
+embryo_Poor = metadata[~((metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer'))]['EmbryoID'].values
 
 # Find directories whose names contain good embryos and poor embryos
 good_embryo_dirs = find_directories_with_embryos(data_root, embryo_Good)
