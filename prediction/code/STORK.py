@@ -9,7 +9,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from PIL import Image
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, AveragePooling2D, Concatenate, Dropout, Dense, GlobalAveragePooling2D
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Concatenate, Dropout, Dense, GlobalAveragePooling2D
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
 from sklearn.metrics import roc_curve
@@ -114,8 +114,8 @@ def build_inception_v1(input_shape, num_classes):
     return model
 
 # 3. Train Deep Learning Model with Data Augmentation
-def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_size=299):
-     # Load data
+def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_size=299, resume_training=True):
+    # Load data
     images, labels, ages, qualities = load_data(data_dir, img_size)
     
     # Split the dataset with stratification
@@ -128,9 +128,22 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
     
     # Check class distribution
     def check_class_distribution(y_train, y_val, y_test):
-        print("Train set class distribution:", np.bincount(y_train))
-        print("Validation set class distribution:", np.bincount(y_val))
-        print("Test set class distribution:", np.bincount(y_test))
+        class_names = ['Class 0', 'Class 1']
+        train_counts = np.bincount(y_train)
+        val_counts = np.bincount(y_val)
+        test_counts = np.bincount(y_test)
+        
+        print("Train set class distribution:")
+        for i, count in enumerate(train_counts):
+            print(f"{class_names[i]}: {count}")
+        
+        print("Validation set class distribution:")
+        for i, count in enumerate(val_counts):
+            print(f"{class_names[i]}: {count}")
+        
+        print("Test set class distribution:")
+        for i, count in enumerate(test_counts):
+            print(f"{class_names[i]}: {count}")
     
     check_class_distribution(y_train, y_val, y_test)
     
@@ -138,8 +151,7 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
     model_path = 'inception_v1_model.h5'
     initial_epoch = 0
     
-    # Check if there is an existing model
-    if os.path.exists(model_path):
+    if resume_training and os.path.exists(model_path):
         print("Loading existing model from", model_path)
         model = tf.keras.models.load_model(model_path)
         
@@ -154,6 +166,7 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
             print("Training log not found. Setting initial epoch to 0.")
             initial_epoch = 0
     else:
+        print("Building new model from scratch.")
         model = build_inception_v1((img_size, img_size, 3), num_classes=2)
     
     # Define CSV logger to log training history
@@ -181,7 +194,7 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
     )
     
     # Save the model
-    model.save(model_path)
+    model.save(model_path) 
     print("Inception-V1 Model saved as", model_path)
     
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
@@ -191,7 +204,7 @@ def evaluate_deep_learning_model(X_test, y_test, model_path):
     # Load the deep learning model
     dl_model = tf.keras.models.load_model(model_path)
     
-    # Evaluate the deep learning model
+    # Evaluate the deep学习 model
     test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
     print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
     
@@ -204,7 +217,7 @@ def evaluate_deep_learning_model(X_test, y_test, model_path):
         print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
         
         # Plot ROC curve
-        # fpr, tpr, _ = roc_curve(y_test, probabilities_dl[:, 1])
+        fpr, tpr, _ = roc_curve(y_test, probabilities_dl[:, 1])
         # plt.figure(figsize=(8, 6))
         # plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (area = {auc_dl:.2f})')
         # plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
@@ -219,8 +232,14 @@ def evaluate_deep_learning_model(X_test, y_test, model_path):
     # Compute confusion matrix for deep learning model
     y_pred_dl = np.argmax(probabilities_dl, axis=1)
     cm_dl = confusion_matrix(y_test, y_pred_dl)
+    
+    # Create confusion matrix 
+    class_names = ['Class 1', 'Class 0']
+    cm_df = pd.DataFrame(cm_dl, index=class_names, columns=class_names)
     print("Deep Learning Model Confusion Matrix:")
-    print(cm_dl)
+    print(cm_df)
+    
+
 
 # 5. Build Decision Tree Model
 def build_decision_tree(X_train, y_train, age_train, quality_train):
@@ -347,12 +366,12 @@ if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
 
     # Run dataset_prepration.py
-    with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation.py') as f:
+    with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
         code = f.read()
     exec(code)
 
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir)
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir,resume_training=False)
     
     # Evaluate the deep learning model
     latest_model = max(glob.glob('inception_v1_model.h5'), key=os.path.getctime)
