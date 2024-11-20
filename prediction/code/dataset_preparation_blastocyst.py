@@ -4,6 +4,7 @@ import shutil
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from openpyxl import load_workbook
 
 # Function to rename the files
 def replace_dots_with_underscores(s):
@@ -26,7 +27,7 @@ def find_images_in_f0_directories(directories):
         max_run_number = -1
         max_image_path = None
         for root, dirs, files in os.walk(dir_path):
-            if root.endswith('/F-30'):  # Only consider the last directory as 'F0'
+            if root.endswith('/F0'):  # Only consider the last directory as 'F0'
                 for file in files:  
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                         match = re.search(r'RUN(\d+)', file)
@@ -83,15 +84,14 @@ data_root = '../images'
 metadata = pd.read_csv("../../data_cleaning/output/merging_data.csv")
 
 # Extract embryo information
-embryo_info_2022 = pd.read_excel("../../embryo_info/embryo_info_2022.xls")
 columns_to_extract = [1, 8, 9, 44, 48]
-column_names = ['PatientID', 'EmbryoNumber', 'EmbryoQuality', 'Outcome', 'FetusNumber']
+column_names = ['PatientID', 'BlastNumber', 'EmbryoQuality', 'Outcome', 'FetusNumber']
+
+embryo_info_2022 = pd.read_excel("../../embryo_info/embryo_info_2022.xls")
 embryo_info_2022 = embryo_info_2022.iloc[:, columns_to_extract]
 embryo_info_2022.columns = column_names
 
 embryo_info_2023 = pd.read_excel("../../embryo_info/embryo_info_2023.xls")
-columns_to_extract = [1, 8, 9, 44, 48]
-column_names = ['PatientID', 'EmbryoNumber', 'EmbryoQuality', 'Outcome', 'FetusNumber']
 embryo_info_2023 = embryo_info_2023.iloc[:, columns_to_extract]
 embryo_info_2023.columns = column_names
 
@@ -99,13 +99,13 @@ embryo_info = pd.concat([embryo_info_2022, embryo_info_2023], ignore_index=True)
 
 # Remove embryos without outcome or can not grow into blastocyst 
 embryo_info = embryo_info.dropna(subset=['Outcome'])
-embryo_info = embryo_info[embryo_info['EmbryoNumber'] != 0]
+embryo_info = embryo_info[embryo_info['BlastNumber'] != 0]
 Pregnance_PatientID = embryo_info['PatientID'].values
 
 # The ID of the good embryo and the bad embryo
 metadata['EmbryoID'] = metadata['EmbryoID'].apply(replace_dots_with_underscores)
-embryo_Good = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer')]['EmbryoID'].values
-embryo_Poor = metadata[~((metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer'))]['EmbryoID'].values
+embryo_Good = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer') | (metadata['EmbryoFate'] == 'Freeze')]['EmbryoID'].values
+embryo_Poor = metadata[~((metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer') | (metadata['EmbryoFate'] == 'Freeze'))]['EmbryoID'].values
 
 # Find directories whose names contain good embryos and poor embryos
 good_embryo_dirs = find_directories_with_embryos(data_root, embryo_Good)
@@ -123,8 +123,6 @@ move_images(good_f0_image_paths, train_dir, 'class_1', metadata)
 move_images(poor_f0_image_paths, train_dir, 'class_0', metadata)
 
 # Output the counts
-print(f"Number of good embryos: {len(good_embryo_dirs)}")
-print(f"Number of poor embryos: {len(poor_embryo_dirs)}")
 print(f"Number of good embryo images: {len(good_f0_image_paths)}")
 print(f"Number of poor embryo images: {len(poor_f0_image_paths)}")
 print("All images have been moved to the train directory with age information appended.")
