@@ -1,5 +1,6 @@
 import os
 import re
+import cv2
 import shutil
 import numpy as np
 import pandas as pd
@@ -10,6 +11,14 @@ from openpyxl import load_workbook
 def replace_dots_with_underscores(s):
     parts = re.split(r'[.-]', s)
     return '_'.join(parts)
+
+# Function to check if an image is empty
+def is_empty(img_path):
+    image = cv2.imread(img_path, 0)
+    if image is None:
+        return True
+    std_dev = np.std(image)
+    return std_dev < 1
 
 # Function to find directories containing specific embryo IDs
 def find_directories_with_embryos(data_root, embryo_ids):
@@ -23,9 +32,9 @@ def find_directories_with_embryos(data_root, embryo_ids):
 # Function to find images in F0 directories
 def find_images_in_f0_directories(directories):
     image_paths = []
+    skipped_images = 0
     for dir_path in directories:
-        max_run_number = -1
-        max_image_path = None
+        images = []
         for root, dirs, files in os.walk(dir_path):
             if root.endswith('/F0'):  # Only consider the last directory as 'F0'
                 for file in files:  
@@ -33,12 +42,21 @@ def find_images_in_f0_directories(directories):
                         match = re.search(r'RUN(\d+)', file)
                         if match:
                             run_number = int(match.group(1))
-                            if run_number > max_run_number:
-                                max_run_number = run_number
-                                max_image_path = os.path.join(root, file)
-        if max_image_path:
-            image_paths.append(max_image_path)
-    return image_paths
+                            images.append((os.path.join(root, file), run_number))
+        
+        if images:
+            # Sort images by RUN number in descending order
+            images.sort(key=lambda x: x[1], reverse=True)
+            
+            # Find the first non-empty image
+            for img_path, run_number in images:
+                if not is_empty(img_path):
+                    image_paths.append(img_path)
+                    break
+                else:
+                    skipped_images += 1
+    
+    return image_paths, skipped_images
 
 # Function to create necessary directories
 def create_directories(data_dir):
@@ -112,8 +130,8 @@ good_embryo_dirs = find_directories_with_embryos(data_root, embryo_Good)
 poor_embryo_dirs = find_directories_with_embryos(data_root, embryo_Poor)
 
 # Find images in F0 directories for good and poor embryos
-good_f0_image_paths = find_images_in_f0_directories(good_embryo_dirs)
-poor_f0_image_paths = find_images_in_f0_directories(poor_embryo_dirs)
+good_f0_image_paths, good_skipped_images = find_images_in_f0_directories(good_embryo_dirs)
+poor_f0_image_paths, poor_skipped_images = find_images_in_f0_directories(poor_embryo_dirs)
 
 # Create necessary directories
 train_dir = create_directories(data_root)
@@ -125,4 +143,6 @@ move_images(poor_f0_image_paths, train_dir, 'class_0', metadata)
 # Output the counts
 print(f"Number of good embryo images: {len(good_f0_image_paths)}")
 print(f"Number of poor embryo images: {len(poor_f0_image_paths)}")
+print(f"Number of good embryo blank images skipped: {good_skipped_images}")
+print(f"Number of poor embryo blank images skipped: {poor_skipped_images}")
 print("All images have been moved to the train directory with age information appended.")
