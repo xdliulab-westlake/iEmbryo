@@ -8,6 +8,8 @@ import seaborn as sns
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from PIL import Image
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Concatenate, Dropout, Dense, GlobalAveragePooling2D
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
@@ -53,16 +55,16 @@ def load_data(data_dir, img_size=299):
 
 # 2. Build Deep Learning Model
 def inception_module(x, filters_1x1, filters_3x3_reduce, filters_3x3, filters_5x5_reduce, filters_5x5, filters_pool_proj):
-    conv_1x1 = Conv2D(filters_1x1, (1, 1), padding='same', activation='relu')(x)
+    conv_1x1 = Conv2D(filters_1x1, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
 
-    conv_3x3_reduce = Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu')(x)
-    conv_3x3 = Conv2D(filters_3x3, (3, 3), padding='same', activation='relu')(conv_3x3_reduce)
+    conv_3x3_reduce = Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
+    conv_3x3 = Conv2D(filters_3x3, (3, 3), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(conv_3x3_reduce)
 
-    conv_5x5_reduce = Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu')(x)
-    conv_5x5 = Conv2D(filters_5x5, (5, 5), padding='same', activation='relu')(conv_5x5_reduce)
+    conv_5x5_reduce = Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
+    conv_5x5 = Conv2D(filters_5x5, (5, 5), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(conv_5x5_reduce)
 
     maxpool = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
-    pool_proj = Conv2D(filters_pool_proj, (1, 1), padding='same', activation='relu')(maxpool)
+    pool_proj = Conv2D(filters_pool_proj, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(maxpool)
 
     output = Concatenate()([conv_1x1, conv_3x3, conv_5x5, pool_proj])
     return output
@@ -71,9 +73,9 @@ def build_inception_v1(input_shape, num_classes):
     inputs = Input(shape=input_shape)
 
     # Initial convolution
-    x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu')(inputs)
+    x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(inputs)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
-    x = Conv2D(192, (3, 3), padding='same', activation='relu')(x)
+    x = Conv2D(192, (3, 3), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
 
     # Inception modules
@@ -100,50 +102,86 @@ def build_inception_v1(input_shape, num_classes):
     # Global average pooling
     x = GlobalAveragePooling2D()(x)
 
-    # Fully connected layers
-    x = Dense(1024, activation='relu')(x)
+    # Fully connected layers with dropout
+    x = Dense(1024, activation='relu', kernel_regularizer=l2(0.0002))(x)
+    x = Dropout(0.5)(x)
+    x = Dense(1024, activation='relu', kernel_regularizer=l2(0.0002))(x)
     x = Dropout(0.5)(x)
     outputs = Dense(num_classes, activation='softmax')(x)
 
     # Define the model
     model = Model(inputs=inputs, outputs=outputs)
 
-    # Compile the model
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    # Compile the model with a learning rate schedule
+    initial_learning_rate = 0.0001
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate,
+        decay_steps=10000,
+        decay_rate=0.96,
+        staircase=True
+    )
+    optimizer = Adam(learning_rate=lr_schedule)
+    
+    model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
     return model
 
 # 3. Train Deep Learning Model with Data Augmentation
-def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_size=299, resume_training=True):
+def balance_classes(images, labels, ages, qualities):
+    class_counts = np.bincount(labels)
+    min_count = min(class_counts)
+    balanced_images = []
+    balanced_labels = []
+    balanced_ages = []
+    balanced_qualities = []
+    
+    for class_label in range(len(class_counts)):
+        class_indices = np.where(labels == class_label)[0]
+        if len(class_indices) > min_count:
+            selected_indices = np.random.choice(class_indices, size=min_count, replace=False)
+        else:
+            selected_indices = class_indices
+        
+        balanced_images.extend(images[selected_indices])
+        balanced_labels.extend(labels[selected_indices])
+        balanced_ages.extend(ages[selected_indices])
+        balanced_qualities.extend(qualities[selected_indices])
+    
+    return np.array(balanced_images), np.array(balanced_labels), np.array(balanced_ages), np.array(balanced_qualities)
+
+# Check class distribution
+def check_class_distribution(y_train, y_val, y_test):
+    class_names = ['Class 0', 'Class 1']    
+    train_counts = np.bincount(y_train)
+    val_counts = np.bincount(y_val)
+    test_counts = np.bincount(y_test)
+    
+    print("Train set class distribution:")
+    for i, count in enumerate(train_counts):
+        print(f"{class_names[i]}: {count}")
+    
+    print("Validation set class distribution:")
+    for i, count in enumerate(val_counts):
+        print(f"{class_names[i]}: {count}")
+    
+    print("Test set class distribution:")
+    for i, count in enumerate(test_counts):
+        print(f"{class_names[i]}: {count}")
+
+def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_size=299, resume_training=True):
     # Load data
     images, labels, ages, qualities = load_data(data_dir, img_size)
     
+    # Balance classes
+    balanced_images, balanced_labels, balanced_ages, balanced_qualities = balance_classes(images, labels, ages, qualities)
+
     # Split the dataset with stratification
     X_train, X_temp, y_train, y_temp, age_train, age_temp, quality_train, quality_temp = train_test_split(
-        images, labels, ages, qualities, test_size=0.3, random_state=42, stratify=labels
+        balanced_images, balanced_labels, balanced_ages, balanced_qualities, test_size=0.3, random_state=42, stratify=balanced_labels
     )
     X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
         X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
-    
-    # Check class distribution
-    def check_class_distribution(y_train, y_val, y_test):
-        class_names = ['Class 0', 'Class 1']
-        train_counts = np.bincount(y_train)
-        val_counts = np.bincount(y_val)
-        test_counts = np.bincount(y_test)
-        
-        print("Train set class distribution:")
-        for i, count in enumerate(train_counts):
-            print(f"{class_names[i]}: {count}")
-        
-        print("Validation set class distribution:")
-        for i, count in enumerate(val_counts):
-            print(f"{class_names[i]}: {count}")
-        
-        print("Test set class distribution:")
-        for i, count in enumerate(test_counts):
-            print(f"{class_names[i]}: {count}")
     
     check_class_distribution(y_train, y_val, y_test)
     
@@ -180,9 +218,12 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
         shear_range=0.1,  # Shear intensity
         zoom_range=0.1,  # Zoom range
         horizontal_flip=True,  # Horizontal flip
-        fill_mode='nearest'  # Fill mode
+        fill_mode='nearest',  # Fill mode
+        brightness_range=[0.8, 1.2],  # Random brightness adjustment
+        channel_shift_range=10,  # Random channel shift
+        rescale=1./255  # Rescale pixel values to [0, 1]
     )
-    
+
     # Train the model with data augmentation
     history = model.fit(
         datagen.flow(X_train, y_train, batch_size=batch_size),
@@ -192,6 +233,7 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
         steps_per_epoch=len(X_train) // batch_size,
         callbacks=[csv_logger]
     )
+
     
     # Save the model
     model.save(model_path) 
@@ -201,14 +243,14 @@ def train_model_with_augmentation(data_dir, num_epochs=20, batch_size=32, img_si
 
 # 4. Evaluate Deep Learning Model
 def evaluate_deep_learning_model(X_test, y_test, model_path):
-    # Load the deep learning model
+    # Load model
     dl_model = tf.keras.models.load_model(model_path)
     
-    # Evaluate the deep学习 model
+    # Evaluate model
     test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
     print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
     
-    # Compute AUC for deep learning model
+    # Compute AUC for model
     probabilities_dl = dl_model.predict(X_test)
     if len(np.unique(y_test)) < 2:
         print("Only one class present in y_test. ROC AUC score is not defined in that case for the Deep Learning Model.")
@@ -361,18 +403,30 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
         print(f"Probability of Successful Pregnancy: {stats['probability']:.4f}")
         print("-" * 50)
 
+def show_samples(images, labels, num_samples=25):
+    fig, axes = plt.subplots(1, num_samples, figsize=(15, 3))
+    for i in range(num_samples):
+        axes[i].imshow(images[i])
+        axes[i].set_title(f"Label: {labels[i]}")
+        axes[i].axis('off')
+    plt.show()
+
 # Main function
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
 
     # Run dataset_prepration.py
-    with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
-        code = f.read()
-    exec(code)
+    # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
+    #     code = f.read()
+    # exec(code)
 
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir,resume_training=False)
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir)
     
+    # Check sample labels
+    # show_samples(X_train, y_train)
+    # show_samples(X_test, y_test)
+
     # Evaluate the deep learning model
     latest_model = max(glob.glob('inception_v1_model.h5'), key=os.path.getctime)
     evaluate_deep_learning_model(X_test, y_test, latest_model)
