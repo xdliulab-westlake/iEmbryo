@@ -113,11 +113,11 @@ def build_inception_v1(input_shape, num_classes):
     model = Model(inputs=inputs, outputs=outputs)
 
     # Compile the model with a learning rate schedule
-    initial_learning_rate = 0.0001
+    initial_learning_rate = 0.01
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         initial_learning_rate,
         decay_steps=10000,
-        decay_rate=0.96,
+        decay_rate=0.00004,
         staircase=True
     )
     optimizer = Adam(learning_rate=lr_schedule)
@@ -221,7 +221,6 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
         fill_mode='nearest',  # Fill mode
         brightness_range=[0.8, 1.2],  # Random brightness adjustment
         channel_shift_range=10,  # Random channel shift
-        rescale=1./255  # Rescale pixel values to [0, 1]
     )
 
     # Train the model with data augmentation
@@ -421,7 +420,7 @@ if __name__ == "__main__":
     # exec(code)
 
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir)
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, resume_training=False)
     
     # Check sample labels
     # show_samples(X_train, y_train)
