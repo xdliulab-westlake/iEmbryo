@@ -102,8 +102,8 @@ data_root = '../images'
 metadata = pd.read_csv("../../data_cleaning/output/merging_data.csv")
 
 # Extract embryo information
-columns_to_extract = [1, 8, 9, 44, 48]
-column_names = ['PatientID', 'BlastNumber', 'EmbryoQuality', 'Outcome', 'FetusNumber']
+columns_to_extract = [1, 8, 9, 36, 44, 48]
+column_names = ['PatientID', 'BlastNumber', 'EmbryoQuality', 'TransferNumber', 'Outcome', 'FetusNumber']
 
 embryo_info_2022 = pd.read_excel("../../embryo_info/embryo_info_2022.xls")
 embryo_info_2022 = embryo_info_2022.iloc[:, columns_to_extract]
@@ -118,10 +118,36 @@ embryo_info = pd.concat([embryo_info_2022, embryo_info_2023], ignore_index=True)
 # Remove embryos without outcome or can not grow into blastocyst 
 embryo_info = embryo_info.dropna(subset=['Outcome'])
 embryo_info = embryo_info[embryo_info['BlastNumber'] != 0]
-Pregnance_PatientID = embryo_info['PatientID'].values
+pregnance_PatientID = embryo_info['PatientID'].values.astype(str)
+print(embryo_info)
+
+# Add pregnance information
+metadata['EmbryoID'] = metadata['EmbryoID'].apply(replace_dots_with_underscores)
+pregnance_info = metadata[metadata['PatientID'].isin(pregnance_PatientID)]
+pregnance_Good = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer')]
+pregnance_Good = pregnance_Good[pregnance_Good['PatientID'].str.isdigit()]
+pregnance_Good['PatientID'] = pregnance_Good['PatientID'].astype(int)
+pregnance_Good = pregnance_Good.sort_values(by=['PatientID','EmbryoID']).reset_index(drop=True)
+pregnance_Good_unique = pregnance_Good.drop_duplicates(subset=['EmbryoID', 'EmbryoFate'])
+
+# Count the number of unique EmbryoIDs for each PatientID in pregnance_Good_unique
+embryo_info['PatientID'] = embryo_info['PatientID'].astype(int)
+pregnance_Good_unique['PatientID'] = pregnance_Good_unique['PatientID'].astype(int)
+embryo_count = pregnance_Good_unique.groupby('PatientID')['EmbryoID'].nunique().reset_index()
+embryo_count.columns = ['PatientID', 'EmbryoCount']
+merged_df = pd.merge(embryo_info, embryo_count, on='PatientID', how='left')
+consistent_patients = merged_df[merged_df['TransferNumber'] == merged_df['EmbryoCount']]['PatientID']
+
+# If consistent, merge FetusNumber into pregnance_Good_unique
+if not consistent_patients.empty:
+    consistent_embryo_info = merged_df[merged_df['PatientID'].isin(consistent_patients)]
+    result = pd.merge(pregnance_Good_unique, consistent_embryo_info[['PatientID', 'FetusNumber']], on='PatientID', how='left')
+else:
+    result = pregnance_Good_unique.copy()  # If no consistent rows, just copy the original data
+print("Merged DataFrame with FetusNumber:")
+print(result)
 
 # The ID of the good embryo and the bad embryo
-metadata['EmbryoID'] = metadata['EmbryoID'].apply(replace_dots_with_underscores)
 embryo_Good = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer') | (metadata['EmbryoFate'] == 'Freeze')]['EmbryoID'].values
 embryo_Poor = metadata[~((metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer') | (metadata['EmbryoFate'] == 'Freeze'))]['EmbryoID'].values
 
