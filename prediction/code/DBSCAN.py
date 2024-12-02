@@ -10,7 +10,7 @@ from sklearn.cluster import DBSCAN
 from time import time
 import matplotlib.pyplot as plt
 
-# 设置工作目录
+# Set work directory
 current_directory = os.getcwd()
 new_directory = '/Users/lzz/Documents/GitHub/IVF/prediction/code'
 os.chdir(new_directory)
