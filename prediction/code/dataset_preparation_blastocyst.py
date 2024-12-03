@@ -135,13 +135,13 @@ embryo_info['PatientID'] = embryo_info['PatientID'].astype(int)
 pregnance_Good_unique['PatientID'] = pregnance_Good_unique['PatientID'].astype(int)
 embryo_count = pregnance_Good_unique.groupby('PatientID')['EmbryoID'].nunique().reset_index()
 embryo_count.columns = ['PatientID', 'EmbryoCount']
-merged_df = pd.merge(embryo_info, embryo_count, on='PatientID', how='left')
+merged_df = pd.merge(embryo_info, embryo_count, on='PatientID', how='left') 
 consistent_patients = merged_df[merged_df['TransferNumber'] == merged_df['EmbryoCount']]['PatientID']
 
 # If consistent, merge FetusNumber into pregnance_Good_unique
 if not consistent_patients.empty:
     consistent_embryo_info = merged_df[merged_df['PatientID'].isin(consistent_patients)]
-    result = pd.merge(pregnance_Good_unique, consistent_embryo_info[['PatientID', 'FetusNumber']], on='PatientID', how='left')
+    result = pd.merge(pregnance_Good_unique, consistent_embryo_info[['PatientID', 'FetusNumber', 'EmbryoQuality']], on='PatientID', how='left')
 else:
     result = pregnance_Good_unique.copy()  # If no consistent rows, just copy the original data
 print("Merged DataFrame with FetusNumber:")
@@ -166,7 +166,7 @@ train_dir = create_directories(data_root)
 move_images(good_f0_image_paths, train_dir, 'class_1', metadata)
 move_images(poor_f0_image_paths, train_dir, 'class_0', metadata)
 
-# Output the counts
+# Output the counts 
 print(f"Number of good embryo images: {len(good_f0_image_paths)}")
 print(f"Number of poor embryo images: {len(poor_f0_image_paths)}")
 print(f"Number of good embryo blank images skipped: {good_skipped_images}")
