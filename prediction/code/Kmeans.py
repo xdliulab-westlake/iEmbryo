@@ -8,6 +8,8 @@ from keras.applications.vgg16 import VGG16, preprocess_input
 from keras.preprocessing import image
 from sklearn.cluster import KMeans
 from time import time
+from PIL import Image
+import matplotlib.pyplot as plt
 
 # current_directory = os.getcwd()
 # new_directory = '/Users/lzz/Documents/GitHub/IVF/prediction/code'
@@ -145,25 +147,25 @@ from time import time
 # print(f"Total elapsed time: {elapsed_time:.2f} seconds")
 
 
-
-# Set working directory
+# Set working directory and define absolute paths for image root directory and output directory
 current_directory = os.getcwd()
-new_directory = '/Users/lzz/Documents/GitHub/IVF/prediction/code'
+new_directory = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/code'
 os.chdir(new_directory)
 
-# Root directory containing all embryo folders
-data_root = '../images'
-output = '../output'
+# Define absolute paths for image root directory and output directory
+abs_data_root = os.path.abspath('../images/')  # Absolute path to the folder containing images
+abs_output = os.path.abspath('../output')
 
-# Get a list of all image paths
+# Get a list of all image paths using absolute paths
 all_image_paths = []
 
-# Traverse through all embryo folders and collect image paths
-for root, dirs, files in os.walk(data_root):
+# Traverse through all embryo folders and collect image paths using absolute paths
+for root, dirs, files in os.walk(abs_data_root):
     if root.endswith('/F0'):  # Only consider the last directory as 'F0'
         for file in files:
             if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-                all_image_paths.append(os.path.join(root, file))
+                abs_path = os.path.join(root, file)
+                all_image_paths.append(abs_path)
 
 # Shuffle the list of image paths
 random.shuffle(all_image_paths)
@@ -177,7 +179,7 @@ def extract_features(img_path):
     img = image.load_img(img_path, target_size=(224, 224))
     x = image.img_to_array(img)
     x = np.expand_dims(x, axis=0)
-    x = preprocess_input(x)
+    x = preprocess_input(x)  # Preprocess only for feature extraction
     
     # Extract features
     features = base_model.predict(x)
@@ -206,14 +208,15 @@ kmeans.fit(all_features_array)
 # Get the cluster labels for each sample
 all_labels = kmeans.labels_
 
-# Create a DataFrame for the cluster labels
+# Create a DataFrame for the cluster labels with absolute paths
 all_df = pd.DataFrame({
     'Image Name': [os.path.basename(path) for path in all_image_paths],
-    'Cluster Label': all_labels
+    'Cluster Label': all_labels,
+    'Absolute Path': all_image_paths  # Store absolute paths in the DataFrame
 })
 
 # Save the DataFrame to a CSV file
-output_all_dir = os.path.join(output, 'prediction_Kmeans_F0_all.csv')
+output_all_dir = os.path.join(abs_output, 'prediction_Kmeans_F0_all.csv')
 all_df.to_csv(output_all_dir, index=False)
 
 # End timing
@@ -221,4 +224,37 @@ end_time = time()
 elapsed_time = end_time - start_time
 
 print(f"Cluster labels saved to {output_all_dir}")
-print(f"Total elapsed time: {elapsed_time:.2f} seconds")    
+print(f"Total elapsed time: {elapsed_time:.2f} seconds")
+
+# Function to display images from a specific cluster using absolute paths without preprocessing
+def display_images_from_cluster(cluster_label, df, num_images=10):
+    """Display up to `num_images` from the specified cluster using absolute paths."""
+    
+    # Filter the DataFrame for the given cluster label
+    cluster_df = df[df['Cluster Label'] == cluster_label]
+    
+    # Select the first `num_images` entries or all if fewer than `num_images`
+    images_to_display = cluster_df.head(num_images)
+    
+    # Create a figure to display these images
+    fig = plt.figure(figsize=(15, 4))
+    for idx, (_, row) in enumerate(images_to_display.iterrows(), start=1):
+        img_path = row['Absolute Path']
+        try:
+            with Image.open(img_path).convert('RGB') as img:  # Ensure image is in RGB mode
+                # Resize the image for display purposes
+                img = img.resize((224, 224))  # Resize to match the model input size
+                ax = fig.add_subplot(1, num_images, idx)
+                ax.imshow(img)
+                ax.axis('off')
+                ax.set_title(f"Cluster {cluster_label}")
+        except Exception as e:
+            print(f"Failed to load image {img_path}: {e}")
+    plt.show()
+
+# Display images from each cluster using absolute paths from all_image_paths
+unique_clusters = all_df['Cluster Label'].unique()
+for cluster in unique_clusters:
+    display_images_from_cluster(cluster, all_df)
+
+print("Display completed.")
