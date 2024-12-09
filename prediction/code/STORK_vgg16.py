@@ -174,7 +174,7 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
     
     # Data augmentation
     datagen = ImageDataGenerator(
-        rotation_range=20,  # Random rotation
+        rotation_range=45,  # Random rotation
         width_shift_range=0.1,  # Width shift
         height_shift_range=0.1,  # Height shift
         shear_range=0.1,  # Shear intensity
@@ -379,7 +379,7 @@ if __name__ == "__main__":
     # exec(code)
 
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, resume_training=True)
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, num_epochs=10, resume_training=False)
     
     # Check sample labels
     show_samples(X_train, y_train)
