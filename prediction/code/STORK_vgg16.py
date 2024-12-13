@@ -8,12 +8,12 @@ import seaborn as sns
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from PIL import Image
-from tensorflow.keras.applications import VGG16
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dropout, Dense, Flatten
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import CSVLogger
+from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
 from sklearn.metrics import roc_curve
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import train_test_split, StratifiedKFold
@@ -29,22 +29,40 @@ def load_data(data_dir, img_size=224):
     
     for label, class_name in enumerate(['class_0', 'class_1']):
         class_dir = os.path.join(data_dir, 'train', class_name)
+        if not os.path.exists(class_dir):
+            print(f"Warning: Directory {class_dir} does not exist.")
+            continue
+        
         for img_file in os.listdir(class_dir):
+            if not img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                continue
+            
             img_path = os.path.join(class_dir, img_file)
-            img = Image.open(img_path).resize((img_size, img_size))
-            img_array = np.array(img) / 255.0  # Normalize
-            if img_array.ndim == 2:  # If grayscale, convert to RGB
-                img_array = np.stack((img_array,) * 3, axis=-1)
-            images.append(img_array)
-            labels.append(label)
             
-            # Add age information
-            age = int(re.search(r'_RUN\d+_(\d+)\.jpeg$', img_file).group(1))
-            ages.append(age)
-            
-            # Add quality information
-            quality = 1 if class_name == 'class_1' else 0  # Set quality based on class name
-            qualities.append(quality)
+            try:
+                # Load and resize image without normalizing
+                img = Image.open(img_path).resize((img_size, img_size))
+                img_array = np.array(img)  # Remove normalization (/ 255.0)
+                
+                if img_array.ndim == 2:  # If grayscale, convert to RGB
+                    img_array = np.stack((img_array,) * 3, axis=-1)
+                images.append(img_array)
+
+                # Extract age information from filename
+                match = re.search(r'_RUN\d+_(F-?\d+)_(\d+)\.\w+$', img_file)
+                if match:
+                    age = int(match.group(2))
+                    ages.append(age)
+                    
+                    # Add quality information based on class name
+                    quality = 1 if class_name == 'class_1' else 0
+                    qualities.append(quality)
+                    
+                    labels.append(label)
+                else:
+                    print(f"Warning: Could not parse age information from filename {img_file}.")
+            except Exception as e:
+                print(f"Error processing file {img_file}: {e}")
     
     images = np.array(images)
     labels = np.array(labels)
@@ -53,6 +71,7 @@ def load_data(data_dir, img_size=224):
     
     return images, labels, ages, qualities
 
+
 # Define the function to build a pre-trained VGG16 model with custom top layers
 def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2):
     # Load the VGG16 model without the top layers
@@ -60,7 +79,7 @@ def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2):
     
     # Freeze the convolutional base
     base_model.trainable = False
-    
+
     # Create the new model on top
     inputs = Input(shape=input_shape)
     x = base_model(inputs, training=False)
@@ -75,7 +94,7 @@ def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2):
     model = Model(inputs=inputs, outputs=outputs)
 
     # Compile the model with a learning rate schedule
-    initial_learning_rate = 0.001
+    initial_learning_rate = 0.00001
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         initial_learning_rate,
         decay_steps=10000,
@@ -130,7 +149,17 @@ def check_class_distribution(y_train, y_val, y_test):
     for i, count in enumerate(test_counts):
         print(f"{class_names[i]}: {count}")
 
+def check_gpu_availability():
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+    
+    # Print detailed information about each device
+    for device in tf.config.list_physical_devices():
+        print(device)
+
 def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_size=224, resume_training=True):
+    # Check GPU availability before training starts
+    check_gpu_availability()
+
     # Assuming load_data is defined elsewhere and loads images, labels, ages, qualities from data_dir
     images, labels, ages, qualities = load_data(data_dir, img_size)
     
@@ -174,7 +203,8 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
     
     # Data augmentation
     datagen = ImageDataGenerator(
-        rotation_range=45,  # Random rotation
+        preprocessing_function=preprocess_input,
+        rotation_range=20,  # Random rotation
         width_shift_range=0.1,  # Width shift
         height_shift_range=0.1,  # Height shift
         shear_range=0.1,  # Shear intensity
@@ -195,8 +225,13 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
         callbacks=[csv_logger]
     )
 
+    # Check GPU usage after training completes
+    check_gpu_availability()
+    
     # Save the model
     model.save(model_path)
+    model.summary()
+
     print("VGG16 Model saved as", model_path)
     
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
@@ -371,19 +406,44 @@ def show_samples(images, labels, num_samples=25):
 
 # Main function
 if __name__ == "__main__":
-    data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
+    data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images/selected_images'
 
     # Run dataset_prepration.py
     # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
     #     code = f.read()
     # exec(code)
 
+    # Kmeans.py
+
+    # remove black images    
+    csv_path = "/Users/lzz/Documents/GitHub/IVF_AI/prediction/output/prediction_Kmeans_F0_all.csv"
+    df = pd.read_csv(csv_path)
+
+    black_images = df[df['Cluster Label'] == 1]
+    filtered_df = df[df['Cluster Label'] != 1]
+
+    output_filtered_csv_path = "/Users/lzz/Documents/GitHub/IVF_AI/prediction/output/prediction_Kmeans_F0_filtered.csv"
+    filtered_df.to_csv(output_filtered_csv_path, index=False)
+    print(f"Filtered CSV saved to {output_filtered_csv_path}")
+
+    for index, row in black_images.iterrows():
+        img_path = row['Absolute Path']
+        if os.path.exists(img_path):
+            try:
+                os.remove(img_path)
+            except Exception as e:
+                print(f"Failed to remove image {img_path}: {e}")
+        else:
+            print(f"Image not found: {img_path}")
+
+    print("Black images removal completed.")
+
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, num_epochs=10, resume_training=False)
-    
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, num_epochs=1000, resume_training=True)
+
     # Check sample labels
-    show_samples(X_train, y_train)
-    show_samples(X_test, y_test)
+    # show_samples(X_train, y_train)
+    # show_samples(X_test, y_test)
 
     # Evaluate the deep learning model
     latest_model = max(glob.glob('vgg16_model.h5'), key=os.path.getctime)
