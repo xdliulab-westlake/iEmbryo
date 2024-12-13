@@ -80,7 +80,7 @@ if __name__ == "__main__":
     os.chdir(new_directory)
 
     # Define absolute paths for image root directory and output directory
-    abs_data_root = os.path.abspath('../images/')  # Absolute path to the folder containing images
+    abs_data_root = os.path.abspath('../images/selected_images/train')  # Absolute path to the folder containing images
     abs_output = os.path.abspath('../output')
 
     # Ensure output directories exist
@@ -91,11 +91,10 @@ if __name__ == "__main__":
 
     # Traverse through all embryo folders and collect image paths using absolute paths
     for root, dirs, files in os.walk(abs_data_root):
-        if root.endswith('/F0'):  # Only consider the last directory as 'F0'
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-                    abs_path = os.path.join(root, file)
-                    all_image_paths.append(abs_path)
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                abs_path = os.path.join(root, file)
+                all_image_paths.append(abs_path)
 
     # Shuffle the list of image paths
     random.shuffle(all_image_paths)
