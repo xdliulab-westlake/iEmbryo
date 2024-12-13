@@ -29,34 +29,48 @@ def find_directories_with_embryos(data_root, embryo_ids):
                 matching_dirs.append(os.path.join(root, dir_name))
     return matching_dirs
 
-# Function to find images in F0 directories
+# Function to find images in F.. directories
 def find_images_in_f0_directories(directories):
-    image_paths = []
+    image_info = []
     skipped_images = 0
+    
     for dir_path in directories:
-        images = []
+        # Dictionary to hold images grouped by F.. directory
+        f_dirs_images = {}
+        
+        # Walk through the directory and group images by their parent F.. directory
         for root, dirs, files in os.walk(dir_path):
-            if root.endswith('/F0'):  # Only consider the last directory as 'F0'
-                for file in files:  
+            parent_dir_name = os.path.basename(root)
+            if parent_dir_name.startswith('F'):
+                if parent_dir_name not in f_dirs_images:
+                    f_dirs_images[parent_dir_name] = []
+                
+                for file in files:
                     if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
                         match = re.search(r'RUN(\d+)', file)
                         if match:
                             run_number = int(match.group(1))
-                            images.append((os.path.join(root, file), run_number))
+                            f_dirs_images[parent_dir_name].append({
+                                'path': os.path.join(root, file),
+                                'run_number': run_number,
+                                'parent_dir': parent_dir_name
+                            })
         
-        if images:
-            # Sort images by RUN number in descending order
-            images.sort(key=lambda x: x[1], reverse=True)
-            
-            # Find the first non-empty image
-            for img_path, run_number in images:
-                if not is_empty(img_path):
-                    image_paths.append(img_path)
-                    break
-                else:
-                    skipped_images += 1
+        # Process each F.. directory separately
+        for f_dir, images in f_dirs_images.items():
+            if images:
+                # Sort images by RUN number in descending order
+                images.sort(key=lambda x: x['run_number'], reverse=True)
+                
+                # Find the first non-empty image from this F.. directory
+                for img_data in images:
+                    if not is_empty(img_data['path']):
+                        image_info.append(img_data)
+                        break  # Only one image per F.. directory
+                    else:
+                        skipped_images += 1
     
-    return image_paths, skipped_images
+    return image_info, skipped_images
 
 # Function to create necessary directories
 def create_directories(data_dir):
@@ -72,9 +86,12 @@ def create_directories(data_dir):
     return train_dir
 
 # Function to move images to the appropriate directories with age information
-def move_images(image_paths, target_dir, class_label, metadata):
-    for src_path in image_paths:
+def move_images(image_info, target_dir, class_label, metadata):
+    for img_data in image_info:
+        src_path = img_data['path']
+        parent_dir_name = img_data['parent_dir']
         filename = os.path.basename(src_path)
+        
         # Extract embryo_id considering the additional 'images' directory
         embryo_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(src_path))))
 
@@ -84,13 +101,22 @@ def move_images(image_paths, target_dir, class_label, metadata):
             continue
         
         # Get the age information from metadata
-        age = int(metadata[metadata['EmbryoID'] == embryo_id]['Age'].values[0])
+        try:
+            age = int(metadata[metadata['EmbryoID'] == embryo_id]['Age'].values[0])
+        except IndexError:
+            print(f"Warning: Age information not found for Embryo ID {embryo_id}.")
+            continue
         
-        # Append age information to the filename
+        # Append F.. information and then age information to the filename
         base_name, ext = os.path.splitext(filename)
-        new_filename = f"{base_name}_{age}{ext}"
+        new_filename = f"{base_name}_{parent_dir_name}_{age}{ext}"
         dst_path = os.path.join(target_dir, class_label, new_filename)
-        shutil.copy(src_path, dst_path)
+
+        try:
+            shutil.copy(src_path, dst_path)
+            print(f"Copied {src_path} to {dst_path}")
+        except Exception as e:
+            print(f"Failed to copy {src_path} to {dst_path}: {e}")
 
 # Set working directory
 current_directory = os.getcwd()
@@ -98,7 +124,7 @@ new_directory = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/code'
 os.chdir(new_directory)
 
 # Root directory containing all embryo folders
-data_root = '../images'
+data_root = '../images/selected_images'
 metadata = pd.read_csv("../../data_cleaning/output/merging_data.csv")
 
 # Extract embryo information
@@ -119,6 +145,7 @@ embryo_info = pd.concat([embryo_info_2022, embryo_info_2023], ignore_index=True)
 embryo_info = embryo_info.dropna(subset=['Outcome'])
 embryo_info = embryo_info[embryo_info['BlastNumber'] != 0]
 pregnance_PatientID = embryo_info['PatientID'].values.astype(str)
+print("Embryo Info after filtering:")
 print(embryo_info)
 
 # Add pregnance information
@@ -155,14 +182,14 @@ embryo_Poor = metadata[~((metadata['EmbryoFate'] == 'Transfer') | (metadata['Emb
 good_embryo_dirs = find_directories_with_embryos(data_root, embryo_Good)
 poor_embryo_dirs = find_directories_with_embryos(data_root, embryo_Poor)
 
-# Find images in F0 directories for good and poor embryos
+# Find images in F.. directories for good and poor embryos
 good_f0_image_paths, good_skipped_images = find_images_in_f0_directories(good_embryo_dirs)
 poor_f0_image_paths, poor_skipped_images = find_images_in_f0_directories(poor_embryo_dirs)
 
 # Create necessary directories
 train_dir = create_directories(data_root)
 
-# Move images to the appropriate directories with age information
+# Move images to the appropriate directories with age and F.. information
 move_images(good_f0_image_paths, train_dir, 'class_1', metadata)
 move_images(poor_f0_image_paths, train_dir, 'class_0', metadata)
 
@@ -171,4 +198,4 @@ print(f"Number of good embryo images: {len(good_f0_image_paths)}")
 print(f"Number of poor embryo images: {len(poor_f0_image_paths)}")
 print(f"Number of good embryo blank images skipped: {good_skipped_images}")
 print(f"Number of poor embryo blank images skipped: {poor_skipped_images}")
-print("All images have been moved to the train directory with age information appended.")
+print("All images have been moved to the train directory with F.. and age information appended.")
