@@ -9,3 +9,4 @@
 !api/code/*.js
 .Rproj.user
 ref_code/
+prediction/code/test.ipynb
