@@ -94,14 +94,15 @@ def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2):
     model = Model(inputs=inputs, outputs=outputs)
 
     # Compile the model with a learning rate schedule
-    initial_learning_rate = 0.00001
+    initial_learning_rate = 0.0001
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         initial_learning_rate,
         decay_steps=10000,
         decay_rate=0.9,
         staircase=True
     )
-    optimizer = Adam(learning_rate=lr_schedule)
+    optimizer = Adam(learning_rate=lr_schedule,
+                     weight_decay=1e-5)
     
     model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
