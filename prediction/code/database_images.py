@@ -101,7 +101,7 @@ if __name__ == '__main__':
     pdb_files = list(Path(db_root_dir).rglob("*.pdb"))
 
     # Optionally define the maximum number of workers (threads)
-    max_workers = None  # Set this to an integer value if you want to specify the number of threads
+    max_workers = None  # Set this to an integer value if you want to specify the number of threads 
 
     # Process each .pdb file
     for db_file in pdb_files:
