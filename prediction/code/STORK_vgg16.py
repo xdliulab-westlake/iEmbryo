@@ -72,7 +72,7 @@ def load_data(data_dir, img_size=224):
     return images, labels, ages, qualities
 
 
-# Define the function to build a pre-trained VGG16 model with custom top layers
+# 2. Build a pre-trained VGG16 model with custom top layers
 def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2):
     # Load the VGG16 model without the top layers
     base_model = VGG16(weights='imagenet', include_top=False, input_shape=input_shape)
@@ -150,6 +150,7 @@ def check_class_distribution(y_train, y_val, y_test):
     for i, count in enumerate(test_counts):
         print(f"{class_names[i]}: {count}")
 
+# check gpu availability
 def check_gpu_availability():
     print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
     
@@ -157,7 +158,8 @@ def check_gpu_availability():
     for device in tf.config.list_physical_devices():
         print(device)
 
-def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_size=224, resume_training=True):
+# 3. Training the model with augmentation
+def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_size=224, resume_training=True, workers=20, max_queue_size = 50):
     # Check GPU availability before training starts
     check_gpu_availability()
 
@@ -216,9 +218,16 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
         channel_shift_range=10,  # Random channel shift
     )
 
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_dataset = train_dataset.shuffle(buffer_size=1024).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
     # Train the model with data augmentation
     history = model.fit(
         datagen.flow(X_train, y_train, batch_size=batch_size),
+        workers = workers,
+        max_queue_size = max_queue_size,
         validation_data=(X_val, y_val),
         epochs=num_epochs,
         initial_epoch=initial_epoch,
@@ -440,7 +449,10 @@ if __name__ == "__main__":
     print("Black images removal completed.")
 
     # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, num_epochs=1000, resume_training=True)
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
+        data_dir, num_epochs=1000, resume_training=True, 
+        batch_size=64, workers = 20, max_queue_size = 50
+    )
 
     # Check sample labels
     # show_samples(X_train, y_train)
