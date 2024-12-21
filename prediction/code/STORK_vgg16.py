@@ -20,12 +20,6 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 
-# Define the strategy for multi-GPU training
-strategy = tf.distribute.MirroredStrategy()
-num_gpus = len(tf.config.list_physical_devices('GPU'))
-batch_size_per_replica = 128  # Original batch size per GPU
-global_batch_size = batch_size_per_replica * num_gpus
-
 # 1. Data Loading and Preprocessing
 def load_data(data_dir, img_size=224):
     images = []
@@ -189,24 +183,6 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
     model_path = 'vgg16_model.h5'
     initial_epoch = 0
     
-    if resume_training and os.path.exists(model_path):
-        print("Loading existing model from", model_path)
-        model = tf.keras.models.load_model(model_path)
-        
-        # Try to extract the epoch number from the training log
-        if os.path.exists('training.log'):
-            with open('training.log', 'r') as f:
-                lines = f.readlines()
-                if lines:
-                    last_line = lines[-1]
-                    initial_epoch = int(last_line.split(',')[0]) + 1
-        else:
-            print("Training log not found. Setting initial epoch to 0.")
-            initial_epoch = 0
-    else:
-        print("Building new model from scratch.")
-        model = build_vgg16_model((img_size, img_size, 3), num_classes=2)
-    
     # Define CSV logger to log training history
     csv_logger = CSVLogger('training.log', append=True)
     
@@ -230,6 +206,25 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
     )
 
     val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
+
+    with strategy.scope():
+        model = build_vgg16_model((img_size, img_size, 3), num_classes=2)
+
+        if resume_training and os.path.exists(model_path):
+            print("Loading existing model from", model_path)
+            model = tf.keras.models.load_model(model_path)
+            
+            if os.path.exists('training.log'):
+                with open('training.log', 'r') as f:
+                    lines = f.readlines()
+                    if lines:
+                        last_line = lines[-1]
+                        initial_epoch = int(last_line.split(',')[0]) + 1
+            else:
+                print("Training log not found. Setting initial epoch to 0.")
+                initial_epoch = 0
+        else:
+            print("Building new model from scratch.")
 
     # Train the model with data augmentation
     history = model.fit(
@@ -259,11 +254,11 @@ def evaluate_deep_learning_model(X_test, y_test, model_path):
     test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test)).batch(global_batch_size)
 
     # Evaluate model
-    test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
+    test_loss, test_accuracy = dl_model.evaluate(test_dataset)
     print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
     
     # Compute AUC for model
-    probabilities_dl = dl_model.predict(X_test)
+    probabilities_dl = dl_model.predict(test_dataset)
     if len(np.unique(y_test)) < 2:
         print("Only one class present in y_test. ROC AUC score is not defined in that case for the Deep Learning Model.")
     else:
@@ -424,6 +419,12 @@ def show_samples(images, labels, num_samples=25):
 # Main function
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images/selected_images'
+    
+    # Define the strategy for multi-GPU training
+    strategy = tf.distribute.MirroredStrategy()
+    num_gpus = len(tf.config.list_physical_devices('GPU'))
+    batch_size_per_replica = 128  # Original batch size per GPU
+    global_batch_size = batch_size_per_replica * num_gpus
 
     # Run dataset_prepration.py
     # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
