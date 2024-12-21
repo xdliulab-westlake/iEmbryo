@@ -20,6 +20,12 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 
+# Define the strategy for multi-GPU training
+strategy = tf.distribute.MirroredStrategy()
+num_gpus = len(tf.config.list_physical_devices('GPU'))
+batch_size_per_replica = 128  # Original batch size per GPU
+global_batch_size = batch_size_per_replica * num_gpus
+
 # 1. Data Loading and Preprocessing
 def load_data(data_dir, img_size=224):
     images = []
@@ -159,7 +165,7 @@ def check_gpu_availability():
         print(device)
 
 # 3. Training the model with augmentation
-def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_size=224, resume_training=True, workers=20, max_queue_size = 50):
+def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True, workers=30, max_queue_size = 60):
     # Check GPU availability before training starts
     check_gpu_availability()
 
@@ -204,37 +210,35 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
     # Define CSV logger to log training history
     csv_logger = CSVLogger('training.log', append=True)
     
-    # Data augmentation
-    datagen = ImageDataGenerator(
-        preprocessing_function=preprocess_input,
-        rotation_range=20,  # Random rotation
-        width_shift_range=0.1,  # Width shift
-        height_shift_range=0.1,  # Height shift
-        shear_range=0.1,  # Shear intensity
-        zoom_range=0.1,  # Zoom range
-        horizontal_flip=True,  # Horizontal flip
-        fill_mode='nearest',  # Fill mode
-        brightness_range=[0.8, 1.2],  # Random brightness adjustment
-        channel_shift_range=10,  # Random channel shift
+    # Data augmentation using tf.image operations
+    def augment(image, label):
+        image = tf.image.random_flip_left_right(image)
+        image = tf.image.random_brightness(image, max_delta=0.2)
+        image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+        image = tf.image.resize_with_crop_or_pad(image, img_size + 20, img_size + 20)  # Add padding
+        image = tf.image.random_crop(image, [img_size, img_size, 3])  # Random crop back to original size
+        return image, label
+
+    # Create datasets with efficient data pipeline
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_dataset = (
+        train_dataset
+        .shuffle(buffer_size=1024)
+        .map(augment, num_parallel_calls=tf.data.AUTOTUNE)  # Apply data augmentation
+        .batch(global_batch_size)
+        .prefetch(tf.data.AUTOTUNE)
     )
 
-    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    train_dataset = train_dataset.shuffle(buffer_size=1024).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-    val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Train the model with data augmentation
     history = model.fit(
-        datagen.flow(X_train, y_train, batch_size=batch_size),
-        workers = workers,
-        max_queue_size = max_queue_size,
-        validation_data=(X_val, y_val),
+        train_dataset,
+        validation_data=val_dataset,
         epochs=num_epochs,
         initial_epoch=initial_epoch,
-        steps_per_epoch=len(X_train) // batch_size,
         callbacks=[csv_logger]
     )
-
     # Check GPU usage after training completes
     check_gpu_availability()
     
@@ -251,6 +255,9 @@ def evaluate_deep_learning_model(X_test, y_test, model_path):
     # Load model
     dl_model = tf.keras.models.load_model(model_path)
     
+    # Ensure evaluation is done using the same global batch size as training
+    test_dataset = tf.data.Dataset.from_tensor_slices((X_test, y_test)).batch(global_batch_size)
+
     # Evaluate model
     test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
     print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
@@ -451,7 +458,7 @@ if __name__ == "__main__":
     # Train the deep learning model with data augmentation
     X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
         data_dir, num_epochs=1000, resume_training=True, 
-        batch_size=64, workers = 20, max_queue_size = 50
+        global_batch_size=global_batch_size, workers = 30, max_queue_size = 60
     )
 
     # Check sample labels
