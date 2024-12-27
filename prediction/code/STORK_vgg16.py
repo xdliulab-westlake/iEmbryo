@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import glob
 import joblib
 import numpy as np
@@ -159,7 +160,9 @@ def check_gpu_availability():
         print(device)
 
 # 3. Training the model with augmentation
-def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True, workers=30, max_queue_size = 60):
+def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True):
+    start_time = time.time()
+    
     # Check GPU availability before training starts
     check_gpu_availability()
 
@@ -213,7 +216,7 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
         if resume_training and os.path.exists(model_path):
             print("Loading existing model from", model_path)
             model = tf.keras.models.load_model(model_path)
-            
+             
             if os.path.exists('training.log'):
                 with open('training.log', 'r') as f:
                     lines = f.readlines()
@@ -237,6 +240,11 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
     # Check GPU usage after training completes
     check_gpu_availability()
     
+    # Calculate the time consumed
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Total training time: {elapsed_time:.2f} seconds")
+
     # Save the model
     model.save(model_path)
     model.summary()
@@ -377,7 +385,7 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
     plt.show()
     
     # Calculate and display the probability of successful pregnancy for each leaf node
-    def calculate_leaf_probabilities(dt_model, X_test_combined, y_test):
+    def calculate_leaf_probabilities(dt_model, X_test_combined, y_test):    
         # Predict the leaf nodes for the test data
         leaf_nodes = dt_model.apply(X_test_combined)
         
@@ -459,7 +467,7 @@ if __name__ == "__main__":
     # Train the deep learning model with data augmentation
     X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
         data_dir, num_epochs=1000, resume_training=True, 
-        global_batch_size=global_batch_size, workers = 30, max_queue_size = 60
+        global_batch_size=global_batch_size
     )
 
     # Check sample labels
