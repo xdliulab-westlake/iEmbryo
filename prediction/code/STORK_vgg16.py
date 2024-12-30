@@ -2,6 +2,7 @@ import os
 import re
 import time
 import glob
+import copy
 import cv2
 import joblib
 import numpy as np
@@ -14,13 +15,19 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dropout, Dense, Flatten
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import CSVLogger
+from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint
 from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
 from sklearn.metrics import roc_curve
 from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+
+# Define the strategy for multi-GPU training
+strategy = tf.distribute.MirroredStrategy()
+num_gpus = len(tf.config.list_physical_devices('GPU'))
+batch_size_per_replica = 128  # Original batch size per GPU
+global_batch_size = batch_size_per_replica * num_gpus
 
 # 1. Data Loading and Preprocessing
 def load_data(data_dir, img_size=224):
@@ -49,41 +56,6 @@ def load_data(data_dir, img_size=224):
                 if img_array.ndim == 2:  # If grayscale, convert to RGB
                     img_array = np.stack((img_array,) * 3, axis=-1)
                 
-                # Convert to grayscale for circle detection
-                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-                
-                # Apply Gaussian Blur to reduce noise and improve edge detection
-                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-                
-                # Use Hough Circle Transform to detect circles
-                circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=100,
-                                           param1=50, param2=30, minRadius=0, maxRadius=0)
-                
-                # Only proceed if at least one circle was found
-                if circles is not None:
-                    # Convert the (x, y, r) circles into integers
-                    circles = np.round(circles[0, :]).astype("int")
-                    
-                    # Sort circles by radius in descending order and select the largest one
-                    circles = sorted(circles, key=lambda x: x[2], reverse=True)
-                    largest_circle = circles[0]
-                    
-                    # Draw only the largest circle on the original image
-                    hough_image = img_array.copy()
-                    cv2.circle(hough_image, center=(largest_circle[0], largest_circle[1]), 
-                               radius=largest_circle[2], color=(0, 255, 0), thickness=2)
-                    
-                    # Optionally mask out everything outside of the largest circle
-                    mask = np.zeros_like(hough_image)
-                    cv2.circle(mask, center=(largest_circle[0], largest_circle[1]), 
-                               radius=largest_circle[2], color=(255, 255, 255), thickness=-1)
-                    hough_image = cv2.bitwise_and(hough_image, mask)
-
-                    images.append(hough_image)
-                else:
-                    print(f"Warning: Could not find any circles in file {img_file}.")
-                    continue
-
                 # Extract age information from filename
                 match = re.search(r'_RUN\d+_(F-?\d+)_(\d+)\.\w+$', img_file)
                 if match:
@@ -97,6 +69,10 @@ def load_data(data_dir, img_size=224):
                     labels.append(label)
                 else:
                     print(f"Warning: Could not parse age information from filename {img_file}.")
+                    continue
+                
+                images.append(img_array)
+                
             except Exception as e:
                 print(f"Error processing file {img_file}: {e}")
     
@@ -107,6 +83,21 @@ def load_data(data_dir, img_size=224):
     
     return images, labels, ages, qualities
 
+def save_processed_image(image, output_dir, original_filename):
+    """
+    Saves a processed image to the specified output directory.
+    """
+    # Ensure the output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Generate new filename and path
+    output_filename = f'processed_{original_filename}'
+    output_path = os.path.join(output_dir, output_filename)
+    
+    # Convert numpy array back to PIL Image and save it
+    processed_img = Image.fromarray(image)
+    processed_img.save(output_path)
 
 # 2. Build a pre-trained VGG16 model with custom top layers
 def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2):
@@ -195,14 +186,11 @@ def check_gpu_availability():
         print(device)
 
 # 3. Training the model with augmentation
-def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True):
+def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True):
     start_time = time.time()
     
     # Check GPU availability before training starts
     check_gpu_availability()
-
-    # Assuming load_data is defined elsewhere and loads images, labels, ages, qualities from data_dir
-    images, labels, ages, qualities = load_data(data_dir, img_size)
     
     # Balance classes
     balanced_images, balanced_labels, balanced_ages, balanced_qualities = balance_classes(images, labels, ages, qualities)
@@ -224,7 +212,15 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
     # Define CSV logger to log training history
     csv_logger = CSVLogger('training.log', append=True)
     
-    # Data augmentation using tf.image operations
+    # Define checkpoint callback to save model at each epoch
+    checkpoint_callback = ModelCheckpoint(
+        filepath=os.path.join('vgg16_model.h5'),
+        save_weights_only=False,
+        monitor='val_loss',
+        mode='min',
+        save_best_only=False  # Save all checkpoints
+    )
+
     def augment(image, label):
         image = tf.image.random_flip_left_right(image)
         image = tf.image.random_brightness(image, max_delta=0.2)
@@ -233,7 +229,7 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
         image = tf.image.random_crop(image, [img_size, img_size, 3])  # Random crop back to original size
         return image, label
 
-    # Create datasets with efficient data pipeline
+    # Data augmentation using tf.image operations
     train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
     train_dataset = (
         train_dataset
@@ -244,6 +240,8 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
     )
 
     val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
+
+    strategy = tf.distribute.get_strategy()  # Use default strategy
 
     with strategy.scope():
         model = build_vgg16_model((img_size, img_size, 3), num_classes=2)
@@ -264,26 +262,33 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
         else:
             print("Building new model from scratch.")
 
-    # Train the model with data augmentation
-    history = model.fit(
-        train_dataset,
-        validation_data=val_dataset,
-        epochs=num_epochs,
-        initial_epoch=initial_epoch,
-        callbacks=[csv_logger]
-    )
-    
-    # Calculate the time consumed
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Total training time: {elapsed_time:.2f} seconds")
+    try:
+        # Train the model with data augmentation
+        history = model.fit(
+            train_dataset,
+            validation_data=val_dataset,
+            epochs=num_epochs,
+            initial_epoch=initial_epoch,
+            callbacks=[csv_logger, checkpoint_callback]
+        )
+        
+        # Calculate the time consumed
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"Total training time: {elapsed_time:.2f} seconds")
 
-    # Save the model
-    model.save(model_path)
-    model.summary()
+        # Save the final model
+        model.save(model_path)
+        model.summary()
 
-    print("VGG16 Model saved as", model_path)
-    
+        print("VGG16 Model saved as", model_path)
+        
+    except Exception as e:
+        print(f"Training was interrupted due to an error: {e}")
+        # Optionally save the model in case of interruption
+        model.save('vgg16_model.h5')
+        print("Model saved at interruption point.")
+
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
 
 # 4. Evaluate Deep Learning Model
@@ -457,15 +462,10 @@ def show_samples(images, labels, num_samples=25):
         axes[i].axis('off')
     plt.show()
 
+
 # Main function
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images/selected_images'
-    
-    # Define the strategy for multi-GPU training
-    strategy = tf.distribute.MirroredStrategy()
-    num_gpus = len(tf.config.list_physical_devices('GPU'))
-    batch_size_per_replica = 128  # Original batch size per GPU
-    global_batch_size = batch_size_per_replica * num_gpus
 
     # Run dataset_prepration.py
     # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
@@ -497,10 +497,19 @@ if __name__ == "__main__":
 
     print("Black images removal completed.")
 
-    # Train the deep learning model with data augmentation
+    # load data
+    images, labels, ages, qualities = load_data(data_dir, img_size=224)
+
+    # for idx, img_array in enumerate(images):
+    #     save_processed_image(img_array, "./output_directory", f'image_{idx}.jpg')
+
+    # Train the model 
     X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
-        data_dir, num_epochs=2000, resume_training=True, 
-        global_batch_size=global_batch_size
+        images, labels, ages, qualities, 
+        num_epochs=1000, 
+        global_batch_size=global_batch_size, 
+        img_size=224, 
+        resume_training=False
     )
 
     # Check sample labels
