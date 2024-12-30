@@ -2,6 +2,7 @@ import os
 import re
 import time
 import glob
+import cv2
 import joblib
 import numpy as np
 import pandas as pd
@@ -47,7 +48,41 @@ def load_data(data_dir, img_size=224):
                 
                 if img_array.ndim == 2:  # If grayscale, convert to RGB
                     img_array = np.stack((img_array,) * 3, axis=-1)
-                images.append(img_array)
+                
+                # Convert to grayscale for circle detection
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                
+                # Apply Gaussian Blur to reduce noise and improve edge detection
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                
+                # Use Hough Circle Transform to detect circles
+                circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=100,
+                                           param1=50, param2=30, minRadius=0, maxRadius=0)
+                
+                # Only proceed if at least one circle was found
+                if circles is not None:
+                    # Convert the (x, y, r) circles into integers
+                    circles = np.round(circles[0, :]).astype("int")
+                    
+                    # Sort circles by radius in descending order and select the largest one
+                    circles = sorted(circles, key=lambda x: x[2], reverse=True)
+                    largest_circle = circles[0]
+                    
+                    # Draw only the largest circle on the original image
+                    hough_image = img_array.copy()
+                    cv2.circle(hough_image, center=(largest_circle[0], largest_circle[1]), 
+                               radius=largest_circle[2], color=(0, 255, 0), thickness=2)
+                    
+                    # Optionally mask out everything outside of the largest circle
+                    mask = np.zeros_like(hough_image)
+                    cv2.circle(mask, center=(largest_circle[0], largest_circle[1]), 
+                               radius=largest_circle[2], color=(255, 255, 255), thickness=-1)
+                    hough_image = cv2.bitwise_and(hough_image, mask)
+
+                    images.append(hough_image)
+                else:
+                    print(f"Warning: Could not find any circles in file {img_file}.")
+                    continue
 
                 # Extract age information from filename
                 match = re.search(r'_RUN\d+_(F-?\d+)_(\d+)\.\w+$', img_file)
@@ -237,8 +272,6 @@ def train_model_with_augmentation(data_dir, num_epochs=3, global_batch_size=None
         initial_epoch=initial_epoch,
         callbacks=[csv_logger]
     )
-    # Check GPU usage after training completes
-    check_gpu_availability()
     
     # Calculate the time consumed
     end_time = time.time()
@@ -466,7 +499,7 @@ if __name__ == "__main__":
 
     # Train the deep learning model with data augmentation
     X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
-        data_dir, num_epochs=1000, resume_training=True, 
+        data_dir, num_epochs=2000, resume_training=True, 
         global_batch_size=global_batch_size
     )
 
