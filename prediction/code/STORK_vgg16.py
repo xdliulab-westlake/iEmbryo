@@ -3,8 +3,8 @@ import re
 import time
 import glob
 import copy
-import cv2
 import joblib
+import absl.logging
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -23,11 +23,8 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
 
-# Define the strategy for multi-GPU training
-strategy = tf.distribute.MirroredStrategy()
-num_gpus = len(tf.config.list_physical_devices('GPU'))
-batch_size_per_replica = 128  # Original batch size per GPU
-global_batch_size = batch_size_per_replica * num_gpus
+# suppress the warning
+absl.logging.set_verbosity(absl.logging.ERROR)
 
 # 1. Data Loading and Preprocessing
 def load_data(data_dir, img_size=224):
@@ -187,9 +184,12 @@ def check_gpu_availability():
 
 # 3. Training the model with augmentation
 def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True):
+    # Set strategy for distributed training
+    strategy = tf.distribute.MirroredStrategy()
+    
     start_time = time.time()
     
-    # Check GPU availability before training starts
+    # Check GPU availability
     check_gpu_availability()
     
     # Balance classes
@@ -203,22 +203,21 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
         X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
     
-    check_class_distribution(y_train, y_val, y_test)
+    # Check class distribution
+    print(f"Class distribution in train: {y_train.sum()}, Validation: {y_val.sum()}, Test: {y_test.sum()}")
     
-    # Define the model
-    model_path = 'vgg16_model.h5'
+    # Define the model path and callbacks
+    model_path = 'vgg16_best_model'  # Save only the best model based on validation loss
     initial_epoch = 0
-    
-    # Define CSV logger to log training history
     csv_logger = CSVLogger('training.log', append=True)
     
-    # Define checkpoint callback to save model at each epoch
+    # Define checkpoint callback to save only the best model (based on validation loss)
     checkpoint_callback = ModelCheckpoint(
-        filepath=os.path.join('vgg16_model.h5'),
-        save_weights_only=False,
-        monitor='val_loss',
-        mode='min',
-        save_best_only=False  # Save all checkpoints
+        filepath=model_path,
+        save_weights_only=False,  # Save the full model (architecture + weights)
+        monitor='val_loss',  # Monitor validation loss
+        mode='min',  # Save when validation loss is minimized
+        save_best_only=True  # Save only the best model
     )
 
     def augment(image, label):
@@ -241,8 +240,6 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
 
     val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
 
-    strategy = tf.distribute.get_strategy()  # Use default strategy
-
     with strategy.scope():
         model = build_vgg16_model((img_size, img_size, 3), num_classes=2)
 
@@ -261,33 +258,27 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
                 initial_epoch = 0
         else:
             print("Building new model from scratch.")
-
-    try:
+        
         # Train the model with data augmentation
-        history = model.fit(
-            train_dataset,
-            validation_data=val_dataset,
-            epochs=num_epochs,
-            initial_epoch=initial_epoch,
-            callbacks=[csv_logger, checkpoint_callback]
-        )
-        
-        # Calculate the time consumed
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"Total training time: {elapsed_time:.2f} seconds")
+        try:
+            history = model.fit(
+                train_dataset,
+                validation_data=val_dataset,
+                epochs=num_epochs,
+                initial_epoch=initial_epoch,
+                callbacks=[csv_logger, checkpoint_callback]
+            )
 
-        # Save the final model
-        model.save(model_path)
-        model.summary()
+            # Calculate the time consumed
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            print(f"Total training time: {elapsed_time:.2f} seconds")
 
-        print("VGG16 Model saved as", model_path)
-        
-    except Exception as e:
-        print(f"Training was interrupted due to an error: {e}")
-        # Optionally save the model in case of interruption
-        model.save('vgg16_model.h5')
-        print("Model saved at interruption point.")
+        except Exception as e:
+            print(f"Training was interrupted due to an error: {e}")
+            # Optionally save the model in case of interruption (though not needed if only saving the best model)
+            model.save('vgg16_model_at_interruption')
+            print("Model saved at interruption point.")
 
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
 
@@ -467,6 +458,22 @@ def show_samples(images, labels, num_samples=25):
 if __name__ == "__main__":
     data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images/selected_images'
 
+    # Get all available GPUs
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Set memory growth to avoid TensorFlow allocating all GPU memory at once
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                print(f"GPU {gpu} is set to memory growth.")
+        except RuntimeError as e:
+            print(f"Error in setting memory growth: {e}")
+
+    # Define the strategy for multi-GPU training
+    num_gpus = len(tf.config.list_physical_devices('GPU'))
+    batch_size_per_replica = 128  # Original batch size per GPU
+    global_batch_size = batch_size_per_replica * num_gpus
+
     # Run dataset_prepration.py
     # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
     #     code = f.read()
@@ -509,7 +516,7 @@ if __name__ == "__main__":
         num_epochs=1000, 
         global_batch_size=global_batch_size, 
         img_size=224, 
-        resume_training=False
+        resume_training=True
     )
 
     # Check sample labels
@@ -517,11 +524,15 @@ if __name__ == "__main__":
     # show_samples(X_test, y_test)
 
     # Evaluate the deep learning model
-    latest_model = max(glob.glob('vgg16_model.h5'), key=os.path.getctime)
-    evaluate_deep_learning_model(X_test, y_test, latest_model)
+    latest_model_path = 'vgg16_best_model'
+    if os.path.exists(latest_model_path):
+        print(f"Evaluating model: {latest_model_path}")
+        evaluate_deep_learning_model(X_test, y_test, latest_model_path)
+    else:
+        print("No model found at the specified path.")
     
     # Train the decision tree model
-    dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, 'vgg16_model.h5')
+    dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, latest_model_path)
 
     # Evaluate the decision tree model
     evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model)
