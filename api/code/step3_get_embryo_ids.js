@@ -1,10 +1,9 @@
 // code/step3_get_embryo_ids.js
 
-const newman = require('newman');
+const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-
-/** BEGIN MODIFICATIONS **/
+const https = require('https');
 
 // Ensure the output directory exists
 const outputDir = path.resolve(__dirname, '../output/embryo_ids');
@@ -35,7 +34,10 @@ console.error = function (message, ...optionalParams) {
     }
 };
 
-/** END MODIFICATIONS **/
+// Set up HTTPS agent to ignore self-signed certificates
+const agent = new https.Agent({
+    rejectUnauthorized: false
+});
 
 // Read patients.json
 const patientsFilePath = path.resolve(__dirname, '../output/patients.json');
@@ -49,179 +51,123 @@ try {
 
 const patients = patientsData.Patients;
 
-/** BEGIN MODIFICATIONS **/
-
 // Declare authToken and authTokenTimestamp at the top-level scope
 let authToken;
 let authTokenTimestamp;
 
-/** END MODIFICATIONS **/
-
-// Authenticate to get the token
+// Function to authenticate and get the token
 async function authenticate() {
-    return new Promise((resolve, reject) => {
-        newman.run({
-            collection: {
-                info: {
-                    name: 'Login Collection',
-                    schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json'
-                },
-                item: [{
-                    name: 'Login Request',
-                    request: {
-                        method: 'GET',
-                        header: [
-                            { key: 'Content-Type', value: 'application/json', type: 'text' }
-                        ],
-                        url: {
-                            raw: 'https://192.168.1.100:4000/login?Username=web&Password=web',
-                            protocol: 'https',
-                            host: ['192', '168', '1', '100'],
-                            port: '4000',
-                            path: ['login'],
-                            query: [
-                                { key: 'Username', value: 'web' },
-                                { key: 'Password', value: 'web' }
-                            ]
-                        }
-                    }
-                }]
+    try {
+        const response = await axios.get('https://192.168.1.100:4000/login', {
+            params: {
+                Username: 'web',
+                Password: 'web'
             },
-            reporters: 'cli',
-            insecure: true
-        }).on('request', function (err, args) {
-            if (err) {
-                console.error('Authentication request failed:', err);
-                reject(err);
-            } else {
-                const response = args.response;
-                if (response.code === 200) {
-                    const responseBody = response.stream.toString('utf8');
-                    const responseJson = JSON.parse(responseBody);
-                    const token = responseJson.Token;
-                    resolve(token);
-                } else {
-                    console.error('Authentication failed with status code:', response.code);
-                    reject(new Error('Authentication failed'));
-                }
-            }
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            httpsAgent: agent
         });
-    });
-}
 
-/** BEGIN MODIFICATIONS **/
-
-// Function to check if the token has expired
-async function checkTokenExpiration() {
-    const currentTime = Date.now();
-    if (currentTime - authTokenTimestamp >= 60 * 60 * 1000) { // 60 minutes
-        console.log('Token expired. Re-authenticating...');
-        try {
-            authToken = await authenticate();
-            authTokenTimestamp = Date.now();
-            console.log('Re-authentication successful.');
-        } catch (err) {
-            console.error('Failed to re-authenticate:', err);
-            process.exit(1);
+        if (response.status === 200) {
+            const responseJson = response.data;
+            const token = responseJson.Token;
+            return token;
+        } else {
+            console.error('Authentication failed with status code:', response.status);
+            throw new Error('Authentication failed');
         }
+    } catch (err) {
+        console.error('Authentication request failed:', err);
+        throw err;
     }
 }
 
-/** END MODIFICATIONS **/
-
-// Function to get embryo IDs for a treatment
-async function getEmbryoIDs(patientIDx, treatmentName) {
-    await checkTokenExpiration();
-    return new Promise((resolve, reject) => {
-        newman.run({
-            collection: {
-                info: {
-                    name: 'Get Embryo IDs Collection',
-                    schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json'
-                },
-                item: [{
-                    name: 'Get Embryo IDs',
-                    request: {
-                        method: 'GET',
-                        header: [
-                            { key: 'API-token', value: authToken, type: 'text' },
-                            { key: 'Content-Type', value: 'application/json', type: 'text' }
-                        ],
-                        url: {
-                            raw: `https://192.168.1.100:4000/GET/embryoID?PatientIDx=${encodeURIComponent(patientIDx)}&TreatmentName=${encodeURIComponent(treatmentName)}`,
-                            protocol: 'https',
-                            host: ['192', '168', '1', '100'],
-                            port: '4000',
-                            path: ['GET', 'embryoID'],
-                            query: [
-                                { key: 'PatientIDx', value: patientIDx },
-                                { key: 'TreatmentName', value: treatmentName }
-                            ]
-                        }
-                    }
-                }]
-            },
-            reporters: 'cli',
-            insecure: true
-        }).on('request', async function (err, args) {
-            if (err) {
-                console.error(`Request failed for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}:`, err);
-                reject(err);
-            } else {
-                const response = args.response;
-                if (response.code === 200) {
-                    const responseBody = response.stream.toString('utf8');
-                    // Sanitize file name to avoid illegal characters
-                    const sanitizedPatientIDx = sanitizeFilename(patientIDx);
-                    const sanitizedTreatmentName = sanitizeFilename(treatmentName);
-                    const filePath = path.join(outputDir, `embryo_ids_${sanitizedPatientIDx}_${sanitizedTreatmentName}.json`);
-                    fs.writeFile(filePath, responseBody, function (err) {
-                        if (err) {
-                            console.error(`Failed to save embryo IDs for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}:`, err);
-                            reject(err);
-                        } else {
-                            console.log(`Embryo IDs for PatientIDx ${patientIDx}, TreatmentName ${treatmentName} saved successfully.`);
-                            resolve();
-                        }
-                    });
-                } else if (response.code === 401) {
-                    console.error('Token expired during request. Re-authenticating...');
-                    try {
-                        authToken = await authenticate();
-                        authTokenTimestamp = Date.now();
-                        console.log('Re-authentication successful. Retrying request...');
-                        // Retry the request
-                        await getEmbryoIDs(patientIDx, treatmentName);
-                        resolve();
-                    } catch (authErr) {
-                        console.error('Failed to re-authenticate:', authErr);
-                        reject(authErr);
-                    }
-                } else if (response.code === 204) {
-                    console.log(`No embryo IDs found for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}.`);
-                    resolve();
-                } else {
-                    console.error(`Error retrieving embryo IDs for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}: Status code ${response.code}`);
-                    reject(new Error(`Status code ${response.code}`));
-                }
-            }
+// Function to check if the token has expired
+function checkTokenExpiration() {
+    const currentTime = Date.now();
+    if (currentTime - authTokenTimestamp >= 60 * 60 * 1000) { // 60 minutes
+        console.log('Token expired. Re-authenticating...');
+        return authenticate().then(token => {
+            authToken = token;
+            authTokenTimestamp = Date.now();
+            console.log('Re-authentication successful.');
+        }).catch(err => {
+            console.error('Failed to re-authenticate:', err);
+            throw err;
         });
-    });
+    } else {
+        return Promise.resolve();
+    }
 }
-
-/** BEGIN MODIFICATIONS **/
 
 // Function to sanitize filenames
 function sanitizeFilename(name) {
     return name.replace(/[^a-z0-9]/gi, '_');
 }
 
-// Delay function to enforce API rate limit
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
+// Function to get embryo IDs for a treatment
+async function getEmbryoIDs(patientIDx, treatmentName, retries = 0) {
+    try {
+        await checkTokenExpiration();
 
-/** END MODIFICATIONS **/
+        const response = await axios.get('https://192.168.1.100:4000/GET/embryoID', {
+            params: {
+                PatientIDx: patientIDx,
+                TreatmentName: treatmentName
+            },
+            headers: {
+                'API-token': authToken,
+                'Content-Type': 'application/json'
+            },
+            httpsAgent: agent,
+            validateStatus: function (status) {
+                return true; // Accept all status codes
+            }
+        });
+
+        if (response.status === 200) {
+            const responseBody = response.data;
+            // Sanitize file name to avoid illegal characters
+            const sanitizedPatientIDx = sanitizeFilename(patientIDx);
+            const sanitizedTreatmentName = sanitizeFilename(treatmentName);
+            const filePath = path.join(outputDir, `embryo_ids_${sanitizedPatientIDx}_${sanitizedTreatmentName}.json`);
+            fs.writeFileSync(filePath, JSON.stringify(responseBody));
+            console.log(`Embryo IDs for PatientIDx ${patientIDx}, TreatmentName ${treatmentName} saved successfully.`);
+        } else if (response.status === 401) {
+            console.warn(`Unauthorized access for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}. Attempting to re-authenticate...`);
+
+            // Re-authenticate and retry the request
+            if (retries < 3) {
+                try {
+                    authToken = await authenticate();
+                    authTokenTimestamp = Date.now();
+                    console.log('Re-authentication successful. Retrying request...');
+                    await getEmbryoIDs(patientIDx, treatmentName, retries + 1);
+                } catch (authErr) {
+                    console.error('Failed to re-authenticate:', authErr);
+                }
+            } else {
+                console.error(`Maximum retries reached for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}.`);
+            }
+        } else if (response.status === 204) {
+            console.log(`No embryo IDs found for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}.`);
+        } else if (response.status === 429) {
+            console.error(`Too many requests for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}: Status code ${response.status}`);
+            // Wait and retry
+            if (retries < 3) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                await getEmbryoIDs(patientIDx, treatmentName, retries + 1);
+            } else {
+                console.error(`Maximum retries reached for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}.`);
+            }
+        } else {
+            console.error(`Error retrieving embryo IDs for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}: Status code ${response.status}`);
+        }
+    } catch (err) {
+        console.error(`Request failed for PatientIDx ${patientIDx}, TreatmentName ${treatmentName}:`, err);
+    }
+}
 
 // Main function
 (async () => {
@@ -233,13 +179,6 @@ function delay(ms) {
         console.error('Failed to authenticate:', err);
         process.exit(1);
     }
-
-    /** BEGIN MODIFICATIONS **/
-
-    // Set initial timestamp
-    let lastRequestTime = Date.now();
-
-    /** END MODIFICATIONS **/
 
     // Iterate over patients and their treatments
     for (const patient of patients) {
@@ -267,32 +206,19 @@ function delay(ms) {
         for (const treatmentName of treatments) {
             console.log(`  Processing TreatmentName: ${treatmentName}`);
 
-            /** BEGIN MODIFICATIONS **/
-
-            // Enforce API rate limit of 10 requests per second
-            const currentTime = Date.now();
-            const timeSinceLastRequest = currentTime - lastRequestTime;
-            if (timeSinceLastRequest < 100) { // 100 ms between requests = 10 requests per second
-                await delay(100 - timeSinceLastRequest);
-            }
-            lastRequestTime = Date.now();
-
-            /** END MODIFICATIONS **/
-
             try {
                 await getEmbryoIDs(patientIDx, treatmentName);
             } catch (err) {
                 console.error(`Error processing PatientIDx ${patientIDx}, TreatmentName ${treatmentName}:`, err);
             }
+
+            // Wait 100ms between requests to comply with API rate limit
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
     }
 
     console.log('All embryo IDs retrieved.');
 
-    /** BEGIN MODIFICATIONS **/
-
     // Close the log file
     logFile.end();
-
-    /** END MODIFICATIONS **/
 })();

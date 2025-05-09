@@ -79,13 +79,25 @@ new_directory = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/code'
 os.chdir(new_directory)
 
 # Root directory containing all embryo folders
-data_root = '../images'
+data_root = '../selected_images'
+# Read metadata
 metadata = pd.read_csv("../../data_cleaning/output/merging_data.csv")
 
 # The ID of the good embryo and the bad embryo
 metadata['EmbryoID'] = metadata['EmbryoID'].apply(replace_dots_with_underscores)
-embryo_Good = metadata[(metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer')]['EmbryoID'].values
-embryo_Poor = metadata[~((metadata['EmbryoFate'] == 'Transfer') | (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer'))]['EmbryoID'].values
+embryo_Good = metadata[
+        (metadata['EmbryoFate'] == 'Transfer') |
+        (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer') |
+        (metadata['EmbryoFate'] == 'Freeze')
+    ]['EmbryoID'].values
+print(embryo_Good)
+embryo_Poor = metadata[
+        ~(
+            (metadata['EmbryoFate'] == 'Transfer') |
+            (metadata['EmbryoFate'] == 'FrozenEmbryoTransfer') |
+            (metadata['EmbryoFate'] == 'Freeze')
+        )
+    ]['EmbryoID'].values
 
 # Find directories whose names contain good embryos and poor embryos
 good_embryo_dirs = find_directories_with_embryos(data_root, embryo_Good)

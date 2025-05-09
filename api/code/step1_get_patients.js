@@ -62,9 +62,9 @@ async function authenticate() {
                             { key: 'Content-Type', value: 'application/json', type: 'text' }
                         ],
                         url: {
-                            raw: 'https://192.168.1.203:4000/login?Username=web&Password=web',
+                            raw: 'https://192.168.1.100:4000/login?Username=web&Password=web',
                             protocol: 'https',
-                            host: ['192', '168', '1', '203'],
+                            host: ['192', '168', '1', '100'],
                             port: '4000',
                             path: ['login'],
                             query: [
@@ -136,9 +136,9 @@ async function getAllPatients() {
                             { key: 'Content-Type', value: 'application/json', type: 'text' }
                         ],
                         url: {
-                            raw: 'https://192.168.1.203:4000/GET/patients',
+                            raw: 'https://192.168.1.100:4000/GET/patients',
                             protocol: 'https',
-                            host: ['192', '168', '1', '203'],
+                            host: ['192', '168', '1', '100'],
                             port: '4000',
                             path: ['GET', 'patients']
                         }

@@ -1,32 +1,39 @@
-import math 
 import os
 import re
+import math
 import time
 import glob
 import copy
+import gc
 import joblib
-import absl.logging
+import shutil
+import concurrent.futures
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import tensorflow as tf
 import matplotlib.pyplot as plt
-import gc
-import tensorflow.keras.backend as K
 from PIL import Image, ImageFile
-from tensorflow.keras.optimizers import Adam
+import tensorflow as tf
+import tensorflow.keras.backend as K
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dropout, Dense, Flatten
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.layers import (
+    Input, GlobalAveragePooling2D, Dense, Dropout, Flatten
+)
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint
+from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l1_l2, l2
+from tensorflow.keras.metrics import Precision, Recall, CategoricalAccuracy
 from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
-from sklearn.metrics import roc_curve
-from sklearn.model_selection import GridSearchCV
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
+from tensorflow.keras.applications import InceptionV3, EfficientNetB0, ResNet50
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix, accuracy_score
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
-from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
+import absl.logging
+from preprocessing.data_loader import *
+from preprocessing.image_utils import copy_images_by_split
+from utils.data_utils import balance_classes, check_class_distribution
 
 gc.collect()
 K.clear_session()
@@ -34,142 +41,30 @@ K.clear_session()
 # Enable CUDA's async memory allocation for improved GPU memory management
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
-# suppress the warning
 absl.logging.set_verbosity(absl.logging.ERROR)
 
-# 1. Data Loading and Preprocessing
-def parse_image(img_path, label, img_size=224):
-    """
-    Reads and preprocesses an image using GPU operations.
-    """
-    img = tf.io.read_file(img_path)
-    img = tf.image.decode_image(img, expand_animations=False)
-    
-    # Automatically detect the number of channels
-    num_channels = tf.shape(img)[-1]
-    
-    # If the image is grayscale (1 channel), convert it to RGB
-    img = tf.cond(
-        tf.equal(num_channels, 1),
-        lambda: tf.image.grayscale_to_rgb(img),
-        lambda: img
-    )
-    
-    # If the image has more than 3 channels, keep only the first 3 channels
-    img = tf.cond(
-        tf.greater(num_channels, 3),
-        lambda: img[:, :, :3],
-        lambda: img
-    )
-    
-    # Explicitly set the image shape to have 3 channels
-    img.set_shape([None, None, 3])
-    
-    # Resize the image to the target size
-    img = tf.image.resize(img, [img_size, img_size])
-    return img, label
-    
-def load_data(data_dir, img_size=224):
-    strategy = tf.distribute.MirroredStrategy()  # Enable multi-GPU processing
-    num_gpus = strategy.num_replicas_in_sync
-    print(f"Using {num_gpus} GPUs for image loading.")
-
-    image_paths = []
-    labels = []
-    ages = []
-    qualities = []
-
-    for label, class_name in enumerate(['class_0', 'class_1']):
-        class_dir = os.path.join(data_dir, 'train', class_name)
-        if not os.path.exists(class_dir):
-            print(f"Warning: Directory {class_dir} does not exist.")
-            continue
-
-        for img_file in os.listdir(class_dir):
-            if not img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-                continue
-
-            img_path = os.path.join(class_dir, img_file)
-            image_paths.append(img_path)
-            labels.append(label)
-
-            match = re.search(r'_RUN\d+_(F-?\d+)_(\d+)\.\w+$', img_file)
-            if match:
-                ages.append(int(match.group(2)))
-                qualities.append(1 if class_name == 'class_1' else 0)
-            else:
-                print(f"Warning: Could not parse age information from filename {img_file}.")
-                continue
-
-    with tf.device('/CPU:0'):
-        image_paths = tf.convert_to_tensor(image_paths)
-        labels = tf.convert_to_tensor(labels, dtype=tf.int64)
-
-    # Function to shard dataset explicitly across GPUs
-    def dataset_fn(input_context):
-        batch_size = batch_sizes[input_context.input_pipeline_id]  
-        print(f"GPU {input_context.input_pipeline_id} assigned batch size: {batch_size}") 
-
-        ds = tf.data.Dataset.from_tensor_slices((image_paths, labels))
-        ds = ds.map(lambda x, y: parse_image(x, y, img_size), num_parallel_calls=tf.data.AUTOTUNE)
-        ds = ds.shard(input_context.num_input_pipelines, input_context.input_pipeline_id)
-        ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-        return ds
-
-    # Distribute dataset manually using strategy
-    dataset = strategy.distribute_datasets_from_function(dataset_fn)
-
-    # Manually iterate over the dataset and gather results from distributed strategy
-    images_list, labels_list = [], []
-    for batch in dataset:
-        per_replica_images, per_replica_labels = batch
-        # Gather distributed data from all replicas
-        images_list.extend(strategy.experimental_local_results(per_replica_images))
-        labels_list.extend(strategy.experimental_local_results(per_replica_labels))
-
-    images = np.concatenate(images_list, axis=0)
-    labels = np.concatenate(labels_list, axis=0)
-    ages = np.array(ages)
-    qualities = np.array(qualities)
-
-    print(f"Loaded {len(images)} images using {num_gpus} GPUs.")
-    return images, labels, ages, qualities
-
-def save_processed_image(image, output_dir, original_filename):
-    """
-    Saves a processed image to the specified output directory.
-    """
-    # Ensure the output directory exists
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    # Generate new filename and path
-    output_filename = f'processed_{original_filename}'
-    output_path = os.path.join(output_dir, output_filename)
-    
-    # Convert numpy array back to PIL Image and save it
-    processed_img = Image.fromarray(image)
-    processed_img.save(output_path)
-
-# 2. Build a pre-trained VGG16 model with custom top layers
-def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2, fine_tune_at=15):
+# Build a pre-trained VGG16 model with custom top layers
+def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2, fine_tune_at=15, fine_tune=False):
     # Load the VGG16 model without the top layers
     base_model = VGG16(weights='imagenet', include_top=False, input_shape=input_shape)
 
-    # Freeze the convolutional base
-    # base_model.trainable = False
-
-    for layer in base_model.layers[fine_tune_at:]:
-        layer.trainable = True
+    if fine_tune:
+        for layer in base_model.layers[:]:
+            layer.trainable = False
+        for layer in base_model.layers[fine_tune_at:]:
+            layer.trainable = True
+    else:
+        base_model.trainable = False
 
     # Create the new model on top
     inputs = Input(shape=input_shape)
-    x = base_model(inputs, training=True)
-    x = Flatten()(x)
-    x = Dense(1024, activation='relu')(x)
+    x = base_model(inputs, training=False)
+  
+    # Global average pooling
+    x = GlobalAveragePooling2D()(x)
+    x = Dense(4096, activation='relu')(x)
     x = Dropout(0.5)(x)
-    x = Dense(1024, activation='relu')(x)
+    x = Dense(4096, activation='relu')(x)
     x = Dropout(0.5)(x)
     outputs = Dense(num_classes, activation='softmax')(x)
 
@@ -177,91 +72,11 @@ def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2, fine_tune_at=15)
     model = Model(inputs=inputs, outputs=outputs)
 
     # Compile the model with a learning rate schedule
-    initial_learning_rate = 0.0001  
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate,
-        decay_steps=2000,
-        decay_rate=0.9,
-        staircase=True
-    )
-    optimizer = Adam(learning_rate=lr_schedule, weight_decay=1e-5)
+    optimizer = Adam(learning_rate=1e-4,weight_decay=1e-5)
     
     model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
     return model
-
-def balance_classes(images, labels, ages, qualities):
-    """
-    Ensures an equal number of samples from each class by downsampling the larger class.
-    """
-    # Convert TensorFlow tensors to NumPy arrays if needed
-    def ensure_numpy_array(array):
-        if isinstance(array, tf.Tensor):
-            return array.numpy()
-        elif isinstance(array, list):
-            if isinstance(array[0], np.ndarray):
-                return np.concatenate(array, axis=0)
-            return np.array(array)
-        return array
-
-    images = ensure_numpy_array(images)
-    labels = ensure_numpy_array(labels)
-    ages = ensure_numpy_array(ages)
-    qualities = ensure_numpy_array(qualities)
-
-    # Ensure all arrays are 1D where needed
-    labels = np.reshape(labels, (-1,))
-    ages = np.reshape(ages, (-1,))
-    qualities = np.reshape(qualities, (-1,))
-
-    # Get unique classes and their counts
-    unique_classes, class_counts = np.unique(labels, return_counts=True)
-
-    # Find the minimum count among all classes
-    min_count = min(class_counts)
-
-    # Initialize lists to store balanced data
-    balanced_images, balanced_labels, balanced_ages, balanced_qualities = [], [], [], []
-
-    # Downsample each class to the minimum count
-    for class_label in unique_classes:
-        class_indices = np.where(labels == class_label)[0]
-
-        if len(class_indices) > min_count:
-            selected_indices = np.random.choice(class_indices, size=min_count, replace=False)
-        else:
-            selected_indices = class_indices
-
-        balanced_images.extend(images[selected_indices])
-        balanced_labels.extend(labels[selected_indices])
-        balanced_ages.extend(ages[selected_indices])
-        balanced_qualities.extend(qualities[selected_indices])
-
-    return (
-        np.array(balanced_images),
-        np.array(balanced_labels),  # Keep original dtype
-        np.array(balanced_ages),
-        np.array(balanced_qualities)
-    )
-
-# Check class distribution
-def check_class_distribution(y_train, y_val, y_test):
-    class_names = ['Class 0', 'Class 1']    
-    train_counts = np.bincount(y_train)
-    val_counts = np.bincount(y_val)
-    test_counts = np.bincount(y_test)
-    
-    print("Train set class distribution:")
-    for i, count in enumerate(train_counts):
-        print(f"{class_names[i]}: {count}")
-    
-    print("Validation set class distribution:")
-    for i, count in enumerate(val_counts):
-        print(f"{class_names[i]}: {count}")
-    
-    print("Test set class distribution:")
-    for i, count in enumerate(test_counts):
-        print(f"{class_names[i]}: {count}")
 
 # check gpu availability
 def check_gpu_availability():
@@ -271,8 +86,8 @@ def check_gpu_availability():
     for device in tf.config.list_physical_devices():
         print(device)
 
-# 3. Training the model with augmentation
-def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True, fine_tune=False):
+# Training the model with augmentation
+def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True, fine_tune=False, copy_images=False):
     # Set strategy for distributed training
     strategy = tf.distribute.MirroredStrategy()
     
@@ -291,16 +106,18 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
     X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
         X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
-    
-    # Check class distribution
-    print(f"Class distribution in train: {y_train.sum()}, Validation: {y_val.sum()}, Test: {y_test.sum()}")
-    
+
+    # Output class distribution confirmation
+    print(f"Train samples: {len(y_train)}, Validation: {len(y_val)}, Test: {len(y_test)}")
+    print(f"Train positive ratio: {np.mean(y_train):.2f}, Validation: {np.mean(y_val):.2f}, Test: {np.mean(y_test):.2f}")
+    check_class_distribution(y_train, y_val, y_test)
+
     with tf.device('/CPU:0'):
         X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
         y_train = tf.convert_to_tensor(y_train, dtype=tf.int64)
         X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
         y_val = tf.convert_to_tensor(y_val, dtype=tf.int64)
-    
+
     # Define the model path and callbacks
     model_path = 'vgg16_best_model'  # Save only the best model based on validation loss
     initial_epoch = 0
@@ -314,35 +131,26 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
         mode='min',  # Save when validation loss is minimized
         save_best_only=True  # Save only the best model
     )
-
-    def augment(image, label):
-        image = tf.image.random_flip_left_right(image)
-        image = tf.image.random_brightness(image, max_delta=0.2)
-        image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
-        image = tf.image.resize_with_crop_or_pad(image, img_size + 20, img_size + 20)  # Add padding
-        image = tf.image.random_crop(image, [img_size, img_size, 3])  # Random crop back to original size
-        return image, label
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True
+    )
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6
+    )
 
     # Initialize train_dataset if X_train or y_train is not None
     if X_train is None or y_train is None:
         raise ValueError("Error: X_train or y_train is None.")
 
-    def dataset_fn(input_context):
-        batch_size = batch_sizes[input_context.input_pipeline_id]
-        ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-        ds = ds.shard(input_context.num_input_pipelines, input_context.input_pipeline_id)
-        ds = ds.shuffle(1024)
-        ds = ds.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
-        ds = ds.batch(batch_size)
-        ds = ds.repeat(num_epochs)
-        ds = ds.prefetch(tf.data.AUTOTUNE)
-        return ds
-
-    with strategy.scope():
-        train_dataset = strategy.distribute_datasets_from_function(dataset_fn)
-
-        steps_per_epoch = math.ceil(X_train.shape[0] / global_batch_size)
-
+    # Build tf.data.Dataset
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_dataset = train_dataset.shuffle(1024).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
+    steps_per_epoch = math.ceil(X_train.shape[0] / global_batch_size)
     val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
 
     with strategy.scope():
@@ -352,12 +160,14 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
             print("Loading existing model from", model_path)
             model = tf.keras.models.load_model(model_path)
 
-            if fine_tune:
-                print("Fine-tuning enabled: Unfreezing layers for further training.")
-                for layer in model.layers:
-                    layer.trainable = True
-            else:
-                print("Fine-tuning disabled: Keeping previously frozen layers.")
+            # if fine_tune:
+            #     print("Fine-tuning enabled: Unfreezing layers starting from", fine_tune_at)
+            #     for layer in model.layers[:fine_tune_at]:
+            #         layer.trainable = False
+            #     for layer in model.layers[fine_tune_at:]:
+            #         layer.trainable = True
+            # else:
+            #     print("Fine-tuning disabled: Keeping all previously frozen layers.")
 
             if os.path.exists('training.log'):
                 with open('training.log', 'r') as f:
@@ -373,8 +183,9 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
         
         # Train the model with data augmentation
         try:
-            print(f"Final batch sizes per GPU: {batch_sizes}")
+            print(f"Final batch size: {global_batch_size} ({global_batch_size // strategy.num_replicas_in_sync} per GPU)")
             print(f"Total global batch size: {global_batch_size}")
+            print(f"Train dataset size: {len(y_train)} | Batch size: {global_batch_size}")
             steps_per_epoch = math.ceil(len(X_train) / global_batch_size)
             val_steps = max(len(X_val) // global_batch_size, 1)
             history = model.fit(
@@ -384,7 +195,7 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
                     initial_epoch=initial_epoch,
                     steps_per_epoch=steps_per_epoch,
                     validation_steps=val_steps,
-                    callbacks=[csv_logger, checkpoint_callback]
+                    callbacks=[csv_logger, checkpoint_callback, early_stopping, reduce_lr]
                 )
 
             # Calculate the time consumed
@@ -417,14 +228,16 @@ def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test"
     dl_model = tf.keras.models.load_model(model_path)
     
     # Ensure evaluation is done using the same global batch size as training with proper sharding for multi-GPU
-    eval_batch_size = min(global_batch_size, 32)  # Ensure batch size is not too large for evaluation
+    eval_batch_size = min(global_batch_size, 128)  # Ensure batch size is not too large for evaluation
     eval_dataset = tf.data.Dataset.from_tensor_slices((X_eval, y_eval)).batch(eval_batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Evaluate model
-    steps_per_epoch = max(len(X_eval) // global_batch_size, 1)
-    eval_loss, eval_accuracy = dl_model.evaluate(eval_dataset, steps=steps_per_epoch)
+    eval_loss, eval_accuracy = dl_model.evaluate(eval_dataset)
     print(f"Deep Learning Model {dataset_name} Loss: {eval_loss:.4f}, {dataset_name} Accuracy: {eval_accuracy:.4f}")
     
+    # Convert one-hot labels to integer labels if necessary
+    if y_eval.ndim > 1 and y_eval.shape[1] == 2:
+        y_eval = np.argmax(y_eval, axis=1)
     # Compute AUC for model
     probabilities_dl = dl_model.predict(eval_dataset)
     
@@ -460,6 +273,17 @@ def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test"
     cm_df = pd.DataFrame(cm_dl, index=class_names, columns=class_names)
     print(f"Deep Learning Model {dataset_name} Confusion Matrix:")
     print(cm_df)
+
+    # Plot confusion matrix heatmap
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues", cbar=False)
+    plt.title(f"{dataset_name} Set Confusion Matrix")
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+    plt.tight_layout()
+    plt.savefig(f"{dataset_name.lower()}_confusion_matrix.pdf")
+    print(f"Confusion matrix saved as {dataset_name.lower()}_confusion_matrix.pdf")
+    plt.close()
     
 # 5. Build Decision Tree Model
 def build_decision_tree(X_train, y_train, age_train, quality_train):
@@ -486,6 +310,11 @@ def build_decision_tree(X_train, y_train, age_train, quality_train):
 
 # 6. Train Decision Tree Model
 def train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, model_path):
+    # Convert one-hot labels to integer labels if necessary
+    if y_train.ndim > 1 and y_train.shape[1] == 2:
+        y_train = np.argmax(y_train, axis=1)
+    if y_test.ndim > 1 and y_test.shape[1] == 2:
+        y_test = np.argmax(y_test, axis=1)
     # Load the deep learning model
     dl_model = tf.keras.models.load_model(model_path)
     
@@ -505,6 +334,9 @@ def train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_te
 
 # 7. Evaluate Decision Tree Model
 def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model):
+    # Convert one-hot labels to integer labels if necessary
+    if y_test.ndim > 1 and y_test.shape[1] == 2:
+        y_test = np.argmax(y_test, axis=1)
     # Combine image features, age, and quality into a single feature matrix
     X_test_combined = np.hstack((X_test_features, age_test.reshape(-1, 1), quality_test.reshape(-1, 1)))
     
@@ -592,8 +424,8 @@ def show_samples(images, labels, num_samples=25):
 
 # Main function
 if __name__ == "__main__":
-    os.chdir("/liaozizhuo/scripts")
-    data_dir = '/liaozizhuo/selected_image/'
+    os.chdir("/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/")
+    data_dir = '../'
 
     # Get all available GPUs
     gpus = tf.config.list_physical_devices('GPU')
@@ -609,16 +441,8 @@ if __name__ == "__main__":
 
     # Define the strategy for multi-GPU training
     num_gpus = len(tf.config.list_physical_devices('GPU'))
-    batch_size_per_replica = 512  # Original batch size per GPU
-    global_batch_size = batch_size_per_replica * num_gpus
-
-    # Ensure global_batch_size matches distributed training settings
-    batch_size_per_gpu = global_batch_size // num_gpus
-    batch_sizes = [batch_size_per_gpu] * num_gpus
-    batch_sizes[0] -= 128  
-
-    # Update global_batch_size to reflect the adjusted batch distribution
-    global_batch_size = sum(batch_sizes)
+    batch_size_per_replica = 32  
+    global_batch_size = batch_size_per_replica * max(1, num_gpus)
 
     # Run dataset_prepration.py
     # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
@@ -628,13 +452,13 @@ if __name__ == "__main__":
     # Kmeans.py
 
     # remove black images    
-    # csv_path = "/liaozizhuo/selected_image/images_train/prediction_Kmeans_F0_all.csv"
+    # csv_path = "/liaozizhuo/selected_images/images_train/prediction_Kmeans_F0_all.csv"
     # df = pd.read_csv(csv_path)
 
-    # black_images = df[df['Cluster Label'] == 0]
-    # filtered_df = df[df['Cluster Label'] != 0]
+    # black_images = df[df['Cluster Label'] == 1]
+    # filtered_df = df[df['Cluster Label'] != 1]
 
-    # output_filtered_csv_path = "/liaozizhuo/selected_image/images_train/prediction_Kmeans_F0_filtered.csv"
+    # output_filtered_csv_path = "/liaozizhuo/selected_images/images_train/prediction_Kmeans_F0_filtered.csv"
     # filtered_df.to_csv(output_filtered_csv_path, index=False)
     # print(f"Filtered CSV saved to {output_filtered_csv_path}")
 
@@ -650,26 +474,27 @@ if __name__ == "__main__":
 
     # print("Black images removal completed.")
 
-    # load data
-    images, labels, ages, qualities = load_data(data_dir, img_size=224)
-
-    # for idx, img_array in enumerate(images):
-    #     save_processed_image(img_array, "./output_directory", f'image_{idx}.jpg')
+    # load data (with augmentation enabled for training set)
+    images, labels, ages, qualities, image_paths = load_data(data_dir, img_size=224, batch_size=global_batch_size, is_training=True)
 
     # Train the model 
     X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
         images, labels, ages, qualities, 
-        num_epochs=4450, 
+        num_epochs=10000, 
         global_batch_size=global_batch_size, 
         img_size=224, 
-        resume_training=True,
-        fine_tune=True  
+        resume_training=False,
+        fine_tune=False,
+        copy_images=False
     )
 
-    # Check sample labels
+
     # show_samples(X_train, y_train)
     # show_samples(X_test, y_test)
 
+    # Reload test data without augmentation
+    images, labels, ages, qualities, image_paths = load_data(data_dir, img_size=224, batch_size=global_batch_size, is_training=True)
+    # X_test, y_test, age_test, quality_test already returned from train function
     # Evaluate the deep learning model
     latest_model_path = 'vgg16_best_model'
     if os.path.exists(latest_model_path):
@@ -677,7 +502,7 @@ if __name__ == "__main__":
         evaluate_deep_learning_model(X_test, y_test, latest_model_path, save_path="test_auc.pdf")
     else:
         print("No model found at the specified path.")
-    
+                                   
     # Train the decision tree model
     dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, latest_model_path)
 
