@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # List of base directories to search for .pdb files
-base_dirs = ['4424', '4425', '5068', '5069']
+base_dirs = ['/Users/lzz/Downloads']
 results = []
 
 # Convert Excel-style serial date (days since 1899-12-30) to Python datetime object
@@ -45,9 +45,14 @@ for base_dir in base_dirs:
                 image_time = days_to_datetime(row['Time'])
                 # Calculate time difference in hours between image and fertilization
                 delta_hours = round((image_time - fert_datetime).total_seconds() / 3600, 1)
+                # Skip if delta_hours is outside the range [96, 112]
+                if not (96 <= delta_hours <= 112):
+                    continue
                 file_base = os.path.splitext(filename)[0]
-                # Append results: combined file and well identifier, run number, and hours post-fertilization
-                results.append([f"{file_base}_{well}", run, delta_hours])
+                # Extract patient ID (everything before "_P_") to avoid redundant entries
+                patient_id = file_base.split("_P_")[0]
+                # Avoid adding duplicate patient-time entries
+                results.append([patient_id, run, delta_hours])
 
         except Exception as e:
             # Print error message if processing this .pdb file fails
@@ -57,7 +62,7 @@ for base_dir in base_dirs:
             conn.close()
 
 # Convert results list to a DataFrame
-results_df = pd.DataFrame(results, columns=["FileName_Well", "Run", "Time_PostFertilization_Hours"])
+results_df = pd.DataFrame(results, columns=["PatientID", "Run", "Time_PostFertilization_Hours"])
 # Remove duplicate entries if any
 results_df = results_df.drop_duplicates()
 # Save the DataFrame to a CSV file
