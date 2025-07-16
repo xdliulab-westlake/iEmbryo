@@ -26,13 +26,117 @@ from sklearn.metrics import log_loss, accuracy_score
 import matplotlib.pyplot as plt
 import random
 
+# ===== 多GPU配置和内存优化 =====
+print("=== 多GPU配置 ===")
 gpus = tf.config.list_physical_devices('GPU')
+print(f"检测到 {len(gpus)} 个GPU设备")
+
 if gpus:
     try:
+        # 启用内存增长，避免一次性分配所有内存
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"已启用GPU内存增长: {gpu}")
+        
+        # 设置混合精度训练，减少内存使用
+        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        tf.keras.mixed_precision.set_global_policy(policy)
+        print("已启用混合精度训练 (float16)")
+        
     except RuntimeError as e:
-        print(e)
+        print(f"GPU配置错误: {e}")
+
+# 配置多GPU策略
+strategy = tf.distribute.MirroredStrategy()
+print(f"多GPU策略: {strategy.__class__.__name__}")
+print(f"可用GPU数量: {strategy.num_replicas_in_sync}")
+
+# 根据GPU数量调整批大小
+BASE_BATCH_SIZE = 8  # 每个GPU的基础批大小
+TOTAL_BATCH_SIZE = BASE_BATCH_SIZE * strategy.num_replicas_in_sync
+print(f"总批大小: {TOTAL_BATCH_SIZE} (每GPU {BASE_BATCH_SIZE})")
+
+# ===== 内存优化的多模型特征提取器 =====
+class MultiGPUFeatureExtractor:
+    def __init__(self):
+        self.models = {}
+        self.feature_dims = {}
+        self._build_models()
+        
+    def _build_models(self):
+        """构建多GPU分布的特征提取模型"""
+        print("Building multi-GPU feature extractors...")
+        
+        with strategy.scope():
+            # 1. EfficientNetV2-M
+            base_efficientnet = EfficientNetV2M(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+            efficientnet_output = tf.keras.layers.GlobalAveragePooling2D()(base_efficientnet.output)
+            self.models['efficientnet'] = Model(inputs=base_efficientnet.input, outputs=efficientnet_output)
+            self.models['efficientnet'].trainable = False
+            self.feature_dims['efficientnet'] = 1280
+            
+            # 2. ResNet152V2
+            base_resnet = ResNet152V2(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+            resnet_output = tf.keras.layers.GlobalAveragePooling2D()(base_resnet.output)
+            self.models['resnet'] = Model(inputs=base_resnet.input, outputs=resnet_output)
+            self.models['resnet'].trainable = False
+            self.feature_dims['resnet'] = 2048
+            
+            # 3. DenseNet201
+            base_densenet = DenseNet201(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+            densenet_output = tf.keras.layers.GlobalAveragePooling2D()(base_densenet.output)
+            self.models['densenet'] = Model(inputs=base_densenet.input, outputs=densenet_output)
+            self.models['densenet'].trainable = False
+            self.feature_dims['densenet'] = 1920
+            
+            # 4. VGG16
+            base_vgg = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+            vgg_output = tf.keras.layers.GlobalAveragePooling2D()(base_vgg.output)
+            self.models['vgg16'] = Model(inputs=base_vgg.input, outputs=vgg_output)
+            self.models['vgg16'].trainable = False
+            self.feature_dims['vgg16'] = 512
+        
+        self.total_feature_dim = sum(self.feature_dims.values())
+        print(f"Total feature dimension: {self.total_feature_dim}")
+        print(f"Individual dimensions: {self.feature_dims}")
+        
+    def extract_features_parallel(self, images):
+        """并行提取多模型特征"""
+        features_list = []
+        
+        # 使用tf.data进行内存高效的批处理
+        def create_feature_dataset(model_name, preprocess_fn):
+            processed_imgs = preprocess_fn(images.copy())
+            dataset = tf.data.Dataset.from_tensor_slices(processed_imgs)
+            dataset = dataset.batch(BASE_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+            return dataset
+        
+        # 并行提取特征
+        model_configs = [
+            ('efficientnet', preprocess_efficientnet),
+            ('resnet', preprocess_resnet),
+            ('densenet', preprocess_densenet),
+            ('vgg16', preprocess_vgg16)
+        ]
+        
+        for model_name, preprocess_fn in model_configs:
+            print(f"提取 {model_name} 特征...")
+            dataset = create_feature_dataset(model_name, preprocess_fn)
+            
+            features = []
+            for batch in tqdm(dataset, desc=f"{model_name}特征提取"):
+                batch_features = self.models[model_name].predict(batch, verbose=0)
+                features.append(batch_features)
+            
+            features = np.concatenate(features, axis=0)
+            features_list.append(features)
+            
+            # 清理内存
+            tf.keras.backend.clear_session()
+        
+        # 拼接所有特征
+        combined_features = np.concatenate(features_list, axis=1)
+        return combined_features
 
 # 1. 加载评分信息，计算BS_prime
 def load_score_dict(csv_path):
@@ -401,10 +505,11 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
     
     return X, np.array(y_bs), quality_labels, ages
 
-# 7. 模型结构（升级版）
+# 7. 模型结构（升级版 - 抗过拟合优化）
 def create_model(feature_dim):
-    """创建适应多模型特征的BiLSTM模型"""
+    """创建适应多模型特征的BiLSTM模型 - 抗过拟合优化版"""
     from tensorflow.keras.regularizers import l2
+    from tensorflow.keras.layers import BatchNormalization
     
     # 计算输入维度 (11个焦平面 * 特征维度)
     input_dim = 11 * feature_dim
@@ -412,27 +517,180 @@ def create_model(feature_dim):
     model = Sequential([
         Input(shape=(33, input_dim)),
         
-        # 特征降维层
-        TimeDistributed(Dense(2048, activation='relu')),
-        tf.keras.layers.Dropout(0.2),
+        # 特征降维层 + 批归一化
+        TimeDistributed(Dense(1024, activation='relu', kernel_regularizer=l2(1e-3))),  # 减少维度
+        TimeDistributed(BatchNormalization()),
+        tf.keras.layers.Dropout(0.4),  # 增加dropout
         
-        # BiLSTM层
-        Bidirectional(LSTM(256, return_sequences=True, dropout=0.2, recurrent_dropout=0.2)),
-        Bidirectional(LSTM(128, dropout=0.2, recurrent_dropout=0.2)),
+        # 第二层特征变换
+        TimeDistributed(Dense(512, activation='relu', kernel_regularizer=l2(1e-3))),
+        TimeDistributed(BatchNormalization()),
+        tf.keras.layers.Dropout(0.3),
         
-        # 全连接层
+        # BiLSTM层 - 减少复杂度
+        Bidirectional(LSTM(128, return_sequences=True, dropout=0.3, recurrent_dropout=0.3, kernel_regularizer=l2(1e-4))),
+        BatchNormalization(),
+        Bidirectional(LSTM(64, dropout=0.3, recurrent_dropout=0.3, kernel_regularizer=l2(1e-4))),
+        
+        # 全连接层 - 更强正则化
+        tf.keras.layers.Dropout(0.5),
+        Dense(64, activation='relu', kernel_regularizer=l2(1e-3)),
+        BatchNormalization(),
+        tf.keras.layers.Dropout(0.4),
+        Dense(32, activation='relu', kernel_regularizer=l2(1e-3)),
         tf.keras.layers.Dropout(0.3),
-        Dense(128, activation='relu', kernel_regularizer=l2(1e-4)),
-        tf.keras.layers.Dropout(0.3),
-        Dense(64, activation='relu', kernel_regularizer=l2(1e-4)),
         Dense(1)  # 回归预测 BS_prime 分数
     ])
     
-    # 使用自适应学习率
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    # 使用更保守的学习率
+    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-5)  # 降低学习率
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     
     return model
+
+# 新增：交叉验证函数
+def cross_validate_model(X, y, feature_dim, n_folds=5):
+    """K折交叉验证评估模型泛化能力"""
+    from sklearn.model_selection import KFold
+    
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    cv_scores = []
+    
+    print(f"=== 开始{n_folds}折交叉验证 ===")
+    
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+        print(f"\n训练第 {fold+1}/{n_folds} 折...")
+        
+        X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+        y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+        
+        # 创建模型
+        model = create_model(feature_dim)
+        
+        # 轻量级训练
+        early_stop = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        
+        history = model.fit(
+            X_train_fold, y_train_fold,
+            validation_data=(X_val_fold, y_val_fold),
+            epochs=50,  # 少量epochs用于快速验证
+            batch_size=16,
+            callbacks=[early_stop],
+            verbose=0
+        )
+        
+        # 评估
+        val_loss, val_mae = model.evaluate(X_val_fold, y_val_fold, verbose=0)
+        cv_scores.append(val_mae)
+        print(f"第{fold+1}折 - 验证MAE: {val_mae:.4f}")
+    
+    mean_score = np.mean(cv_scores)
+    std_score = np.std(cv_scores)
+    
+    print(f"\n=== 交叉验证结果 ===")
+    print(f"平均MAE: {mean_score:.4f} ± {std_score:.4f}")
+    print(f"各折得分: {cv_scores}")
+    
+    return cv_scores, mean_score, std_score
+
+# ===== 内存优化的模型创建 =====
+def create_memory_efficient_model(feature_dim):
+    """创建内存高效的BiLSTM模型"""
+    from tensorflow.keras.regularizers import l2
+    from tensorflow.keras.layers import BatchNormalization
+    
+    input_dim = 11 * feature_dim
+    
+    with strategy.scope():
+        model = Sequential([
+            Input(shape=(33, input_dim)),
+            
+            # 渐进式降维，减少内存使用
+            TimeDistributed(Dense(512, activation='relu', kernel_regularizer=l2(1e-3))),
+            TimeDistributed(BatchNormalization()),
+            tf.keras.layers.Dropout(0.4),
+            
+            TimeDistributed(Dense(256, activation='relu', kernel_regularizer=l2(1e-3))),
+            TimeDistributed(BatchNormalization()),
+            tf.keras.layers.Dropout(0.3),
+            
+            # 减少LSTM单元数量
+            Bidirectional(LSTM(64, return_sequences=True, dropout=0.3, recurrent_dropout=0.3)),
+            BatchNormalization(),
+            Bidirectional(LSTM(32, dropout=0.3, recurrent_dropout=0.3)),
+            
+            # 轻量级全连接层
+            tf.keras.layers.Dropout(0.5),
+            Dense(32, activation='relu', kernel_regularizer=l2(1e-3)),
+            BatchNormalization(),
+            tf.keras.layers.Dropout(0.3),
+            Dense(1)
+        ])
+        
+        # 使用更保守的学习率
+        optimizer = tf.keras.optimizers.Adam(learning_rate=3e-5)
+        model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
+        
+        return model
+
+# ===== 内存优化的数据加载 =====
+def create_memory_efficient_datasets(X_train, y_train, X_val, y_val):
+    """创建内存高效的数据集"""
+    
+    def add_noise_regularization(features, labels):
+        """添加轻微噪声作为正则化"""
+        noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=0.01)
+        features = features + noise
+        return features, labels
+    
+    # 使用更小的shuffle buffer
+    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_ds = train_ds.shuffle(1024, reshuffle_each_iteration=True)
+    train_ds = train_ds.map(add_noise_regularization)
+    train_ds = train_ds.batch(TOTAL_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+    
+    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+    val_ds = val_ds.batch(TOTAL_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+    
+    return train_ds, val_ds
+
+# ===== 主训练函数 =====
+def train_multi_gpu_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
+    """多GPU训练主函数"""
+    
+    print("=== 多GPU训练开始 ===")
+    print(f"训练集: {X_train.shape}")
+    print(f"验证集: {X_val.shape}")
+    print(f"特征维度: {feature_dim}")
+    print(f"总批大小: {TOTAL_BATCH_SIZE}")
+    
+    with strategy.scope():
+        # 创建模型
+        model = create_memory_efficient_model(feature_dim)
+        print("模型结构:")
+        model.summary()
+        
+        # 创建数据集
+        train_ds, val_ds = create_memory_efficient_datasets(X_train, y_train, X_val, y_val)
+        
+        # 回调函数
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+        callbacks = [
+            EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
+            ReduceLROnPlateau(monitor='val_loss', factor=0.3, patience=4, min_lr=1e-7, verbose=1),
+            ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
+        ]
+        
+        # 训练模型
+        history = model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=150,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        return model, history
 
 # 7. 主流程
 if __name__ == "__main__":
@@ -508,42 +766,37 @@ if __name__ == "__main__":
     print(f"验证集大小: {X_val.shape}")
     print(f"测试集大小: {X_test.shape}")
 
+    # === 可选：交叉验证评估模型稳定性 ===
+    RUN_CROSS_VALIDATION = False  # 设置为False跳过交叉验证
+    
+    if RUN_CROSS_VALIDATION:
+        print("\n=== 交叉验证评估模型泛化能力 ===")
+        cv_scores, mean_cv_score, std_cv_score = cross_validate_model(X_trainval, y_trainval, multi_extractor.total_feature_dim)
+        print(f"交叉验证平均MAE: {mean_cv_score:.4f} ± {std_cv_score:.4f}")
+        
+        # 如果交叉验证显示过拟合严重，给出警告
+        if std_cv_score > 0.2:
+            print("⚠️  警告：交叉验证标准差较大，模型可能不稳定，建议进一步调整超参数")
+
     # === 模型创建和训练 ===
     print("=== 创建多模型BiLSTM ===")
     feature_dim = multi_extractor.total_feature_dim
     print(f"使用特征维度: {feature_dim}")
     
     # 多卡支持
-    strategy = tf.distribute.MirroredStrategy()
-    print(f"可用GPU数量: {strategy.num_replicas_in_sync}")
+    # strategy = tf.distribute.MirroredStrategy() # 已在文件开头定义
+    # print(f"可用GPU数量: {strategy.num_replicas_in_sync}")
 
-    with strategy.scope():
-        model = create_model(feature_dim)
-        print("模型结构:")
-        model.summary()
+    # with strategy.scope(): # 已在文件开头定义
+    #     model = create_model(feature_dim) # 已在文件开头定义
+    #     print("模型结构:")
+    #     model.summary()
 
-    print("=== 开始训练 ===")
-    
-    # 回调函数
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-    callbacks = [
-        EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-7, verbose=1),
-        ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
-    ]
-
-    # 使用 tf.data 加速数据加载
-    batch_size = 32  # 降低batch size以适应更大的特征维度
-    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(1024).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-    # 训练模型
-    history = model.fit(
-        train_ds, 
-        validation_data=val_ds, 
-        epochs=200,  # 减少epochs，依赖early stopping
-        callbacks=callbacks,
-        verbose=1
+    # 多GPU训练
+    model, history = train_multi_gpu_model(
+        X_train, y_train, X_val, y_val, 
+        multi_extractor.total_feature_dim, 
+        save_model_path
     )
 
     # 打印训练历史
@@ -669,7 +922,6 @@ if __name__ == "__main__":
 
     plt.tight_layout()
     plt.savefig("/liaozizhuo/scripts/multi_model_analysis.pdf", dpi=300, bbox_inches='tight')
-    plt.savefig("/liaozizhuo/scripts/multi_model_analysis.png", dpi=300, bbox_inches='tight')
     plt.show()
     
     print(f"\n=== 结果总结 ===")
