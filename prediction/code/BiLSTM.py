@@ -13,8 +13,8 @@ from tensorflow.keras.applications.densenet import preprocess_input as preproces
 try:
     from tensorflow.keras.applications.efficientnet_v2 import EfficientNetV2M, preprocess_input as preprocess_efficientnet
 except ImportError:
-    # 如果EfficientNetV2不可用，使用EfficientNetB7作为替代
-    from tensorflow.keras.applications.efficientnet import EfficientNetB7 as EfficientNetV2M
+    # 如果EfficientNetV2不可用，使用更轻量的EfficientNetB3
+    from tensorflow.keras.applications.efficientnet import EfficientNetB3 as EfficientNetV2M
     from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_efficientnet
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.layers import Input, TimeDistributed, Bidirectional, LSTM, Dense, Concatenate
@@ -116,28 +116,25 @@ class MultiModelFeatureExtractor:
         print(f"Individual dimensions: {self.feature_dims}")
         
     def extract_features(self, images):
-        """提取多模型特征并拼接"""
+        """提取多模型特征并拼接 - 内存优化版本"""
         features_list = []
         
-        # EfficientNet 预处理和特征提取
-        efficientnet_imgs = preprocess_efficientnet(images.copy())
-        efficientnet_features = self.models['efficientnet'].predict(efficientnet_imgs, verbose=0)
-        features_list.append(efficientnet_features)
+        # 确保图像是uint8格式
+        if images.dtype != np.uint8:
+            images = tf.cast(images, tf.uint8)
         
-        # ResNet 预处理和特征提取
-        resnet_imgs = preprocess_resnet(images.copy())
-        resnet_features = self.models['resnet'].predict(resnet_imgs, verbose=0)
-        features_list.append(resnet_features)
+        # 逐个处理模型，减少内存使用
+        model_names = ['efficientnet', 'resnet', 'densenet', 'vgg16']
+        preprocess_functions = [preprocess_efficientnet, preprocess_resnet, preprocess_densenet, preprocess_vgg16]
         
-        # DenseNet 预处理和特征提取
-        densenet_imgs = preprocess_densenet(images.copy())
-        densenet_features = self.models['densenet'].predict(densenet_imgs, verbose=0)
-        features_list.append(densenet_features)
-        
-        # VGG16 预处理和特征提取
-        vgg_imgs = preprocess_vgg16(images.copy())
-        vgg_features = self.models['vgg16'].predict(vgg_imgs, verbose=0)
-        features_list.append(vgg_features)
+        for model_name, preprocess_func in zip(model_names, preprocess_functions):
+            # 只复制一次图像
+            processed_imgs = preprocess_func(images.copy())
+            features = self.models[model_name].predict(processed_imgs, verbose=0)
+            features_list.append(features)
+            
+            # 清理内存
+            del processed_imgs
         
         # 拼接所有特征
         combined_features = np.concatenate(features_list, axis=1)
@@ -219,11 +216,13 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
         img = tf.io.read_file(path)
         img = tf.image.decode_jpeg(img, channels=3)
         img = tf.image.resize(img, [224, 224])
-        img = tf.cast(img, tf.float32)
         
-        # 应用数据增强
+        # 应用数据增强（在预处理之前）
         if training:
             img = augmentation_fn(img)
+        
+        # 保持uint8格式，让模型特定预处理函数处理
+        img = tf.cast(img, tf.uint8)  # 改为uint8
         
         return img
     
@@ -334,7 +333,7 @@ def create_model(feature_dim):
     return model
 
 # 5. 交叉验证相关函数（保持这些，因为它们是核心功能）
-def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=3):
+def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=1):
     """
     对BiLSTM模型进行交叉验证评估
     """
@@ -421,14 +420,14 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         with strategy.scope():
             model = create_model(feature_dim)
             
-            # 回调函数
+            # 回调函数 - 修改为更激进的早停
             callbacks = [
-                EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True, verbose=0),
-                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-7, verbose=0)
+                EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0),  # 减少patience
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7, verbose=0)  # 减少patience
             ]
             
             # 更保守的数据管道 - 使用更小的批量大小
-            batch_size = 4  # 进一步减小批量大小
+            batch_size = 8  # 稍微增大批量大小
             
             # 使用CPU加载数据，避免GPU内存问题
             with tf.device('/cpu:0'):
@@ -438,14 +437,14 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
                 val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
                 val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
             
-            # 训练模型
+            # 训练模型 - 修改为最多10个epoch
             history = model.fit(
                 train_ds, validation_data=val_ds, 
-                epochs=50, callbacks=callbacks, verbose=0
+                epochs=10, callbacks=callbacks, verbose=0  # 减少到10个epoch
             )
         
         # 评估模型 - 使用更小的批量
-        def evaluate_in_batches(X, y, batch_size=4):  # 进一步减小批量大小
+        def evaluate_in_batches(X, y, batch_size=8):  # 增大批量大小
             losses = []
             maes = []
             for i in range(0, len(X), batch_size):
@@ -463,8 +462,8 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         
         # 预测BS分数 - 使用更小的批量
         y_bs_pred = []
-        for i in range(0, len(X_test), 4):  # 进一步减小批量大小
-            batch_end = min(i + 4, len(X_test))
+        for i in range(0, len(X_test), 8):  # 增大批量大小
+            batch_end = min(i + 8, len(X_test))
             batch_X = X_test[i:batch_end]
             batch_pred = model.predict(batch_X, verbose=0).flatten()
             y_bs_pred.extend(batch_pred)
@@ -533,7 +532,7 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         
         # 强制等待一小段时间让GPU释放内存
         import time
-        time.sleep(2)
+        time.sleep(1)  # 减少等待时间
     
     # 计算统计结果
     cv_summary = {}
@@ -754,22 +753,39 @@ def load_or_build_features(root_dir, score_dict, valid_embryo_df):
     
     return X, y_bs, quality_labels, ages
 
-def split_dataset(X, y_bs, quality_labels):
+def split_dataset(X, y_bs, quality_labels, ages):
     """拆分数据集"""
     print("=== 数据集拆分 ===")
     
     # 拆分为训练集、验证集、测试集（70%, 15%, 15%）
-    X_trainval, X_test, y_trainval, y_test = train_test_split(X, y_bs, test_size=0.15, random_state=42, stratify=quality_labels)
+    X_trainval, X_test, y_trainval, y_test, idx_trainval, idx_test = train_test_split(
+        X, y_bs, range(len(X)), test_size=0.15, random_state=42, stratify=quality_labels
+    )
     
-    # 获取对应的质量标签
-    quality_trainval = [quality_labels[i] for i in range(len(quality_labels)) if i < len(X_trainval)]
-    X_train, X_val, y_train, y_val = train_test_split(X_trainval, y_trainval, test_size=0.1765, random_state=42)
+    # 获取对应的质量标签和年龄
+    quality_trainval = [quality_labels[i] for i in idx_trainval]
+    quality_test = [quality_labels[i] for i in idx_test]
+    ages_trainval = [ages[i] for i in idx_trainval]
+    ages_test = [ages[i] for i in idx_test]
+    
+    # 再次拆分训练集和验证集
+    X_train, X_val, y_train, y_val, idx_train, idx_val = train_test_split(
+        X_trainval, y_trainval, range(len(X_trainval)), test_size=0.1765, random_state=42, stratify=quality_trainval
+    )
+    
+    # 获取对应的质量标签和年龄
+    quality_train = [quality_trainval[i] for i in idx_train]
+    quality_val = [quality_trainval[i] for i in idx_val]
+    ages_train = [ages_trainval[i] for i in idx_train]
+    ages_val = [ages_trainval[i] for i in idx_val]
     
     print(f"训练集大小: {X_train.shape}")
     print(f"验证集大小: {X_val.shape}")
     print(f"测试集大小: {X_test.shape}")
     
-    return X_train, X_val, X_test, y_train, y_val, y_test
+    return (X_train, X_val, X_test, y_train, y_val, y_test, 
+            quality_train, quality_val, quality_test,
+            ages_train, ages_val, ages_test)
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
     """训练主模型"""
@@ -784,11 +800,11 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         print("模型结构:")
         model.summary()
 
-    # 回调函数
+    # 回调函数 - 修改为更激进的早停
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
     callbacks = [
-        EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-7, verbose=1),
+        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),  # 减少patience
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),  # 减少patience
         ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
     ]
 
@@ -797,10 +813,10 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(1024).batch(batch_size).prefetch(tf.data.AUTOTUNE)
     val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    # 训练模型
+    # 训练模型 - 修改为最多20个epoch
     history = model.fit(
         train_ds, validation_data=val_ds, 
-        epochs=50, callbacks=callbacks, verbose=1
+        epochs=20, callbacks=callbacks, verbose=1  # 减少到20个epoch
     )
 
     # 打印训练结果
@@ -818,8 +834,7 @@ def evaluate_model(model, X_test, y_test):
     """评估模型"""
     print("=== 模型评估 ===")
     
-    # 清理GPU内存
-    tf.keras.backend.clear_session()
+    # 不要在这里清理GPU内存，会删除模型
     
     # 分批评估
     batch_size = 16
@@ -842,31 +857,31 @@ def evaluate_model(model, X_test, y_test):
     
     return test_loss, test_mae
 
-def perform_logistic_regression(model, X, ages, quality_labels, test_mae):
-    """执行逻辑回归分析"""
+def perform_logistic_regression(model, X_test, ages_test, quality_test, test_mae):
+    """执行逻辑回归分析 - 只使用测试集数据"""
     print("=== 逻辑回归分析 ===")
     
-    # 预测BS分数
+    # 预测BS分数 - 只使用测试集
     print("预测BS分数...")
     batch_size = 16
     y_bs_pred_all = []
     
-    for i in range(0, len(X), batch_size):
-        batch_end = min(i + batch_size, len(X))
-        batch_X = X[i:batch_end]
+    for i in range(0, len(X_test), batch_size):
+        batch_end = min(i + batch_size, len(X_test))
+        batch_X = X_test[i:batch_end]
         batch_pred = model.predict(batch_X, verbose=0).flatten()
         y_bs_pred_all.extend(batch_pred)
     
     y_bs_pred_all = np.array(y_bs_pred_all)
 
     # 构建增强特征
-    ages_array = np.array(ages)
+    ages_array = np.array(ages_test)
     enhanced_features = np.column_stack([
         ages_array, y_bs_pred_all, ages_array ** 2, y_bs_pred_all ** 2,
         ages_array * y_bs_pred_all, np.log(ages_array + 1), 1 / (y_bs_pred_all + 1e-6)
     ])
     
-    logic_y = np.array(quality_labels)
+    logic_y = np.array(quality_test)
 
     # 清理无效数据
     valid_idx = np.isfinite(enhanced_features).all(axis=1) & np.isfinite(logic_y)
@@ -996,9 +1011,9 @@ def run_cross_validation(X, y_bs, quality_labels, ages, feature_dim):
     """运行交叉验证"""
     print("=== 交叉验证评估 ===")
     
-    # 执行交叉验证
+    # 执行交叉验证 - 修改为1次重复
     cv_summary, fold_results, all_predictions, all_true_labels = cross_validate_bilstm_model(
-        X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=1
+        X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=1  # 改为1次重复
     )
     
     # 评估模型稳定性
@@ -1059,8 +1074,10 @@ if __name__ == "__main__":
     # 2. 加载或构建特征
     X, y_bs, quality_labels, ages = load_or_build_features(root_dir, score_dict, valid_embryo_df)
     
-    # 3. 拆分数据集
-    X_train, X_val, X_test, y_train, y_val, y_test = split_dataset(X, y_bs, quality_labels)
+    # 3. 拆分数据集 - 修改这里
+    (X_train, X_val, X_test, y_train, y_val, y_test, 
+     quality_train, quality_val, quality_test,
+     ages_train, ages_val, ages_test) = split_dataset(X, y_bs, quality_labels, ages)
     
     # 4. 训练主模型
     model, history = train_main_model(X_train, y_train, X_val, y_val, X.shape[2] // 11, save_model_path)
@@ -1068,8 +1085,8 @@ if __name__ == "__main__":
     # 5. 评估模型
     test_loss, test_mae = evaluate_model(model, X_test, y_test)
     
-    # 6. 逻辑回归分析
-    logic_results = perform_logistic_regression(model, X, ages, quality_labels, test_mae)
+    # 6. 逻辑回归分析 - 修改这里，传递测试集的年龄
+    logic_results = perform_logistic_regression(model, X_test, ages_test, quality_test, test_mae)
     
     # 7. 创建可视化
     create_visualizations(logic_results, test_mae)
