@@ -327,7 +327,7 @@ def create_model(feature_dim):
     ])
     
     # 使用自适应学习率
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-5)
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     
     return model
