@@ -413,6 +413,10 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         ages_train    = [ages_train_val[i]    for i in idx_tr]
         ages_val      = [ages_train_val[i]    for i in idx_va]
         
+        X_train, y_train, quality_train, ages_train = balance_train_subset(
+             X_train, y_train, quality_train, ages_train
+        )
+
         print(f"训练集: {X_train.shape}, 验证集: {X_val.shape}, 测试集: {X_test.shape}")
         
         # 创建和训练模型 - 使用更保守的内存策略
@@ -428,27 +432,54 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         with strategy.scope():
             model = create_model(feature_dim)
             
-            # 回调函数 - 修改为更激进的早停
+            # 特征级增强函数（CV版本，轻量化）
+            def feature_augmentation_cv(features, training=True):
+                if not training:
+                    return features
+                batch_size = tf.shape(features)[0]
+                reshaped = tf.reshape(features, [batch_size, 33, 11, feature_dim])
+                
+                # 轻量版增强（CV时使用更保守的增强）
+                if tf.random.uniform([]) > 0.8:
+                    noise = tf.random.normal(tf.shape(reshaped), mean=0.0, stddev=0.005)
+                    reshaped = reshaped + noise
+                if tf.random.uniform([]) > 0.7:
+                    scale = tf.random.uniform([], minval=0.98, maxval=1.02)
+                    reshaped = reshaped * scale
+                    
+                return tf.reshape(reshaped, [batch_size, 33, -1])
+            
+            # 回调函数
             callbacks = [
-                EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0),  # 减少patience
-                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7, verbose=0)  # 减少patience
+                EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7, verbose=0)
             ]
             
-            # 更保守的数据管道 - 使用更小的批量大小
-            batch_size = 8  # 稍微增大批量大小
+            # 数据管道增强函数
+            def cv_train_augment(x, y):
+                return feature_augmentation_cv(x, training=True), y
+            def cv_val_no_augment(x, y):
+                return feature_augmentation_cv(x, training=False), y
+            
+            # 数据管道（CV版本，带轻量增强）
+            batch_size = 8
             
             # 使用CPU加载数据，避免GPU内存问题
             with tf.device('/cpu:0'):
                 train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-                train_ds = train_ds.shuffle(512).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+                train_ds = train_ds.shuffle(512).batch(batch_size)
+                train_ds = train_ds.map(cv_train_augment, num_parallel_calls=tf.data.AUTOTUNE)
+                train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
                 
                 val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-                val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+                val_ds = val_ds.batch(batch_size)
+                val_ds = val_ds.map(cv_val_no_augment, num_parallel_calls=tf.data.AUTOTUNE)
+                val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
             
-            # 训练模型 - 修改为最多10个epoch
+            # 训练模型
             history = model.fit(
                 train_ds, validation_data=val_ds, 
-                epochs=10, callbacks=callbacks, verbose=0  # 减少到10个epoch
+                epochs=10, callbacks=callbacks, verbose=0
             )
         
         # 评估模型 - 使用更小的批量
@@ -819,9 +850,55 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
     return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
-    """训练主模型"""
+    """训练主模型（带特征级数据增强）"""
     print("=== 训练主模型 ===")
     
+    # 特征级数据增强函数
+    def feature_augmentation(features, training=True):
+        """在特征级别进行数据增强"""
+        if not training:
+            return features
+            
+        # features shape: (batch_size, 33, 63360)
+        # 重新reshape为 (batch_size, 33, 11, 5760) 便于操作
+        batch_size = tf.shape(features)[0]
+        reshaped = tf.reshape(features, [batch_size, 33, 11, feature_dim])
+        
+        # 1. 时间维度增强：随机丢弃某些时间点（模拟缺失帧）
+        if tf.random.uniform([]) > 0.7:
+            # 随机选择2-4个时间点置零
+            num_drop = tf.random.uniform([], minval=2, maxval=5, dtype=tf.int32)
+            drop_indices = tf.random.shuffle(tf.range(33))[:num_drop]
+            mask = tf.ones([33], dtype=tf.bool)
+            mask = tf.tensor_scatter_nd_update(mask, tf.expand_dims(drop_indices, 1), 
+                                             tf.zeros([num_drop], dtype=tf.bool))
+            mask = tf.reshape(mask, [1, 33, 1, 1])
+            reshaped = reshaped * tf.cast(mask, tf.float32)
+        
+        # 2. 焦平面维度增强：随机丢弃某些焦平面
+        if tf.random.uniform([]) > 0.8:
+            num_drop_f = tf.random.uniform([], minval=1, maxval=3, dtype=tf.int32)
+            drop_f_indices = tf.random.shuffle(tf.range(11))[:num_drop_f]
+            f_mask = tf.ones([11], dtype=tf.bool)
+            f_mask = tf.tensor_scatter_nd_update(f_mask, tf.expand_dims(drop_f_indices, 1),
+                                               tf.zeros([num_drop_f], dtype=tf.bool))
+            f_mask = tf.reshape(f_mask, [1, 1, 11, 1])
+            reshaped = reshaped * tf.cast(f_mask, tf.float32)
+        
+        # 3. 特征噪声：添加小量高斯噪声
+        if tf.random.uniform([]) > 0.5:
+            noise = tf.random.normal(tf.shape(reshaped), mean=0.0, stddev=0.01)
+            reshaped = reshaped + noise
+        
+        # 4. 特征缩放：随机轻微缩放特征
+        if tf.random.uniform([]) > 0.6:
+            scale = tf.random.uniform([], minval=0.95, maxval=1.05)
+            reshaped = reshaped * scale
+        
+        # 重新reshape回原始形状
+        augmented = tf.reshape(reshaped, [batch_size, 33, -1])
+        return augmented
+
     # 多卡支持
     strategy = tf.distribute.MirroredStrategy()
     print(f"可用GPU数量: {strategy.num_replicas_in_sync}")
@@ -831,23 +908,43 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         print("模型结构:")
         model.summary()
 
-    # 回调函数 - 修改为更激进的早停
+    # 回调函数
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
     callbacks = [
-        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),  # 减少patience
-        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),  # 减少patience
+        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
         ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
     ]
 
-    # 数据管道
-    batch_size = 32
-    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(1024).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    # 数据管道增强函数
+    def train_augment_fn(x, y):
+        x_aug = feature_augmentation(x, training=True)
+        return x_aug, y
 
-    # 训练模型 - 修改为最多20个epoch
+    def val_no_augment_fn(x, y):
+        x_no_aug = feature_augmentation(x, training=False)  # 验证集不增强
+        return x_no_aug, y
+
+    # 数据管道（带增强）
+    batch_size = 32
+    
+    # 训练集：应用增强
+    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_ds = train_ds.shuffle(1024).batch(batch_size)
+    train_ds = train_ds.map(train_augment_fn, num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    
+    # 验证集：不增强
+    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+    val_ds = val_ds.batch(batch_size)
+    val_ds = val_ds.map(val_no_augment_fn, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+
+    print("=== 开始训练（带特征级数据增强）===")
+    # 训练模型
     history = model.fit(
         train_ds, validation_data=val_ds, 
-        epochs=20, callbacks=callbacks, verbose=1  # 减少到20个epoch
+        epochs=20, callbacks=callbacks, verbose=1
     )
 
     # 打印训练结果
