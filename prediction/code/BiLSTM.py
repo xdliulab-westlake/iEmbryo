@@ -141,10 +141,18 @@ class MultiModelFeatureExtractor:
         return combined_features
 
 # 3. 构建训练数据（保留这个，因为它是核心功能）
-def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, training=True):
+def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, training=True, balance=False):
     """高效GPU批量处理版本：一次性处理所有图像"""
     print(f"=== 高效GPU批量构建数据集 (training={training}) ===")
-    
+
+    def map_half_hour(t):
+        try:
+            t = float(t)
+        except Exception:
+            return np.nan
+        idx = int(round((t - 96.0) / 0.5))
+        return idx if 0 <= idx <= 32 else np.nan
+
     # Step 1: 收集所有图像路径和元信息
     print("Step 1: 收集图像信息...")
     focal_planes = ['F-75', 'F-60', 'F-45', 'F-30', 'F-15', 'F0', 'F15', 'F30', 'F45', 'F60', 'F75']
@@ -162,8 +170,9 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
     for embryo_id in tqdm(embryo_ids, desc="收集图像信息"):
         try:
             embryo_df = valid_embryo_df[valid_embryo_df['EmbryoID'] == embryo_id].copy()
-            embryo_df["t_idx"] = embryo_df["TargetHour"].map({t: i for i, t in enumerate(time_points)})
-            embryo_df["f_idx"] = embryo_df["FocalPlane"].map({f: i for i, f in enumerate(focal_planes)})
+            embryo_df["t_idx"] = embryo_df["TargetHour"].apply(map_half_hour)
+            f_map = {f: i for i, f in enumerate(focal_planes)}
+            embryo_df["f_idx"] = embryo_df["FocalPlane"].map(f_map)
             
             # 收集该胚胎的所有有效图像
             valid_images = []
@@ -269,34 +278,33 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
     
     print(f"构建完成！共处理 {len(X)} 个胚胎")
     
-    # Step 4: 平衡采样
-    print("Step 4: 平衡采样...")
+    # Step 4: 标签分布与（可选）平衡采样
+    print("Step 4: 标签分布与（可选）平衡采样...")
     from sklearn.utils import resample
-    
+
     label_series = pd.Series(quality_labels)
     label_counts = label_series.value_counts()
     print("=== EmbryoQuality 标签分布 ===")
     print(label_counts)
 
-    if label_counts.shape[0] < 2:
-        raise ValueError(f"无法平衡采样：标签中仅有一个类别：{label_counts.index.tolist()}")
-
-    min_count = label_counts.min()
-    idx_good = np.where(label_series == 1)[0]
-    idx_poor = np.where(label_series == 0)[0]
-    
-    resample_idx_good = resample(idx_good, replace=False, n_samples=min_count, random_state=42)
-    resample_idx_poor = resample(idx_poor, replace=False, n_samples=min_count, random_state=42)
-    selected_indices = np.concatenate([resample_idx_good, resample_idx_poor])
-    
-    X = [X[i] for i in selected_indices]
-    y_bs = [y_bs[i] for i in selected_indices]
-    quality_labels = [quality_labels[i] for i in selected_indices]
-    ages = [ages[i] for i in selected_indices]
-    
+    # 先堆叠（无论是否平衡）
     X = np.stack(X)
+
+    if training and balance:
+        if label_counts.shape[0] < 2:
+            raise ValueError(f"无法平衡采样：标签中仅有一个类别：{label_counts.index.tolist()}")
+        min_count = label_counts.min()
+        idx_good = np.where(label_series == 1)[0]
+        idx_poor = np.where(label_series == 0)[0]
+        resample_idx_good = resample(idx_good, replace=False, n_samples=min_count, random_state=42)
+        resample_idx_poor = resample(idx_poor, replace=False, n_samples=min_count, random_state=42)
+        selected_indices = np.concatenate([resample_idx_good, resample_idx_poor])
+        X = X[selected_indices]
+        y_bs = [y_bs[i] for i in selected_indices]
+        quality_labels = [quality_labels[i] for i in selected_indices]
+        ages = [ages[i] for i in selected_indices]
+
     print(f"=== 最终数据集形状: {X.shape} ===")
-    
     return X, np.array(y_bs), quality_labels, ages
 
 # 4. 模型结构
@@ -315,8 +323,8 @@ def create_model(feature_dim):
         tf.keras.layers.Dropout(0.2),
         
         # BiLSTM层
-        Bidirectional(LSTM(256, return_sequences=True, dropout=0.2, recurrent_dropout=0.2)),
-        Bidirectional(LSTM(128, dropout=0.2, recurrent_dropout=0.2)),
+        Bidirectional(LSTM(256, return_sequences=True, dropout=0.2, recurrent_dropout=0.0)),
+        Bidirectional(LSTM(128, dropout=0.2, recurrent_dropout=0.0)),
         
         # 全连接层
         tf.keras.layers.Dropout(0.3),
@@ -393,17 +401,17 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         quality_train_val, quality_test = [quality_labels[i] for i in train_val_idx], [quality_labels[i] for i in test_idx]
         ages_train_val, ages_test = [ages[i] for i in train_val_idx], [ages[i] for i in test_idx]
         
-        # 再次分层拆分训练集和验证集
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_train_val, y_train_val, test_size=0.2, random_state=42, 
-            stratify=quality_train_val
+        # 基于索引对 train_val 做二次切分，保证对齐
+        idx_tv = np.arange(len(X_train_val))
+        idx_tr, idx_va = train_test_split(
+            idx_tv, test_size=0.2, random_state=42, stratify=np.array(quality_train_val)
         )
-        
-        # 获取对应的质量标签和年龄
-        quality_train = [quality_train_val[i] for i in range(len(quality_train_val)) if i < len(X_train)]
-        quality_val = [quality_train_val[i] for i in range(len(quality_train_val)) if i >= len(X_train)]
-        ages_train = [ages_train_val[i] for i in range(len(ages_train_val)) if i < len(X_train)]
-        ages_val = [ages_train_val[i] for i in range(len(ages_train_val)) if i >= len(X_train)]
+        X_train, X_val = X_train_val[idx_tr], X_train_val[idx_va]
+        y_train, y_val = y_train_val[idx_tr], y_train_val[idx_va]
+        quality_train = [quality_train_val[i] for i in idx_tr]
+        quality_val   = [quality_train_val[i] for i in idx_va]
+        ages_train    = [ages_train_val[i]    for i in idx_tr]
+        ages_val      = [ages_train_val[i]    for i in idx_va]
         
         print(f"训练集: {X_train.shape}, 验证集: {X_val.shape}, 测试集: {X_test.shape}")
         
@@ -460,52 +468,54 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         val_loss, val_mae = evaluate_in_batches(X_val, y_val)
         test_loss, test_mae = evaluate_in_batches(X_test, y_test)
         
-        # 预测BS分数 - 使用更小的批量
-        y_bs_pred = []
-        for i in range(0, len(X_test), 8):  # 增大批量大小
-            batch_end = min(i + 8, len(X_test))
-            batch_X = X_test[i:batch_end]
-            batch_pred = model.predict(batch_X, verbose=0).flatten()
-            y_bs_pred.extend(batch_pred)
-        y_bs_pred = np.array(y_bs_pred)
-        
-        # 构建增强特征用于逻辑回归 - 添加数据清理
-        ages_test_array = np.array(ages_test)
-        
-        # 检查并清理无效数据
-        valid_idx = np.isfinite(ages_test_array) & np.isfinite(y_bs_pred) & (y_bs_pred > 0)
-        if not np.all(valid_idx):
-            print(f"警告：发现 {np.sum(~valid_idx)} 个无效样本，已过滤")
-            ages_test_array = ages_test_array[valid_idx]
-            y_bs_pred = y_bs_pred[valid_idx]
-            quality_test = [quality_test[i] for i in range(len(quality_test)) if valid_idx[i]]
-        
-        # 构建增强特征
-        enhanced_features = np.column_stack([
-            ages_test_array, y_bs_pred, ages_test_array ** 2, y_bs_pred ** 2,
-            ages_test_array * y_bs_pred, np.log(ages_test_array + 1), 1 / (y_bs_pred + 1e-6)
+        # 1) 用 BiLSTM 计算 train_val 的 BS 预测
+        y_bs_pred_trainval = []
+        for i in range(0, len(X_train_val), 8):
+            j = min(i + 8, len(X_train_val))
+            y_bs_pred_trainval.extend(model.predict(X_train_val[i:j], verbose=0).flatten())
+        y_bs_pred_trainval = np.array(y_bs_pred_trainval)
+
+        ages_trainval_array = np.array(ages_train_val)
+        features_trainval = np.column_stack([
+            ages_trainval_array, y_bs_pred_trainval,
+            ages_trainval_array ** 2, y_bs_pred_trainval ** 2,
+            ages_trainval_array * y_bs_pred_trainval, np.log(ages_trainval_array + 1),
+            1.0 / (y_bs_pred_trainval + 1e-6)
         ])
-        
-        # 再次检查特征的有效性
-        valid_feature_idx = np.isfinite(enhanced_features).all(axis=1)
-        if not np.all(valid_feature_idx):
-            print(f"警告：发现 {np.sum(~valid_feature_idx)} 个无效特征，已过滤")
-            enhanced_features = enhanced_features[valid_feature_idx]
-            quality_test = [quality_test[i] for i in range(len(quality_test)) if valid_feature_idx[i]]
-        
-        # 标准化特征
-        scaler = StandardScaler()
-        enhanced_features_scaled = scaler.fit_transform(enhanced_features)
-        
-        # 训练逻辑回归
+
+        valid_trainval = np.isfinite(features_trainval).all(axis=1)
+        features_trainval = features_trainval[valid_trainval]
+        quality_train_val_filtered = [quality_train_val[i] for i in range(len(quality_train_val)) if valid_trainval[i]]
+
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler().fit(features_trainval)
+
         clf = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
-        clf.fit(enhanced_features_scaled, quality_test)
-        
-        # 逻辑回归预测
-        y_pred_proba = clf.predict_proba(enhanced_features_scaled)[:, 1]
-        logic_acc = accuracy_score(quality_test, clf.predict(enhanced_features_scaled))
-        logic_auc = roc_auc_score(quality_test, y_pred_proba)
-        logic_loss = log_loss(quality_test, y_pred_proba)
+        clf.fit(scaler.transform(features_trainval), quality_train_val_filtered)
+
+        # 2) 在 test 上评估
+        y_bs_pred = []
+        for i in range(0, len(X_test), 8):
+            j = min(i + 8, len(X_test))
+            y_bs_pred.extend(model.predict(X_test[i:j], verbose=0).flatten())
+        y_bs_pred = np.array(y_bs_pred)
+
+        ages_test_array = np.array(ages_test)
+        features_test = np.column_stack([
+            ages_test_array, y_bs_pred,
+            ages_test_array ** 2, y_bs_pred ** 2,
+            ages_test_array * y_bs_pred, np.log(ages_test_array + 1),
+            1.0 / (y_bs_pred + 1e-6)
+        ])
+        valid_test = np.isfinite(features_test).all(axis=1)
+        features_test = features_test[valid_test]
+        quality_test_filtered = [quality_test[i] for i in range(len(quality_test)) if valid_test[i]]
+
+        X_test_scaled = scaler.transform(features_test)
+        y_pred_proba = clf.predict_proba(X_test_scaled)[:, 1]
+        logic_acc = accuracy_score(quality_test_filtered, (y_pred_proba > 0.5).astype(int))
+        logic_auc = roc_auc_score(quality_test_filtered, y_pred_proba)
+        logic_loss = log_loss(quality_test_filtered, y_pred_proba)
         
         # 记录结果
         fold_results['train_mae'].append(train_mae)
@@ -520,8 +530,8 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         fold_results['best_epochs'].append(np.argmin(history.history['val_loss']) + 1)
         
         # 存储预测结果
-        all_predictions.append(y_pred_proba)
-        all_true_labels.extend(quality_test)
+        all_predictions.append(np.array(y_pred_proba))
+        all_true_labels.append(np.array(quality_test_filtered))
         
         print(f"测试MAE: {test_mae:.4f}, 逻辑回归AUC: {logic_auc:.4f}")
         
@@ -549,6 +559,14 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
     print(f"逻辑回归准确率: {cv_summary['logic_acc_mean']:.4f} ± {cv_summary['logic_acc_std']:.4f}")
     
     return cv_summary, fold_results, all_predictions, all_true_labels
+
+def cv_concat_metrics(all_pred_proba, all_labels):
+    y = np.concatenate(all_labels, axis=0)
+    p = np.concatenate(all_pred_proba, axis=0)
+    return {
+        "auc_overall": roc_auc_score(y, p),
+        "acc_overall": accuracy_score(y, (p > 0.5).astype(int))
+    }
 
 def ensemble_predictions(all_predictions, all_true_labels, method='mean'):
     """
@@ -741,7 +759,7 @@ def load_or_build_features(root_dir, score_dict, valid_embryo_df):
     else:
         print("=== 构建多模型特征数据集 ===")
         multi_extractor = MultiModelFeatureExtractor()
-        X, y_bs, quality_labels, ages = build_dataset_fast(root_dir, score_dict, multi_extractor, valid_embryo_df, training=True)
+        X, y_bs, quality_labels, ages = build_dataset_fast(root_dir, score_dict, multi_extractor, valid_embryo_df, training=False)
         
         # 保存缓存
         print("=== 保存特征数据到缓存 ===")
@@ -786,6 +804,19 @@ def split_dataset(X, y_bs, quality_labels, ages):
     return (X_train, X_val, X_test, y_train, y_val, y_test, 
             quality_train, quality_val, quality_test,
             ages_train, ages_val, ages_test)
+
+def balance_train_subset(X, y_bs, quality_labels, ages):
+    from sklearn.utils import resample
+    y_series = pd.Series(quality_labels)
+    if y_series.nunique() < 2:
+        return X, y_bs, quality_labels, ages
+    idx_good = np.where(y_series == 1)[0]
+    idx_poor = np.where(y_series == 0)[0]
+    min_count = min(len(idx_good), len(idx_poor))
+    sel_good = resample(idx_good, replace=False, n_samples=min_count, random_state=42)
+    sel_poor = resample(idx_poor, replace=False, n_samples=min_count, random_state=42)
+    sel = np.concatenate([sel_good, sel_poor])
+    return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
     """训练主模型"""
@@ -857,54 +888,53 @@ def evaluate_model(model, X_test, y_test):
     
     return test_loss, test_mae
 
-def perform_logistic_regression(model, X_test, ages_test, quality_test, test_mae):
-    """执行逻辑回归分析 - 只使用测试集数据"""
+def perform_logistic_regression(model, X_trainval, ages_trainval, quality_trainval, X_test, ages_test, quality_test, test_mae):
     print("=== 逻辑回归分析 ===")
-    
-    # 预测BS分数 - 只使用测试集
-    print("预测BS分数...")
+
+    # 1) 在训练+验证集上获取 BS 预测并拟合 scaler / clf
+    print("在训练+验证集上拟合逻辑回归...")
     batch_size = 16
-    y_bs_pred_all = []
-    
-    for i in range(0, len(X_test), batch_size):
-        batch_end = min(i + batch_size, len(X_test))
-        batch_X = X_test[i:batch_end]
-        batch_pred = model.predict(batch_X, verbose=0).flatten()
-        y_bs_pred_all.extend(batch_pred)
-    
-    y_bs_pred_all = np.array(y_bs_pred_all)
+    y_bs_pred_tr = []
+    for i in range(0, len(X_trainval), batch_size):
+        j = min(i + batch_size, len(X_trainval))
+        y_bs_pred_tr.extend(model.predict(X_trainval[i:j], verbose=0).flatten())
+    y_bs_pred_tr = np.array(y_bs_pred_tr)
 
-    # 构建增强特征
-    ages_array = np.array(ages_test)
-    enhanced_features = np.column_stack([
-        ages_array, y_bs_pred_all, ages_array ** 2, y_bs_pred_all ** 2,
-        ages_array * y_bs_pred_all, np.log(ages_array + 1), 1 / (y_bs_pred_all + 1e-6)
+    ages_tr = np.array(ages_trainval)
+    feats_tr = np.column_stack([
+        ages_tr, y_bs_pred_tr, ages_tr**2, y_bs_pred_tr**2,
+        ages_tr * y_bs_pred_tr, np.log(ages_tr + 1), 1.0 / (y_bs_pred_tr + 1e-6)
     ])
-    
-    logic_y = np.array(quality_test)
+    valid_tr = np.isfinite(feats_tr).all(axis=1)
+    feats_tr = feats_tr[valid_tr]
+    logic_y_tr = np.array([quality_trainval[i] for i in range(len(quality_trainval)) if valid_tr[i]])
 
-    # 清理无效数据
-    valid_idx = np.isfinite(enhanced_features).all(axis=1) & np.isfinite(logic_y)
-    enhanced_features = enhanced_features[valid_idx]
-    logic_y = logic_y[valid_idx]
-    ages_array = ages_array[valid_idx]
-    y_bs_pred_all = y_bs_pred_all[valid_idx]
-    
-    print(f"有效样本数: {len(logic_y)}")
-    print(f"特征维度: {enhanced_features.shape[1]}")
-
-    # 特征标准化和训练
     from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    enhanced_features_scaled = scaler.fit_transform(enhanced_features)
-
+    scaler = StandardScaler().fit(feats_tr)
     clf = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
-    clf.fit(enhanced_features_scaled, logic_y)
+    clf.fit(scaler.transform(feats_tr), logic_y_tr)
 
-    # 预测和评估
-    y_pred_cls = clf.predict(enhanced_features_scaled)
-    y_pred_proba = clf.predict_proba(enhanced_features_scaled)[:, 1]
-    
+    # 2) 在测试集上评估
+    print("在测试集上评估逻辑回归...")
+    y_bs_pred_te = []
+    for i in range(0, len(X_test), batch_size):
+        j = min(i + batch_size, len(X_test))
+        y_bs_pred_te.extend(model.predict(X_test[i:j], verbose=0).flatten())
+    y_bs_pred_te = np.array(y_bs_pred_te)
+
+    ages_te = np.array(ages_test)
+    feats_te = np.column_stack([
+        ages_te, y_bs_pred_te, ages_te**2, y_bs_pred_te**2,
+        ages_te * y_bs_pred_te, np.log(ages_te + 1), 1.0 / (y_bs_pred_te + 1e-6)
+    ])
+    valid_te = np.isfinite(feats_te).all(axis=1)
+    feats_te = feats_te[valid_te]
+    logic_y = np.array([quality_test[i] for i in range(len(quality_test)) if valid_te[i]])
+
+    X_te_scaled = scaler.transform(feats_te)
+    y_pred_cls = clf.predict(X_te_scaled)
+    y_pred_proba = clf.predict_proba(X_te_scaled)[:, 1]
+
     logic_loss = log_loss(logic_y, y_pred_proba)
     logic_acc = accuracy_score(logic_y, y_pred_cls)
     auc_score = roc_auc_score(logic_y, y_pred_proba)
@@ -915,14 +945,13 @@ def perform_logistic_regression(model, X_test, ages_test, quality_test, test_mae
     print(f"对数损失: {logic_loss:.4f}")
     print(f"AUC分数: {auc_score:.4f}")
 
-    # 特征重要性
     feature_names = ['Age', 'BS_pred', 'Age²', 'BS_pred²', 'Age×BS', 'ln(Age)', '1/BS']
     feature_importance = np.abs(clf.coef_[0])
-    
+
     print("\n=== 特征重要性 ===")
     for name, importance in zip(feature_names, feature_importance):
         print(f"{name}: {importance:.4f}")
-    
+
     return {
         'logic_acc': logic_acc,
         'auc_score': auc_score,
@@ -931,8 +960,8 @@ def perform_logistic_regression(model, X_test, ages_test, quality_test, test_mae
         'feature_importance': feature_importance,
         'y_pred_proba': y_pred_proba,
         'logic_y': logic_y,
-        'ages_array': ages_array,
-        'y_bs_pred_all': y_bs_pred_all
+        'ages_array': ages_te[valid_te],
+        'y_bs_pred_all': y_bs_pred_te[valid_te]
     }
 
 def create_visualizations(logic_results, test_mae):
@@ -1023,16 +1052,16 @@ def run_cross_validation(X, y_bs, quality_labels, ages, feature_dim):
     plot_cross_validation_results(cv_summary, fold_results)
     
     # 集成预测结果 - 修复版本
+    # 拼接所有折的预测，计算总体指标
     try:
-        ensemble_pred, ensemble_true = ensemble_predictions(all_predictions, all_true_labels, method='mean')
-        ensemble_acc = accuracy_score(ensemble_true, ensemble_pred > 0.5)
-        ensemble_auc = roc_auc_score(ensemble_true, ensemble_pred)
-        
-        print(f"\n=== 集成学习结果 ===")
-        print(f"集成准确率: {ensemble_acc:.4f}")
-        print(f"集成AUC: {ensemble_auc:.4f}")
-        
-        # 保存结果
+        concat = cv_concat_metrics(all_predictions, all_true_labels)
+        ensemble_acc = concat['acc_overall']
+        ensemble_auc = concat['auc_overall']
+
+        print(f"\n=== 交叉验证总体（拼接）结果 ===")
+        print(f"总体准确率: {ensemble_acc:.4f}")
+        print(f"总体AUC: {ensemble_auc:.4f}")
+
         import json
         cv_results = {
             'cv_summary': cv_summary,
@@ -1043,10 +1072,7 @@ def run_cross_validation(X, y_bs, quality_labels, ages, feature_dim):
             }
         }
     except Exception as e:
-        print(f"集成预测失败: {e}")
-        print("跳过集成学习，仅保存交叉验证结果")
-        
-        # 保存结果
+        print(f"汇总预测失败: {e}")
         import json
         cv_results = {
             'cv_summary': cv_summary,
@@ -1078,6 +1104,8 @@ if __name__ == "__main__":
     (X_train, X_val, X_test, y_train, y_val, y_test, 
      quality_train, quality_val, quality_test,
      ages_train, ages_val, ages_test) = split_dataset(X, y_bs, quality_labels, ages)
+    # 仅对训练集做类别均衡
+    X_train, y_train, quality_train, ages_train = balance_train_subset(X_train, y_train, quality_train, ages_train)
     
     # 4. 训练主模型
     model, history = train_main_model(X_train, y_train, X_val, y_val, X.shape[2] // 11, save_model_path)
@@ -1086,8 +1114,11 @@ if __name__ == "__main__":
     test_loss, test_mae = evaluate_model(model, X_test, y_test)
     
     # 6. 逻辑回归分析 - 修改这里，传递测试集的年龄
-    logic_results = perform_logistic_regression(model, X_test, ages_test, quality_test, test_mae)
-    
+    X_trainval_concat = np.concatenate([X_train, X_val], axis=0)
+    ages_trainval = ages_train + ages_val
+    quality_trainval = quality_train + quality_val
+    logic_results = perform_logistic_regression(model, X_trainval_concat, ages_trainval, quality_trainval, X_test, ages_test, quality_test, test_mae)
+        
     # 7. 创建可视化
     create_visualizations(logic_results, test_mae)
     
