@@ -909,6 +909,10 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
 
     # 在strategy作用域内构建
     with strategy.scope():
+        # 可选：启用混合精度训练（可以显著减少内存占用）
+        # policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        # tf.keras.mixed_precision.set_global_policy(policy)
+        
         model = create_model(feature_dim)
         print("模型参数统计:")
         model.summary()
@@ -939,25 +943,20 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
 
         # 正确的分布式训练步骤
         @tf.function
-        def distributed_train_step(inputs):
-            def train_step(batch_data):
+        def distributed_val_step(inputs):
+            def val_step(batch_data):
                 x, y = batch_data
-                with tf.GradientTape() as tape:
-                    predictions = model(x, training=True)
-                    # 计算每个样本的损失
-                    per_example_loss = tf.keras.losses.mse(y, predictions)
-                    # TensorFlow会自动处理跨replica的平均
-                    loss = tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
-                
-                gradients = tape.gradient(loss, model.trainable_variables)
-                model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+                predictions = model(x, training=False)
+                per_example_loss = tf.keras.losses.mse(y, predictions)
+                # 验证集用实际batch size，不用global_batch_size
+                loss = tf.reduce_mean(per_example_loss)
                 
                 return {
                     'loss': loss,
                     'mae': tf.keras.metrics.mean_absolute_error(y, predictions)
                 }
             
-            return strategy.run(train_step, args=(inputs,))
+            return strategy.run(val_step, args=(inputs,))
 
         @tf.function
         def distributed_val_step(inputs):
@@ -965,7 +964,8 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
                 x, y = batch_data
                 predictions = model(x, training=False)
                 per_example_loss = tf.keras.losses.mse(y, predictions)
-                loss = tf.nn.compute_average_loss(per_example_loss, global_batch_size=global_batch_size)
+                # 验证集用实际batch size，不用global_batch_size
+                loss = tf.reduce_mean(per_example_loss)
                 
                 return {
                     'loss': loss,
@@ -996,14 +996,15 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         for batch in tqdm(train_dist_ds, desc="Training", leave=False):
             train_results = distributed_train_step(batch)
             
-            # 正确的结果聚合 - 不需要手动reduce
+            # 正确的结果聚合 - 聚合所有GPU的结果
             train_loss = train_results['loss']
             train_mae = train_results['mae']
             
-            # 如果是分布式张量，获取本地值
+            # 正确聚合分布式结果
             if hasattr(train_loss, 'values'):
-                train_loss = train_loss.values[0]  # 取第一个replica的值
-                train_mae = train_mae.values[0]
+                # 聚合所有replica的结果
+                train_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, train_loss, axis=None)
+                train_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, train_mae, axis=None)
             
             epoch_train_losses.append(float(train_loss))
             epoch_train_maes.append(float(train_mae))
@@ -1018,9 +1019,28 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
             val_loss = val_results['loss']
             val_mae = val_results['mae']
             
+            # 正确聚合验证结果
             if hasattr(val_loss, 'values'):
-                val_loss = val_loss.values[0]
-                val_mae = val_mae.values[0]
+                val_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_loss, axis=None)
+                val_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_mae, axis=None)
+            
+            epoch_val_losses.append(float(val_loss))
+            epoch_val_maes.append(float(val_mae))
+        
+        # 验证阶段
+        epoch_val_losses = []
+        epoch_val_maes = []
+        
+        for batch in tqdm(val_dist_ds, desc="Validation", leave=False):
+            val_results = distributed_val_step(batch)
+            
+            val_loss = val_results['loss']
+            val_mae = val_results['mae']
+            
+            # 正确聚合验证结果
+            if hasattr(val_loss, 'values'):
+                val_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_loss, axis=None)
+                val_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_mae, axis=None)
             
             epoch_val_losses.append(float(val_loss))
             epoch_val_maes.append(float(val_mae))
