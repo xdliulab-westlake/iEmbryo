@@ -853,66 +853,89 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
     return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
-    """训练主模型（修复多GPU和OOM问题）"""
-    print("=== 训练主模型 ===")
+    """训练主模型（彻底修复多GPU + OOM问题）"""
+    print("=== 训练主模型（多GPU优化版）===")
     
-    # 简化的特征增强函数，避免复杂的GPU操作
-    def simple_feature_augmentation(features, training=True):
-        """简化的特征增强，避免复杂reshape"""
-        if not training:
-            return features
-            
-        # 只做简单的增强，避免复杂的reshape操作
-        # 1. 特征噪声
-        if tf.random.uniform([]) > 0.5:
-            noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=0.005)
-            features = features + noise
-        
-        # 2. 特征缩放
-        if tf.random.uniform([]) > 0.6:
-            scale = tf.random.uniform([], minval=0.98, maxval=1.02)
-            features = features * scale
-        
-        # 3. 时间维度dropout（简化版）
-        if tf.random.uniform([]) > 0.7:
-            # 随机将2-3个时间步的特征乘以小系数
-            num_drop = tf.random.uniform([], minval=2, maxval=4, dtype=tf.int32)
-            drop_mask = tf.random.uniform([tf.shape(features)[1]]) > (tf.cast(num_drop, tf.float32) / 33.0)
-            drop_mask = tf.reshape(drop_mask, [1, -1, 1])
-            features = features * tf.cast(drop_mask, tf.float32) + features * 0.1 * tf.cast(~drop_mask, tf.float32)
-        
-        return features
-
-    # 检测GPU并设置内存增长
+    # 清理GPU内存
+    tf.keras.backend.clear_session()
+    import gc
+    gc.collect()
+    
+    # 配置GPU内存增长和限制
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
+                # 限制每个GPU最大内存使用量
+                tf.config.experimental.set_memory_limit(gpu, 81920)  # 40GB限制
         except RuntimeError as e:
             print(f"GPU配置错误: {e}")
     
-    # 多卡策略 - 改进版
-    try:
-        if len(gpus) > 1:
-            strategy = tf.distribute.MirroredStrategy()
-            print(f"使用多GPU训练，可用GPU数量: {strategy.num_replicas_in_sync}")
-        else:
-            strategy = tf.distribute.OneDeviceStrategy("/gpu:0" if gpus else "/cpu:0")
-            print("使用单GPU/CPU训练")
-    except Exception as e:
-        print(f"分布式策略失败: {e}, 使用单GPU")
+    print(f"检测到 {len(gpus)} 个GPU")
+    
+    # 多GPU策略配置
+    if len(gpus) > 1:
+        # 配置多GPU通信
+        os.environ['NCCL_DEBUG'] = 'INFO'
+        os.environ['NCCL_TREE_THRESHOLD'] = '0'
+        
+        # 创建多GPU策略
+        strategy = tf.distribute.MirroredStrategy(
+            devices=[f"/gpu:{i}" for i in range(len(gpus))],
+            cross_device_ops=tf.distribute.HierarchicalCopyAllReduce()
+        )
+        print(f"使用多GPU训练，设备: {strategy.extended.worker_devices}")
+        print(f"GPU数量: {strategy.num_replicas_in_sync}")
+    else:
         strategy = tf.distribute.OneDeviceStrategy("/gpu:0" if gpus else "/cpu:0")
+        print("使用单GPU/CPU训练")
 
-    # 调整批量大小适应多GPU和大特征维度
-    base_batch_size = 8  # 减小基础批量大小
+    # 针对大特征维度调整批量大小
+    feature_size = X_train.shape[2]  # 63360
+    print(f"特征维度: {feature_size}")
+    
+    # 动态计算批量大小
+    if feature_size > 50000:  # 大特征维度
+        base_batch_size = 2  # 非常小的批量
+    elif feature_size > 30000:
+        base_batch_size = 4
+    else:
+        base_batch_size = 8
+    
     global_batch_size = base_batch_size * strategy.num_replicas_in_sync
     print(f"全局批量大小: {global_batch_size} (基础: {base_batch_size} × GPU数: {strategy.num_replicas_in_sync})")
+    
+    # 计算内存占用估算
+    memory_per_sample = feature_size * 4 * 33 / (1024**3)  # GB
+    total_memory = memory_per_sample * global_batch_size * len(gpus)
+    print(f"估算内存占用: {total_memory:.2f}GB")
+    
+    # 简化的特征增强函数
+    def lightweight_augmentation(features, training=True):
+        """轻量级增强，避免大内存操作"""
+        if not training:
+            return features
+        
+        # 只做最轻量的增强
+        if tf.random.uniform([]) > 0.7:
+            # 小幅噪声
+            noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=0.002)
+            features = features + noise
+        
+        return features
 
+    # 在strategy作用域内构建所有组件
     with strategy.scope():
+        # 创建模型
         model = create_model(feature_dim)
-        print("模型结构:")
+        print("\n模型参数统计:")
         model.summary()
+        
+        # 计算模型参数内存占用
+        total_params = model.count_params()
+        model_memory = total_params * 4 / (1024**3)  # GB
+        print(f"模型参数内存: {model_memory:.2f}GB")
 
         # 回调函数
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
@@ -922,57 +945,157 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
             ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
         ]
 
-        # 数据管道 - 修复版本，避免在map中做复杂GPU操作
-        print("=== 构建数据管道 ===")
+        # 分布式数据管道
+        print("=== 构建分布式数据管道 ===")
         
-        # 训练集：在CPU上构建数据集，然后分发到GPU
+        # 训练集数据管道
         train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-        train_ds = train_ds.shuffle(buffer_size=min(1000, len(X_train)))
-        train_ds = train_ds.batch(global_batch_size, drop_remainder=True)  # drop_remainder对多GPU重要
+        train_ds = train_ds.shuffle(buffer_size=min(512, len(X_train)))  # 减小shuffle buffer
+        train_ds = train_ds.batch(global_batch_size, drop_remainder=True)  # 必须drop_remainder
         train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
         
-        # 验证集：不需要增强
+        # 验证集数据管道
         val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
         val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
         val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+        
+        # 分发数据集到各GPU
+        train_dist_ds = strategy.experimental_distribute_dataset(train_ds)
+        val_dist_ds = strategy.experimental_distribute_dataset(val_ds)
 
-    print("=== 开始训练（多GPU优化版）===")
-    
-    # 训练模型 - 在训练步骤中应用增强
-    class AugmentedModel(tf.keras.Model):
-        def __init__(self, base_model, feature_dim):
-            super().__init__()
-            self.base_model = base_model
-            self.feature_dim = feature_dim
+        # 自定义训练步骤
+        @tf.function
+        def distributed_train_step(inputs):
+            def train_step(batch_data):
+                x, y = batch_data
+                with tf.GradientTape() as tape:
+                    # 应用轻量增强
+                    x_aug = lightweight_augmentation(x, training=True)
+                    predictions = model(x_aug, training=True)
+                    loss = tf.keras.losses.mse(y, predictions)
+                    # 重要：计算每个replica的平均损失
+                    scaled_loss = loss / strategy.num_replicas_in_sync
+                
+                gradients = tape.gradient(scaled_loss, model.trainable_variables)
+                model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+                return {'loss': scaled_loss, 'mae': tf.keras.metrics.mean_absolute_error(y, predictions)}
             
-        def call(self, inputs, training=None):
-            if training:
-                # 在forward pass中应用增强
-                inputs = simple_feature_augmentation(inputs, training=True)
-            return self.base_model(inputs, training=training)
-    
-    # 包装模型
-    augmented_model = AugmentedModel(model, feature_dim)
-    
-    # 训练
-    history = augmented_model.fit(
-        train_ds, 
-        validation_data=val_ds, 
-        epochs=20, 
-        callbacks=callbacks, 
-        verbose=1
-    )
+            return strategy.run(train_step, args=(inputs,))
 
-    # 打印训练结果
-    best_epoch = np.argmin(history.history['val_loss']) + 1
-    best_val_loss = min(history.history['val_loss'])
-    best_val_mae = history.history['val_mae'][best_epoch-1]
+        @tf.function
+        def distributed_val_step(inputs):
+            def val_step(batch_data):
+                x, y = batch_data
+                predictions = model(x, training=False)
+                loss = tf.keras.losses.mse(y, predictions)
+                return {'loss': loss, 'mae': tf.keras.metrics.mean_absolute_error(y, predictions)}
+            
+            return strategy.run(val_step, args=(inputs,))
+
+    print("=== 开始多GPU训练 ===")
     
-    print(f"最佳epoch: {best_epoch}")
+    # 训练循环
+    train_losses = []
+    val_losses = []
+    train_maes = []
+    val_maes = []
+    
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(20):
+        print(f"\nEpoch {epoch + 1}/20")
+        
+        # 训练阶段
+        epoch_train_losses = []
+        epoch_train_maes = []
+        
+        # 训练进度条
+        train_bar = tqdm(train_dist_ds, desc=f"Training", leave=False)
+        for batch in train_bar:
+            train_results = distributed_train_step(batch)
+            
+            # 聚合结果
+            train_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, train_results['loss'], axis=None)
+            train_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, train_results['mae'], axis=None)
+            
+            epoch_train_losses.append(train_loss.numpy())
+            epoch_train_maes.append(train_mae.numpy())
+            
+            train_bar.set_postfix({
+                'train_loss': f'{train_loss.numpy():.4f}',
+                'train_mae': f'{train_mae.numpy():.4f}'
+            })
+        
+        # 验证阶段
+        epoch_val_losses = []
+        epoch_val_maes = []
+        
+        val_bar = tqdm(val_dist_ds, desc=f"Validation", leave=False)
+        for batch in val_bar:
+            val_results = distributed_val_step(batch)
+            
+            val_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_results['loss'], axis=None)
+            val_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_results['mae'], axis=None)
+            
+            epoch_val_losses.append(val_loss.numpy())
+            epoch_val_maes.append(val_mae.numpy())
+            
+            val_bar.set_postfix({
+                'val_loss': f'{val_loss.numpy():.4f}',
+                'val_mae': f'{val_mae.numpy():.4f}'
+            })
+        
+        # 计算epoch平均值
+        avg_train_loss = np.mean(epoch_train_losses)
+        avg_train_mae = np.mean(epoch_train_maes)
+        avg_val_loss = np.mean(epoch_val_losses)
+        avg_val_mae = np.mean(epoch_val_maes)
+        
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        train_maes.append(avg_train_mae)
+        val_maes.append(avg_val_mae)
+        
+        print(f"Train Loss: {avg_train_loss:.4f}, Train MAE: {avg_train_mae:.4f}")
+        print(f"Val Loss: {avg_val_loss:.4f}, Val MAE: {avg_val_mae:.4f}")
+        
+        # 早停和学习率调整
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            # 保存最佳模型
+            model.save_weights(save_model_path)
+            print("保存最佳模型")
+        else:
+            patience_counter += 1
+            if patience_counter >= 8:
+                print("早停触发")
+                break
+            elif patience_counter >= 5:
+                # 降低学习率
+                old_lr = model.optimizer.learning_rate.numpy()
+                new_lr = old_lr * 0.5
+                model.optimizer.learning_rate.assign(new_lr)
+                print(f"学习率降低: {old_lr:.6f} -> {new_lr:.6f}")
+    
+    # 加载最佳模型权重
+    model.load_weights(save_model_path)
+    
+    # 创建历史记录
+    history = type('History', (), {
+        'history': {
+            'loss': train_losses,
+            'val_loss': val_losses,
+            'mae': train_maes,
+            'val_mae': val_maes
+        }
+    })()
+    
+    print(f"\n=== 训练完成 ===")
     print(f"最佳验证损失: {best_val_loss:.4f}")
-    print(f"最佳验证MAE: {best_val_mae:.4f}")
+    print(f"使用了 {len(gpus)} 个GPU")
     
-    # 返回原始模型（不带增强）
     return model, history
 
 def evaluate_model(model, X_test, y_test):
