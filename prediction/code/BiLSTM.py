@@ -937,169 +937,30 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
         val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
 
-        # 分发到各GPU
-        train_dist_ds = strategy.experimental_distribute_dataset(train_ds)
-        val_dist_ds = strategy.experimental_distribute_dataset(val_ds)
+         # 简化：直接使用Keras的fit方法，自动处理分布式训练
+        print("=== 构建回调函数 ===")
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+        
+        callbacks = [
+            EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
+            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
+            ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
+        ]
 
-        # 正确的分布式训练步骤
-        @tf.function
-        def distributed_val_step(inputs):
-            def val_step(batch_data):
-                x, y = batch_data
-                predictions = model(x, training=False)
-                per_example_loss = tf.keras.losses.mse(y, predictions)
-                # 验证集用实际batch size，不用global_batch_size
-                loss = tf.reduce_mean(per_example_loss)
-                
-                return {
-                    'loss': loss,
-                    'mae': tf.keras.metrics.mean_absolute_error(y, predictions)
-                }
-            
-            return strategy.run(val_step, args=(inputs,))
+    print("=== 开始多GPU训练（使用model.fit）===")
+    
+    # 使用Keras的fit方法，自动处理分布式训练
+    history = model.fit(
+        train_ds,  # 使用原始数据集，不是分布式版本
+        validation_data=val_ds,
+        epochs=20,
+        callbacks=callbacks,
+        verbose=1
+    )
 
-        @tf.function
-        def distributed_val_step(inputs):
-            def val_step(batch_data):
-                x, y = batch_data
-                predictions = model(x, training=False)
-                per_example_loss = tf.keras.losses.mse(y, predictions)
-                # 验证集用实际batch size，不用global_batch_size
-                loss = tf.reduce_mean(per_example_loss)
-                
-                return {
-                    'loss': loss,
-                    'mae': tf.keras.metrics.mean_absolute_error(y, predictions)
-                }
-            
-            return strategy.run(val_step, args=(inputs,))
-
-    print("=== 开始多GPU训练 ===")
-    
-    # 训练循环
-    train_losses = []
-    val_losses = []
-    train_maes = []
-    val_maes = []
-    
-    best_val_loss = float('inf')
-    patience_counter = 0
-    lr_patience_counter = 0
-    
-    for epoch in range(20):
-        print(f"\nEpoch {epoch + 1}/20")
-        
-        # 训练阶段
-        epoch_train_losses = []
-        epoch_train_maes = []
-        
-        for batch in tqdm(train_dist_ds, desc="Training", leave=False):
-            train_results = distributed_train_step(batch)
-            
-            # 正确的结果聚合 - 聚合所有GPU的结果
-            train_loss = train_results['loss']
-            train_mae = train_results['mae']
-            
-            # 正确聚合分布式结果
-            if hasattr(train_loss, 'values'):
-                # 聚合所有replica的结果
-                train_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, train_loss, axis=None)
-                train_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, train_mae, axis=None)
-            
-            epoch_train_losses.append(float(train_loss))
-            epoch_train_maes.append(float(train_mae))
-        
-        # 验证阶段
-        epoch_val_losses = []
-        epoch_val_maes = []
-        
-        for batch in tqdm(val_dist_ds, desc="Validation", leave=False):
-            val_results = distributed_val_step(batch)
-            
-            val_loss = val_results['loss']
-            val_mae = val_results['mae']
-            
-            # 正确聚合验证结果
-            if hasattr(val_loss, 'values'):
-                val_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_loss, axis=None)
-                val_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_mae, axis=None)
-            
-            epoch_val_losses.append(float(val_loss))
-            epoch_val_maes.append(float(val_mae))
-        
-        # 验证阶段
-        epoch_val_losses = []
-        epoch_val_maes = []
-        
-        for batch in tqdm(val_dist_ds, desc="Validation", leave=False):
-            val_results = distributed_val_step(batch)
-            
-            val_loss = val_results['loss']
-            val_mae = val_results['mae']
-            
-            # 正确聚合验证结果
-            if hasattr(val_loss, 'values'):
-                val_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_loss, axis=None)
-                val_mae = strategy.reduce(tf.distribute.ReduceOp.MEAN, val_mae, axis=None)
-            
-            epoch_val_losses.append(float(val_loss))
-            epoch_val_maes.append(float(val_mae))
-        
-        # 计算epoch平均值
-        avg_train_loss = np.mean(epoch_train_losses)
-        avg_train_mae = np.mean(epoch_train_maes)
-        avg_val_loss = np.mean(epoch_val_losses)
-        avg_val_mae = np.mean(epoch_val_maes)
-        
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        train_maes.append(avg_train_mae)
-        val_maes.append(avg_val_mae)
-        
-        print(f"Train Loss: {avg_train_loss:.4f}, Train MAE: {avg_train_mae:.4f}")
-        print(f"Val Loss: {avg_val_loss:.4f}, Val MAE: {avg_val_mae:.4f}")
-        
-        # 早停和学习率调整
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            lr_patience_counter = 0
-            model.save_weights(save_model_path)
-            print("保存最佳模型")
-        else:
-            patience_counter += 1
-            lr_patience_counter += 1
-            
-            # 学习率调整
-            if lr_patience_counter >= 5:
-                old_lr = float(model.optimizer.learning_rate)
-                new_lr = old_lr * 0.5
-                if new_lr >= 1e-7:  # 最小学习率限制
-                    model.optimizer.learning_rate.assign(new_lr)
-                    print(f"学习率降低: {old_lr:.6f} -> {new_lr:.6f}")
-                    lr_patience_counter = 0
-            
-            # 早停
-            if patience_counter >= 8:
-                print("早停触发")
-                break
-    
-    # 加载最佳模型权重
-    model.load_weights(save_model_path)
-    
-    # 创建历史记录
-    history = type('History', (), {
-        'history': {
-            'loss': train_losses,
-            'val_loss': val_losses,
-            'mae': train_maes,
-            'val_mae': val_maes
-        }
-    })()
-    
     print(f"\n=== 训练完成 ===")
-    print(f"最佳验证损失: {best_val_loss:.4f}")
     print(f"使用了 {len(gpus)} 个GPU")
+    print(f"最佳验证损失: {min(history.history['val_loss']):.4f}")
     
     return model, history
 
