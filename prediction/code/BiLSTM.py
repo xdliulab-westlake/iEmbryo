@@ -907,38 +907,37 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         
         return features
 
+    # 在CPU上创建数据集（避免GPU内存问题）
+    print("=== 在CPU上构建数据管道 ===")
+    
+    # 数据增强在数据管道中进行，确保一致性
+    def augment_batch(x, y):
+        x_aug = lightweight_augmentation(x, training=True)
+        return x_aug, y
+    
+    # 训练集 - 在CPU上创建
+    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_ds = train_ds.shuffle(buffer_size=min(1000, len(X_train)))
+    train_ds = train_ds.batch(global_batch_size, drop_remainder=True)
+    train_ds = train_ds.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    
+    # 验证集 - 在CPU上创建
+    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+    val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
+    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+
     # 在strategy作用域内构建
     with strategy.scope():
-        # 可选：启用混合精度训练（可以显著减少内存占用）
-        # policy = tf.keras.mixed_precision.Policy('mixed_float16')
-        # tf.keras.mixed_precision.set_global_policy(policy)
-        
+        # ✅ 只在GPU上创建模型
         model = create_model(feature_dim)
         print("模型参数统计:")
         model.summary()
 
-        # 分布式数据管道
-        print("=== 构建分布式数据管道 ===")
-        
-        # 数据增强在数据管道中进行，确保一致性
-        def augment_batch(x, y):
-            x_aug = lightweight_augmentation(x, training=True)
-            return x_aug, y
-        
-        # 训练集
-        train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-        train_ds = train_ds.shuffle(buffer_size=min(1000, len(X_train)))
-        train_ds = train_ds.batch(global_batch_size, drop_remainder=True)
-        train_ds = train_ds.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
-        train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-        
-        # 验证集
-        val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-        val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
-        val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
-
-         # 简化：直接使用Keras的fit方法，自动处理分布式训练
+        # 构建回调函数
         print("=== 构建回调函数 ===")
+        
+        # 简化：直接使用Keras的fit方法，自动处理分布式训练
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
         
         callbacks = [
