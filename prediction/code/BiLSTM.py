@@ -915,15 +915,42 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         x_aug = lightweight_augmentation(x, training=True)
         return x_aug, y
     
-    # 训练集 - 在CPU上创建
-    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    train_ds = train_ds.shuffle(buffer_size=min(1000, len(X_train)))
+    # 训练集 - 使用生成器避免大内存分配
+    def train_generator():
+        while True:  # 添加无限循环
+            # 创建索引并shuffle
+            indices = np.arange(len(X_train))
+            np.random.shuffle(indices)
+            for i in indices:
+                x = X_train[i].copy()
+                # 应用轻量增强
+                if np.random.random() > 0.7:
+                    noise = np.random.normal(0, 0.002, x.shape).astype(np.float32)
+                    x = x + noise
+                yield x, y_train[i]
+    
+    train_ds = tf.data.Dataset.from_generator(
+        train_generator,
+        output_signature=(
+            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.float32)
+        )
+    )
     train_ds = train_ds.batch(global_batch_size, drop_remainder=True)
-    train_ds = train_ds.map(augment_batch, num_parallel_calls=tf.data.AUTOTUNE)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     
-    # 验证集 - 在CPU上创建
-    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+    # 验证集 - 使用生成器
+    def val_generator():
+        for i in range(len(X_val)):
+            yield X_val[i], y_val[i]
+    
+    val_ds = tf.data.Dataset.from_generator(
+        val_generator,
+        output_signature=(
+            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.float32)
+        )
+    )
     val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
     val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
 
@@ -950,8 +977,10 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     
     # 使用Keras的fit方法，自动处理分布式训练
     history = model.fit(
-        train_ds,  # 使用原始数据集，不是分布式版本
+        train_ds,
+        steps_per_epoch=len(X_train) // global_batch_size,  # 指定步数
         validation_data=val_ds,
+        # 移除validation_steps，让验证集自然结束
         epochs=20,
         callbacks=callbacks,
         verbose=1
@@ -993,13 +1022,24 @@ def evaluate_model(model, X_test, y_test):
 def perform_logistic_regression(model, X_trainval, ages_trainval, quality_trainval, X_test, ages_test, quality_test, test_mae):
     print("=== 逻辑回归分析 ===")
 
+    # 清理GPU状态，避免图执行错误
+    tf.keras.backend.clear_session()
+    import gc
+    gc.collect()
+
     # 1) 在训练+验证集上获取 BS 预测并拟合 scaler / clf
     print("在训练+验证集上拟合逻辑回归...")
-    batch_size = 16
+    batch_size = 8  # 减小批量大小
     y_bs_pred_tr = []
     for i in range(0, len(X_trainval), batch_size):
         j = min(i + batch_size, len(X_trainval))
-        y_bs_pred_tr.extend(model.predict(X_trainval[i:j], verbose=0).flatten())
+        try:
+            pred = model.predict(X_trainval[i:j], verbose=0)
+            y_bs_pred_tr.extend(pred.flatten())
+        except Exception as e:
+            print(f"预测批次 {i}-{j} 失败: {e}")
+            # 如果批次失败，跳过
+            continue
     y_bs_pred_tr = np.array(y_bs_pred_tr)
 
     ages_tr = np.array(ages_trainval)
