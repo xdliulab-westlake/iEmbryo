@@ -1390,3 +1390,4 @@ if __name__ == "__main__":
     print(f"逻辑回归AUC: {logic_results['auc_score']:.4f}")
     print("分析图表已保存至: /liaozizhuo/scripts/multi_model_analysis.pdf")
     print("特征重要性图表已保存至: /liaozizhuo/scripts/feature_importance.pdf")
+
