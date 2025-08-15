@@ -33,23 +33,49 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 import warnings
 warnings.filterwarnings('ignore')
 
-# GPU配置
+# 多GPU环境变量（在导入tensorflow之前）
+# 智能GPU配置（自动检测）
+import tensorflow as tf
+
+# 先检测有多少GPU
 gpus = tf.config.list_physical_devices('GPU')
+num_gpus = len(gpus)
+
+print(f"检测到 {num_gpus} 个GPU: {[gpu.name for gpu in gpus]}")
+
+# 根据GPU数量动态设置环境变量
+if num_gpus > 0:
+    # 自动设置可见GPU
+    gpu_ids = ','.join([str(i) for i in range(num_gpus)])
+    os.environ['CUDA_VISIBLE_DEVICES'] = gpu_ids
+    print(f"设置CUDA_VISIBLE_DEVICES = {gpu_ids}")
+    
+    # 动态设置线程数
+    os.environ['TF_GPU_THREAD_COUNT'] = str(num_gpus)
+    print(f"设置GPU线程数 = {num_gpus}")
+else:
+    print("未检测到GPU，将使用CPU")
+
+# 通用GPU优化设置
+os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
+os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
+
+# 多GPU时的NCCL优化
+if num_gpus > 1:
+    os.environ['NCCL_DEBUG'] = 'INFO'
+    os.environ['NCCL_TREE_THRESHOLD'] = '0'
+    print("启用多GPU NCCL通信优化")
+
+# GPU内存配置
 if gpus:
     try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"已为 {num_gpus} 个GPU启用内存增长")
     except RuntimeError as e:
-        print(e)
-
-# 多GPU优化环境变量
-os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
-os.environ['TF_GPU_THREAD_COUNT'] = '1'
-os.environ['TF_USE_CUDNN_BATCHNORM_SPATIAL_PERSISTENT'] = '1'
-os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
-
-# 防止OOM
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+        print(f"GPU配置错误: {e}")
 
 # 1. 加载评分信息，计算BS_prime
 def load_score_dict(csv_path):
@@ -472,6 +498,13 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             
             cv_model = SimpleCVModel(model)
             
+            # 必须编译包装模型
+            cv_model.compile(
+                optimizer=model.optimizer,    # 使用原模型的优化器
+                loss=model.loss,             # 使用原模型的损失函数
+                metrics=model.metrics         # 使用原模型的评估指标
+            )
+            
             # 数据管道
             train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
             train_ds = train_ds.shuffle(512).batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
@@ -853,8 +886,43 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
     return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
-    """训练主模型（修复训练策略）"""
-    print("=== 训练主模型（正确多GPU策略）===")
+    print("=== 训练主模型（智能GPU策略）===")
+    
+    # 重新检测GPU（防止配置变化）
+    gpus = tf.config.list_physical_devices('GPU')
+    num_gpus = len(gpus)
+    
+    print(f"当前可用GPU数量: {num_gpus}")
+    
+    # 智能选择分布式策略
+    if num_gpus > 1:
+        strategy = tf.distribute.MirroredStrategy()
+        print(f"使用MirroredStrategy，GPU数量: {strategy.num_replicas_in_sync}")
+    elif num_gpus == 1:
+        strategy = tf.distribute.OneDeviceStrategy("/gpu:0")
+        print("使用单GPU策略")
+    else:
+        strategy = tf.distribute.OneDeviceStrategy("/cpu:0")
+        print("使用CPU策略")
+    
+    # 动态调整批量大小
+    feature_size = X_train.shape[2]
+    
+    # 根据GPU数量和特征大小智能调整
+    if feature_size > 50000:
+        base_batch_size = 2 if num_gpus <= 1 else 4
+    elif feature_size > 30000:
+        base_batch_size = 4 if num_gpus <= 1 else 6
+    else:
+        base_batch_size = 8 if num_gpus <= 1 else 12
+    
+    global_batch_size = base_batch_size * max(1, strategy.num_replicas_in_sync)
+    
+    print(f"智能批量大小配置:")
+    print(f"  - 特征维度: {feature_size}")
+    print(f"  - 基础批量: {base_batch_size}")
+    print(f"  - 全局批量: {global_batch_size}")
+    print(f"  - GPU副本数: {strategy.num_replicas_in_sync}")
     
     # 清理GPU内存
     tf.keras.backend.clear_session()
@@ -862,7 +930,6 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     gc.collect()
     
     # 配置GPU内存增长
-    gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
             for gpu in gpus:
@@ -874,7 +941,8 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     
     # 多GPU策略配置
     if len(gpus) > 1:
-        strategy = tf.distribute.MirroredStrategy()
+        # 明确指定GPU设备
+        strategy = tf.distribute.MirroredStrategy(devices=["/gpu:0", "/gpu:1"])
         print(f"使用多GPU训练，GPU数量: {strategy.num_replicas_in_sync}")
     else:
         strategy = tf.distribute.OneDeviceStrategy("/gpu:0" if gpus else "/cpu:0")
@@ -1029,27 +1097,48 @@ def perform_logistic_regression(model, X_trainval, ages_trainval, quality_trainv
 
     # 1) 在训练+验证集上获取 BS 预测并拟合 scaler / clf
     print("在训练+验证集上拟合逻辑回归...")
-    batch_size = 8  # 减小批量大小
+    batch_size = 4  # 进一步减小批量大小，避免GPU错误
     y_bs_pred_tr = []
+    valid_indices_tr = []  # 跟踪成功预测的样本索引
+    
     for i in range(0, len(X_trainval), batch_size):
         j = min(i + batch_size, len(X_trainval))
         try:
             pred = model.predict(X_trainval[i:j], verbose=0)
             y_bs_pred_tr.extend(pred.flatten())
+            valid_indices_tr.extend(range(i, j))  # 记录成功的索引
         except Exception as e:
             print(f"预测批次 {i}-{j} 失败: {e}")
-            # 如果批次失败，跳过
+            # 如果批次失败，跳过，不记录索引
             continue
+    
     y_bs_pred_tr = np.array(y_bs_pred_tr)
-
-    ages_tr = np.array(ages_trainval)
+    valid_indices_tr = np.array(valid_indices_tr)
+    
+    print(f"训练集成功预测样本数: {len(y_bs_pred_tr)}")
+    print(f"训练集总样本数: {len(X_trainval)}")
+    
+    # 根据成功预测的索引获取对应的年龄和质量标签
+    ages_tr = np.array([ages_trainval[i] for i in valid_indices_tr])
+    quality_tr = np.array([quality_trainval[i] for i in valid_indices_tr])
+    
+    # 检查形状一致性
+    print(f"ages_tr形状: {ages_tr.shape}, y_bs_pred_tr形状: {y_bs_pred_tr.shape}")
+    
+    # 确保长度一致
+    min_len = min(len(ages_tr), len(y_bs_pred_tr), len(quality_tr))
+    ages_tr = ages_tr[:min_len]
+    y_bs_pred_tr = y_bs_pred_tr[:min_len]
+    quality_tr = quality_tr[:min_len]
+    
     feats_tr = np.column_stack([
         ages_tr, y_bs_pred_tr, ages_tr**2, y_bs_pred_tr**2,
         ages_tr * y_bs_pred_tr, np.log(ages_tr + 1), 1.0 / (y_bs_pred_tr + 1e-6)
     ])
+    
     valid_tr = np.isfinite(feats_tr).all(axis=1)
     feats_tr = feats_tr[valid_tr]
-    logic_y_tr = np.array([quality_trainval[i] for i in range(len(quality_trainval)) if valid_tr[i]])
+    logic_y_tr = quality_tr[valid_tr]
 
     from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler().fit(feats_tr)
@@ -1059,19 +1148,45 @@ def perform_logistic_regression(model, X_trainval, ages_trainval, quality_trainv
     # 2) 在测试集上评估
     print("在测试集上评估逻辑回归...")
     y_bs_pred_te = []
+    valid_indices_te = []  # 跟踪成功预测的测试样本索引
+    
     for i in range(0, len(X_test), batch_size):
         j = min(i + batch_size, len(X_test))
-        y_bs_pred_te.extend(model.predict(X_test[i:j], verbose=0).flatten())
+        try:
+            pred = model.predict(X_test[i:j], verbose=0)
+            y_bs_pred_te.extend(pred.flatten())
+            valid_indices_te.extend(range(i, j))
+        except Exception as e:
+            print(f"测试集预测批次 {i}-{j} 失败: {e}")
+            continue
+    
     y_bs_pred_te = np.array(y_bs_pred_te)
-
-    ages_te = np.array(ages_test)
+    valid_indices_te = np.array(valid_indices_te)
+    
+    print(f"测试集成功预测样本数: {len(y_bs_pred_te)}")
+    print(f"测试集总样本数: {len(X_test)}")
+    
+    # 根据成功预测的索引获取对应的年龄和质量标签
+    ages_te = np.array([ages_test[i] for i in valid_indices_te])
+    quality_te = np.array([quality_test[i] for i in valid_indices_te])
+    
+    # 检查形状一致性
+    print(f"ages_te形状: {ages_te.shape}, y_bs_pred_te形状: {y_bs_pred_te.shape}")
+    
+    # 确保长度一致
+    min_len = min(len(ages_te), len(y_bs_pred_te), len(quality_te))
+    ages_te = ages_te[:min_len]
+    y_bs_pred_te = y_bs_pred_te[:min_len]
+    quality_te = quality_te[:min_len]
+    
     feats_te = np.column_stack([
         ages_te, y_bs_pred_te, ages_te**2, y_bs_pred_te**2,
         ages_te * y_bs_pred_te, np.log(ages_te + 1), 1.0 / (y_bs_pred_te + 1e-6)
     ])
+    
     valid_te = np.isfinite(feats_te).all(axis=1)
     feats_te = feats_te[valid_te]
-    logic_y = np.array([quality_test[i] for i in range(len(quality_test)) if valid_te[i]])
+    logic_y = quality_te[valid_te]
 
     X_te_scaled = scaler.transform(feats_te)
     y_pred_cls = clf.predict(X_te_scaled)
