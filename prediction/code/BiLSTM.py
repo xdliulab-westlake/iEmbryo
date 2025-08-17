@@ -989,40 +989,43 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         x_aug = lightweight_augmentation(x, training=True)
         return x_aug, y
     
-    # 训练集 - 使用生成器避免大内存分配
+    # 训练集 - 使用生成器避免大内存分配，确保类型一致
     def train_generator():
         while True:  # 添加无限循环
             # 创建索引并shuffle
             indices = np.arange(len(X_train))
             np.random.shuffle(indices)
             for i in indices:
-                x = X_train[i].copy()
+                x = X_train[i].copy().astype(np.float32)  # 强制转换为float32
+                y = float(y_train[i])  # 确保y是float32
                 # 应用轻量增强
                 if np.random.random() > 0.7:
                     noise = np.random.normal(0, 0.002, x.shape).astype(np.float32)
                     x = x + noise
-                yield x, y_train[i]
+                yield x, y
     
     train_ds = tf.data.Dataset.from_generator(
         train_generator,
         output_signature=(
-            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.float32)
+            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),  # 明确指定float32
+            tf.TensorSpec(shape=(), dtype=tf.float32)            # 明确指定float32
         )
     )
     train_ds = train_ds.batch(global_batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     
-    # 验证集 - 使用生成器
+    # 验证集 - 使用生成器，确保类型一致
     def val_generator():
         for i in range(len(X_val)):
-            yield X_val[i], y_val[i]
+            x = X_val[i].astype(np.float32)  # 强制转换为float32
+            y = float(y_val[i])              # 确保y是float32
+            yield x, y
     
     val_ds = tf.data.Dataset.from_generator(
         val_generator,
         output_signature=(
-            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.float32)
+            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),  # 明确指定float32
+            tf.TensorSpec(shape=(), dtype=tf.float32)            # 明确指定float32
         )
     )
     val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
