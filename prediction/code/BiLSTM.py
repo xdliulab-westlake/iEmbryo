@@ -888,6 +888,12 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
     print("=== 训练主模型（智能GPU策略）===")
     
+    # 强制转换所有数据为 float32
+    X_train, y_train = X_train.astype(np.float32), y_train.astype(np.float32)
+    X_val, y_val = X_val.astype(np.float32), y_val.astype(np.float32)
+    
+    print(f"数据类型: X_train={X_train.dtype}, y_train={y_train.dtype}")
+    
     # 重新检测GPU（防止配置变化）
     gpus = tf.config.list_physical_devices('GPU')
     num_gpus = len(gpus)
@@ -1390,4 +1396,3 @@ if __name__ == "__main__":
     print(f"逻辑回归AUC: {logic_results['auc_score']:.4f}")
     print("分析图表已保存至: /liaozizhuo/scripts/multi_model_analysis.pdf")
     print("特征重要性图表已保存至: /liaozizhuo/scripts/feature_importance.pdf")
-
