@@ -350,23 +350,37 @@ def create_model(feature_dim):
     # 计算输入维度 (11个焦平面 * 特征维度)
     input_dim = 11 * feature_dim
     
+    # 强制设置数据类型策略
+    tf.keras.mixed_precision.set_global_policy('float32')
+    
     model = Sequential([
-        Input(shape=(33, input_dim)),
+        Input(shape=(33, input_dim), dtype=tf.float32),  # 明确指定dtype
         
         # 特征降维层
-        TimeDistributed(Dense(2048, activation='relu')),
+        TimeDistributed(Dense(2048, activation='relu', dtype=tf.float32)),
         tf.keras.layers.Dropout(0.2),
         
-        # BiLSTM层
-        Bidirectional(LSTM(256, return_sequences=True, dropout=0.2, recurrent_dropout=0.0)),
-        Bidirectional(LSTM(128, dropout=0.2, recurrent_dropout=0.0)),
+        # BiLSTM层 - 关键修复：明确指定实现和数据类型
+        Bidirectional(LSTM(256, 
+                          return_sequences=True, 
+                          dropout=0.2, 
+                          recurrent_dropout=0.0,
+                          implementation=2,  # 强制使用GPU兼容实现
+                          dtype=tf.float32   # 明确指定数据类型
+                         )),
+        Bidirectional(LSTM(128, 
+                          dropout=0.2, 
+                          recurrent_dropout=0.0,
+                          implementation=2,  # 强制使用GPU兼容实现
+                          dtype=tf.float32   # 明确指定数据类型
+                         )),
         
         # 全连接层
         tf.keras.layers.Dropout(0.3),
-        Dense(128, activation='relu', kernel_regularizer=l2(1e-4)),
+        Dense(128, activation='relu', kernel_regularizer=l2(1e-4), dtype=tf.float32),
         tf.keras.layers.Dropout(0.3),
-        Dense(64, activation='relu', kernel_regularizer=l2(1e-4)),
-        Dense(1)  # 回归预测 BS_prime 分数
+        Dense(64, activation='relu', kernel_regularizer=l2(1e-4), dtype=tf.float32),
+        Dense(1, dtype=tf.float32)  # 回归预测 BS_prime 分数
     ])
     
     # 使用自适应学习率
@@ -886,13 +900,16 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
     return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
-    print("=== 训练主模型（智能GPU策略）===")
+    print("=== 训练主模型（修复数据类型）===")
     
-    # 强制转换所有数据为 float32
-    X_train, y_train = X_train.astype(np.float32), y_train.astype(np.float32)
-    X_val, y_val = X_val.astype(np.float32), y_val.astype(np.float32)
+    # 强制转换所有数据为 float32（关键修复）
+    X_train = X_train.astype(np.float32)
+    y_train = y_train.astype(np.float32)  # 确保标签也是float32
+    X_val = X_val.astype(np.float32)
+    y_val = y_val.astype(np.float32)      # 确保标签也是float32
     
-    print(f"数据类型: X_train={X_train.dtype}, y_train={y_train.dtype}")
+    print(f"数据类型检查: X_train={X_train.dtype}, y_train={y_train.dtype}")
+    print(f"数据形状检查: X_train={X_train.shape}, y_train={y_train.shape}")
     
     # 重新检测GPU（防止配置变化）
     gpus = tf.config.list_physical_devices('GPU')
@@ -996,8 +1013,8 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
             indices = np.arange(len(X_train))
             np.random.shuffle(indices)
             for i in indices:
-                x = X_train[i].copy().astype(np.float32)  # 强制转换为float32
-                y = float(y_train[i])  # 确保y是float32
+                x = X_train[i].astype(np.float32)  # 明确转换
+                y = np.float32(y_train[i])         # 明确转换为float32（不是float）
                 # 应用轻量增强
                 if np.random.random() > 0.7:
                     noise = np.random.normal(0, 0.002, x.shape).astype(np.float32)
@@ -1007,8 +1024,8 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     train_ds = tf.data.Dataset.from_generator(
         train_generator,
         output_signature=(
-            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),  # 明确指定float32
-            tf.TensorSpec(shape=(), dtype=tf.float32)            # 明确指定float32
+            tf.TensorSpec(shape=(33, X_train.shape[2]), dtype=tf.float32),  # 使用实际维度
+            tf.TensorSpec(shape=(), dtype=tf.float32)                       # 确保float32
         )
     )
     train_ds = train_ds.batch(global_batch_size, drop_remainder=True)
@@ -1017,15 +1034,15 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     # 验证集 - 使用生成器，确保类型一致
     def val_generator():
         for i in range(len(X_val)):
-            x = X_val[i].astype(np.float32)  # 强制转换为float32
-            y = float(y_val[i])              # 确保y是float32
+            x = X_val[i].astype(np.float32)
+            y = np.float32(y_val[i])        # 明确转换为float32
             yield x, y
     
     val_ds = tf.data.Dataset.from_generator(
         val_generator,
         output_signature=(
-            tf.TensorSpec(shape=(33, 63360), dtype=tf.float32),  # 明确指定float32
-            tf.TensorSpec(shape=(), dtype=tf.float32)            # 明确指定float32
+            tf.TensorSpec(shape=(33, X_val.shape[2]), dtype=tf.float32),  # 使用实际维度
+            tf.TensorSpec(shape=(), dtype=tf.float32)
         )
     )
     val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
@@ -1357,6 +1374,9 @@ def run_cross_validation(X, y_bs, quality_labels, ages, feature_dim):
 
 # 主流程
 if __name__ == "__main__":
+    # 在所有操作之前配置GPU
+    configure_gpu_for_lstm()
+    
     # 配置参数
     save_model_path = "/liaozizhuo/scripts/bilstm_quality_model.h5"
     
