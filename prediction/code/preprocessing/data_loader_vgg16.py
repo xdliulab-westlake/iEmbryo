@@ -2,26 +2,43 @@ import os
 import tensorflow as tf
 import numpy as np
 import re
+from tensorflow.keras.applications.vgg16 import preprocess_input
 
-# Preprocessing pipeline with augmentation and normalization
-def preprocess_image_custom(image, img_size=224, is_training=True):
-    image = tf.image.convert_image_dtype(image, dtype=tf.float32)  # Normalize to [0, 1]
-
+# VGG16兼容的预处理管道
+def preprocess_image_vgg16(image, img_size=224, is_training=True):
+    """
+    VGG16兼容的预处理函数
+    """
+    # 确保图像在[0, 255]范围内
+    if image.dtype != tf.uint8:
+        # 如果是[0,1]范围的float，转换为[0,255]的uint8
+        if tf.reduce_max(image) <= 1.0:
+            image = tf.cast(image * 255.0, tf.uint8)
+        else:
+            image = tf.cast(image, tf.uint8)
+    
+    # 转换为float32以便后续处理
+    image = tf.cast(image, tf.float32)
+    
     if is_training:
-        scale_size = tf.random.uniform([], minval=256, maxval=512, dtype=tf.int32)
+        # 训练时的数据增强
+        scale_size = tf.random.uniform([], minval=256, maxval=480, dtype=tf.int32)
         shape = tf.shape(image)
         height, width = shape[0], shape[1]
         ratio = tf.cast(scale_size, tf.float32) / tf.cast(tf.minimum(height, width), tf.float32)
         new_height = tf.cast(tf.round(tf.cast(height, tf.float32) * ratio), tf.int32) 
         new_width = tf.cast(tf.round(tf.cast(width, tf.float32) * ratio), tf.int32)
+        
         image = tf.image.resize(image, [new_height, new_width])
         image = tf.image.random_crop(image, size=[img_size, img_size, 3])
+        
+        # 医学图像友好的增强（减少可能破坏诊断特征的变换）
         image = tf.image.random_flip_left_right(image)
-        image = tf.image.random_brightness(image, max_delta=0.2)
-        image = tf.image.random_contrast(image, lower=0.8, upper=1.2) 
-        image = tf.image.random_hue(image, max_delta=0.02)
-        image = tf.image.random_saturation(image, lower=0.9, upper=1.1)
+        image = tf.image.random_brightness(image, max_delta=0.1)  # 减小变化范围
+        image = tf.image.random_contrast(image, lower=0.9, upper=1.1)  # 减小变化范围
+        # 移除色相和饱和度变化（可能影响细胞特征）
     else:
+        # 推理时的预处理
         shape = tf.shape(image)
         height, width = shape[0], shape[1]
         ratio = tf.cast(img_size + 32, tf.float32) / tf.cast(tf.minimum(height, width), tf.float32)
@@ -30,27 +47,31 @@ def preprocess_image_custom(image, img_size=224, is_training=True):
         image = tf.image.resize(image, [new_height, new_width])
         image = tf.image.resize_with_crop_or_pad(image, img_size, img_size)
 
-    # Subtract ImageNet mean values
-    mean = tf.constant([123.68, 116.78, 103.94], dtype=tf.float32)
-    image = image * 255.0 - mean
+    # 使用官方VGG16预处理
+    image = preprocess_input(image)
     return image
 
 # Read and preprocess image file
-def parse_image(img_path, label, img_size=224, is_training=True):
+def parse_image_vgg16(img_path, label, img_size=224, is_training=True):
+    """VGG16兼容的图像解析函数"""
     img_path = tf.convert_to_tensor(img_path, dtype=tf.string)
     img = tf.io.read_file(img_path)
     img = tf.image.decode_image(img, expand_animations=False)
 
+    # 处理通道数
     num_channels = tf.shape(img)[-1]
     img = tf.cond(tf.equal(num_channels, 1), lambda: tf.image.grayscale_to_rgb(img), lambda: img)
     img = tf.cond(tf.greater(num_channels, 3), lambda: img[:, :, :3], lambda: img)
 
     img.set_shape([None, None, 3])
-    img = preprocess_image_custom(img, img_size=img_size, is_training=is_training)
+    img = preprocess_image_vgg16(img, img_size=img_size, is_training=is_training)
     return img, label
 
-# Main function: load all images into memory with preprocessing
-def load_data(data_dir, img_size=224, batch_size=32, is_training=True):
+# 兼容性包装函数
+def load_data_vgg16(data_dir, img_size=224, batch_size=32, is_training=True):
+    """
+    VGG16兼容的数据加载函数
+    """
     image_paths = []
     labels = []
     qualities = []
@@ -71,13 +92,19 @@ def load_data(data_dir, img_size=224, batch_size=32, is_training=True):
             labels.append(label)
             qualities.append(1 if class_name == 'class_1' else 0)
 
+    print(f"找到 {len(image_paths)} 张图像")
+    print(f"Class 0: {labels.count(0)} 张，Class 1: {labels.count(1)} 张")
+
     # Convert paths and labels to tensors
     image_paths_tensor = tf.convert_to_tensor(image_paths, dtype=tf.string)
     labels_tensor = tf.convert_to_tensor(labels, dtype=tf.int64)
 
-    # Build dataset with preprocessing
+    # Build dataset with VGG16 preprocessing
     dataset = tf.data.Dataset.from_tensor_slices((image_paths_tensor, labels_tensor))
-    dataset = dataset.map(lambda x, y: parse_image(x, y, img_size, is_training), num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(
+        lambda x, y: parse_image_vgg16(x, y, img_size, is_training), 
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
     dataset = dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Load all preprocessed images into memory
@@ -89,3 +116,8 @@ def load_data(data_dir, img_size=224, batch_size=32, is_training=True):
 
     # Return final arrays
     return np.concatenate(images_list), np.concatenate(labels_list), np.array(qualities), image_paths
+
+# 向后兼容的包装
+def load_data(data_dir, img_size=224, batch_size=32, is_training=True):
+    """向后兼容的函数名"""
+    return load_data_vgg16(data_dir, img_size, batch_size, is_training)
