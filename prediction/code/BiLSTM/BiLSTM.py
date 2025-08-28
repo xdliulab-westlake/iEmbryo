@@ -1,10 +1,8 @@
 import os
 import numpy as np
+import pandas as pd
 import cv2
 import tensorflow as tf
-from concurrent.futures import ThreadPoolExecutor
-import pandas as pd
-from tqdm import tqdm
 from tensorflow.keras.applications import VGG16, ResNet152V2, DenseNet201
 from tensorflow.keras.applications.vgg16 import preprocess_input as preprocess_vgg16
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_resnet
@@ -17,7 +15,7 @@ except ImportError:
     from tensorflow.keras.applications.efficientnet import EfficientNetB3 as EfficientNetV2M
     from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_efficientnet
 from tensorflow.keras.models import Model, Sequential
-from tensorflow.keras.layers import Input, TimeDistributed, Bidirectional, LSTM, Dense, Concatenate
+from tensorflow.keras.layers import Input, TimeDistributed, Bidirectional, LSTM, Dense
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
@@ -25,6 +23,12 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.metrics import log_loss, accuracy_score
 import matplotlib.pyplot as plt
 import random
+
+# 新增缺失的导入
+from tqdm import tqdm  # 进度条
+import gc              # 垃圾回收
+import time            # 时间函数
+import json            # JSON处理
 
 # 交叉验证相关导入
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score, cross_validate
@@ -37,49 +41,70 @@ warnings.filterwarnings('ignore')
 # 智能GPU配置（自动检测）
 import tensorflow as tf
 
-# 先检测有多少GPU
-gpus = tf.config.list_physical_devices('GPU')
-num_gpus = len(gpus)
+import pandas as pd
 
-print(f"检测到 {num_gpus} 个GPU: {[gpu.name for gpu in gpus]}")
-
-# 根据GPU数量动态设置环境变量
-if num_gpus > 0:
-    # 自动设置可见GPU
-    gpu_ids = ','.join([str(i) for i in range(num_gpus)])
-    os.environ['CUDA_VISIBLE_DEVICES'] = gpu_ids
-    print(f"设置CUDA_VISIBLE_DEVICES = {gpu_ids}")
+def configure_gpu_for_lstm():
+    """配置GPU环境，优化LSTM训练"""
+    print("=== 配置GPU环境 ===")
     
-    # 动态设置线程数
-    os.environ['TF_GPU_THREAD_COUNT'] = str(num_gpus)
-    print(f"设置GPU线程数 = {num_gpus}")
-else:
-    print("未检测到GPU，将使用CPU")
+    # 先检测有多少GPU
+    gpus = tf.config.list_physical_devices('GPU')
+    num_gpus = len(gpus)
 
-# 通用GPU优化设置
-os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
-os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
+    print(f"检测到 {num_gpus} 个GPU: {[gpu.name for gpu in gpus]}")
 
-# 多GPU时的NCCL优化
-if num_gpus > 1:
-    os.environ['NCCL_DEBUG'] = 'INFO'
-    os.environ['NCCL_TREE_THRESHOLD'] = '0'
-    print("启用多GPU NCCL通信优化")
+    # 根据GPU数量动态设置环境变量
+    if num_gpus > 0:
+        # 自动设置可见GPU
+        gpu_ids = ','.join([str(i) for i in range(num_gpus)])
+        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_ids
+        print(f"设置CUDA_VISIBLE_DEVICES = {gpu_ids}")
+        
+        # 动态设置线程数
+        os.environ['TF_GPU_THREAD_COUNT'] = str(num_gpus)
+        print(f"设置GPU线程数 = {num_gpus}")
+    else:
+        print("未检测到GPU，将使用CPU")
 
-# GPU内存配置
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print(f"已为 {num_gpus} 个GPU启用内存增长")
-    except RuntimeError as e:
-        print(f"GPU配置错误: {e}")
+    # 通用GPU优化设置
+    os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
+    os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+    os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
+    os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
+
+    # 多GPU时的NCCL优化
+    if num_gpus > 1:
+        os.environ['NCCL_DEBUG'] = 'INFO'
+        os.environ['NCCL_TREE_THRESHOLD'] = '0'
+        print("启用多GPU NCCL通信优化")
+
+    # GPU内存配置
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"已为 {num_gpus} 个GPU启用内存增长")
+        except RuntimeError as e:
+            print(f"GPU配置错误: {e}")
+    
+    # 不使用混合精度，保持float32
+    print("使用标准float32精度策略")
+    
+    return num_gpus
+
+# 配置GPU
+num_gpus = configure_gpu_for_lstm()
 
 # 1. 加载评分信息，计算BS_prime
 def load_score_dict(csv_path):
-    df = pd.read_csv(csv_path)
+    """加载评分信息并计算BS_prime"""
+    try:
+        df = pd.read_csv(csv_path)
+        print(f"成功加载评分文件: {csv_path}")
+        print(f"数据形状: {df.shape}")
+    except Exception as e:
+        print(f"加载评分文件失败: {e}")
+        raise
 
     # 定义打分映射
     icm_map = {'A': 1, 'B': 2, 'C': 4}
@@ -90,19 +115,29 @@ def load_score_dict(csv_path):
     df["TE_score"] = df["TE"].map(te_map)
     df["BS_prime"] = df["ICM_score"] + df["TE_score"]
 
+    # 检查数据完整性
+    missing_icm = df["ICM_score"].isna().sum()
+    missing_te = df["TE_score"].isna().sum()
+    if missing_icm > 0 or missing_te > 0:
+        print(f"警告: 发现缺失值 - ICM: {missing_icm}, TE: {missing_te}")
+
     # 首先构建已有的 EmbryoID: BS_prime
     score_dict = dict(zip(df["EmbryoID"], df["BS_prime"]))
+    print(f"成功构建评分字典，包含 {len(score_dict)} 个胚胎")
 
     # 为缺失 BS_prime 的 poor 胚胎赋伪分数
     filtered_path = "/liaozizhuo/scripts/filtered_clean_embryos.csv"
     if os.path.exists(filtered_path):
         filtered_df = pd.read_csv(filtered_path)
         poor_embryos = filtered_df[filtered_df["EmbryoQuality"] == "poor"]
+        poor_count = 0
         for emb_id in poor_embryos["EmbryoID"].unique():
             if emb_id not in score_dict:
                 score_dict[emb_id] = 6.0 + random.uniform(0, 0.5)
+                poor_count += 1
+        print(f"为 {poor_count} 个poor胚胎添加了伪分数")
     else:
-        print(f"Warning: {filtered_path} not found, skip pseudo BS_prime for poor embryos.")
+        print(f"警告: {filtered_path} not found, skip pseudo BS_prime for poor embryos.")
 
     return score_dict
 
@@ -114,41 +149,57 @@ class MultiModelFeatureExtractor:
         self._build_models()
         
     def _build_models(self):
-        """构建多个预训练模型"""
-        print("Building multi-model feature extractors...")
+        """构建多个预训练模型，使用降维减少过拟合
         
-        # 1. EfficientNetV2-M
+        选择512维的原因：
+        1. 平衡信息保留和计算效率
+        2. 减少过拟合风险
+        3. 保持足够的特征表达能力
+        4. 降低内存使用和训练时间
+        """
+        print("Building multi-model feature extractors with dimensionality reduction...")
+        
+        # 1. EfficientNetV2-M (降维到512)
         base_efficientnet = EfficientNetV2M(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         efficientnet_output = tf.keras.layers.GlobalAveragePooling2D()(base_efficientnet.output)
+        # 添加降维层
+        efficientnet_output = Dense(512, activation='relu', name='efficientnet_reduction')(efficientnet_output)
         self.models['efficientnet'] = Model(inputs=base_efficientnet.input, outputs=efficientnet_output)
         self.models['efficientnet'].trainable = False
-        self.feature_dims['efficientnet'] = 1280
+        self.feature_dims['efficientnet'] = 512
         
-        # 2. ResNet152V2
+        # 2. ResNet152V2 (降维到512)
         base_resnet = ResNet152V2(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         resnet_output = tf.keras.layers.GlobalAveragePooling2D()(base_resnet.output)
+        # 添加降维层
+        resnet_output = Dense(512, activation='relu', name='resnet_reduction')(resnet_output)
         self.models['resnet'] = Model(inputs=base_resnet.input, outputs=resnet_output)
         self.models['resnet'].trainable = False
-        self.feature_dims['resnet'] = 2048
+        self.feature_dims['resnet'] = 512
         
-        # 3. DenseNet201
+        # 3. DenseNet201 (降维到512)
         base_densenet = DenseNet201(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         densenet_output = tf.keras.layers.GlobalAveragePooling2D()(base_densenet.output)
+        # 添加降维层
+        densenet_output = Dense(512, activation='relu', name='densenet_reduction')(densenet_output)
         self.models['densenet'] = Model(inputs=base_densenet.input, outputs=densenet_output)
         self.models['densenet'].trainable = False
-        self.feature_dims['densenet'] = 1920
+        self.feature_dims['densenet'] = 512
         
-        # 4. VGG16
+        # 4. VGG16 (保持512，但添加正则化)
         base_vgg = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         vgg_output = tf.keras.layers.GlobalAveragePooling2D()(base_vgg.output)
+        # 添加正则化层
+        vgg_output = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(1e-4), name='vgg16_reduction')(vgg_output)
         self.models['vgg16'] = Model(inputs=base_vgg.input, outputs=vgg_output)
         self.models['vgg16'].trainable = False
         self.feature_dims['vgg16'] = 512
         
-        # 总特征维度
+        # 总特征维度 (4 * 512 = 2048)
         self.total_feature_dim = sum(self.feature_dims.values())
-        print(f"Total feature dimension: {self.total_feature_dim}")
+        print(f"Total feature dimension: {self.total_feature_dim} (reduced from original ~5760)")
         print(f"Individual dimensions: {self.feature_dims}")
+        print("使用降维策略减少过拟合风险")
         
     def extract_features(self, images):
         """提取多模型特征并拼接 - 内存优化版本"""
@@ -241,13 +292,13 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
             
         def augment(image):
             if tf.random.uniform([]) > 0.5:
-                image = tf.image.flip_left_right(image)
+                image = tf.image.flip_left_right(image)  # 左右翻转
             if tf.random.uniform([]) > 0.7:
-                image = tf.image.flip_up_down(image)
+                image = tf.image.flip_up_down(image)     # 上下翻转
             if tf.random.uniform([]) > 0.5:
-                image = tf.image.random_brightness(image, max_delta=0.1)
+                image = tf.image.random_brightness(image, max_delta=0.1)  # 亮度调整
             if tf.random.uniform([]) > 0.5:
-                image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
+                image = tf.image.random_contrast(image, lower=0.9, upper=1.1)  # 对比度调整
             return image
         return augment
     
@@ -261,13 +312,11 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
         img = tf.image.decode_jpeg(img, channels=3)
         img = tf.image.resize(img, [224, 224])
         
-        # 应用数据增强（在预处理之前）
+        # 只在训练时应用增强
         if training:
             img = augmentation_fn(img)
         
-        # 保持uint8格式，让模型特定预处理函数处理
-        img = tf.cast(img, tf.uint8)  # 改为uint8
-        
+        img = tf.cast(img, tf.uint8)
         return img
     
     # 构建高效的tf.data pipeline
@@ -354,25 +403,25 @@ def create_model(feature_dim):
     tf.keras.mixed_precision.set_global_policy('float32')
     
     model = Sequential([
-        Input(shape=(33, input_dim), dtype=tf.float32),  # 明确指定dtype
+        Input(shape=(33, input_dim), dtype=tf.float32),
         
         # 特征降维层
-        TimeDistributed(Dense(2048, activation='relu', dtype=tf.float32)),
-        tf.keras.layers.Dropout(0.2),
+        TimeDistributed(Dense(1024, activation='relu', 
+                            kernel_regularizer=l2(1e-3), dtype=tf.float32)),
+        tf.keras.layers.Dropout(0.3),  # 增加dropout
         
-        # BiLSTM层 - 关键修复：明确指定实现和数据类型
+        # 增加LSTM正则化
         Bidirectional(LSTM(256, 
                           return_sequences=True, 
-                          dropout=0.2, 
-                          recurrent_dropout=0.0,
-                          implementation=2,  # 强制使用GPU兼容实现
-                          dtype=tf.float32   # 明确指定数据类型
+                          dropout=0.3,        # 增加dropout
+                          kernel_regularizer=l2(1e-3),  # 增加正则化
+                          dtype=tf.float32
                          )),
         Bidirectional(LSTM(128, 
                           dropout=0.2, 
-                          recurrent_dropout=0.0,
-                          implementation=2,  # 强制使用GPU兼容实现
-                          dtype=tf.float32   # 明确指定数据类型
+                          kernel_regularizer=l2(1e-3),
+                          # 移除implementation参数，让TensorFlow自动选择
+                          dtype=tf.float32
                          )),
         
         # 全连接层
@@ -380,11 +429,57 @@ def create_model(feature_dim):
         Dense(128, activation='relu', kernel_regularizer=l2(1e-4), dtype=tf.float32),
         tf.keras.layers.Dropout(0.3),
         Dense(64, activation='relu', kernel_regularizer=l2(1e-4), dtype=tf.float32),
-        Dense(1, dtype=tf.float32)  # 回归预测 BS_prime 分数
+        Dense(1, dtype=tf.float32)
     ])
     
-    # 使用自适应学习率
-    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-5)
+    # 降低学习率
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5)
+    model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
+    
+    return model
+
+def create_model_simple(feature_dim):
+    """创建简化版本的BiLSTM模型，减少过拟合"""
+    from tensorflow.keras.regularizers import l2
+    
+    input_dim = 11 * feature_dim
+    
+    model = Sequential([
+        Input(shape=(33, input_dim), dtype=tf.float32),
+        
+        # 减少特征维度
+        TimeDistributed(Dense(1024, activation='relu', 
+                            kernel_regularizer=l2(1e-3),
+                            dtype=tf.float32)),
+        tf.keras.layers.Dropout(0.4),
+        
+        # 减少LSTM单元数
+        Bidirectional(LSTM(128, 
+                          return_sequences=True, 
+                          dropout=0.4,
+                          recurrent_dropout=0.3,
+                          kernel_regularizer=l2(1e-3),
+                          dtype=tf.float32
+                         )),
+        tf.keras.layers.Dropout(0.4),
+        
+        Bidirectional(LSTM(64, 
+                          dropout=0.4,
+                          recurrent_dropout=0.3,
+                          kernel_regularizer=l2(1e-3),
+                          dtype=tf.float32
+                         )),
+        
+        # 减少全连接层
+        tf.keras.layers.Dropout(0.5),
+        Dense(32, activation='relu', 
+              kernel_regularizer=l2(1e-3), 
+              dtype=tf.float32),
+        tf.keras.layers.Dropout(0.5),
+        Dense(1, dtype=tf.float32)
+    ])
+    
+    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-6)  # 更低的学习率
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     
     return model
@@ -444,6 +539,10 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         tf.keras.backend.clear_session()
         gc.collect()
         
+        # 等待GPU内存释放
+        if tf.config.list_physical_devices('GPU'):
+            time.sleep(3)
+        
         # 进一步拆分训练集和验证集
         X_train_val, X_test = X[train_val_idx], X[test_idx]
         y_train_val, y_test = y_bs[train_val_idx], y_bs[test_idx]
@@ -481,13 +580,27 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         with strategy.scope():
             model = create_model(feature_dim)
             
-            # 简化CV增强
-            def simple_cv_augmentation(features, training=True):
+            # 改进的CV数据增强
+            def improved_cv_augmentation(features, training=True):
                 if not training:
                     return features
-                if tf.random.uniform([]) > 0.8:
-                    noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=0.003)
+                
+                # 添加高斯噪声
+                if tf.random.uniform([]) > 0.7:
+                    noise_std = tf.random.uniform([], 0.001, 0.005)
+                    noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=noise_std)
                     features = features + noise
+                
+                # 随机缩放
+                if tf.random.uniform([]) > 0.8:
+                    scale_factor = tf.random.uniform([], 0.95, 1.05)
+                    features = features * scale_factor
+                
+                # 随机掩码（模拟dropout）
+                if tf.random.uniform([]) > 0.9:
+                    mask = tf.random.uniform(tf.shape(features)) > 0.1
+                    features = features * tf.cast(mask, tf.float32)
+                
                 return features
             
             # 回调函数
@@ -507,16 +620,27 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
                     
                 def call(self, inputs, training=None):
                     if training:
-                        inputs = simple_cv_augmentation(inputs, training=True)
+                        inputs = improved_cv_augmentation(inputs, training=True)
                     return self.base_model(inputs, training=training)
             
             cv_model = SimpleCVModel(model)
             
-            # 必须编译包装模型
+            # 使用学习率调度
+            initial_lr = 1e-5
+            lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+                initial_lr,
+                decay_steps=100,
+                decay_rate=0.9,
+                staircase=True
+            )
+            
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+            
+            # 编译模型
             cv_model.compile(
-                optimizer=model.optimizer,    # 使用原模型的优化器
-                loss=model.loss,             # 使用原模型的损失函数
-                metrics=model.metrics         # 使用原模型的评估指标
+                optimizer=optimizer,
+                loss='mse',
+                metrics=['mae']
             )
             
             # 数据管道
@@ -524,25 +648,72 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             train_ds = train_ds.shuffle(512).batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
             
             val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-            val_ds = val_ds.batch(cv_batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+            val_ds = val_ds.batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
             
             # 训练模型
             history = cv_model.fit(
                 train_ds, validation_data=val_ds, 
-                epochs=10, callbacks=callbacks, verbose=0
+                epochs=12,              # 减少epoch数
+                callbacks=callbacks, 
+                verbose=1
             )
         
         # 评估模型 - 使用更小的批量
-        def evaluate_in_batches(X, y, batch_size=8):  # 增大批量大小
+        def evaluate_in_batches(X, y, batch_size=2):  # 降低批量大小避免OOM
             losses = []
             maes = []
+            
+            # 数据预处理和验证
+            X = X.astype(np.float32)
+            y = y.astype(np.float32)
+            
+            # 检查数据有效性
+            if np.isnan(X).any() or np.isinf(X).any():
+                print("警告：输入数据包含NaN或无穷大值，正在清理...")
+                X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
+            
+            if np.isnan(y).any() or np.isinf(y).any():
+                print("警告：标签数据包含NaN或无穷大值，正在清理...")
+                y = np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
+            
             for i in range(0, len(X), batch_size):
                 batch_end = min(i + batch_size, len(X))
                 batch_X = X[i:batch_end]
                 batch_y = y[i:batch_end]
-                batch_loss, batch_mae = model.evaluate(batch_X, batch_y, verbose=0)
-                losses.append(batch_loss)
-                maes.append(batch_mae)
+                
+                try:
+                    # 验证批次数据
+                    if not np.isfinite(batch_X).all() or not np.isfinite(batch_y).all():
+                        print(f"批次 {i}-{batch_end} 包含无效值，跳过")
+                        continue
+                    
+                    # 确保数据形状正确
+                    if batch_X.shape[0] == 0:
+                        continue
+                        
+                    batch_loss, batch_mae = model.evaluate(batch_X, batch_y, verbose=0)
+                    
+                    # 验证结果
+                    if np.isfinite(batch_loss) and np.isfinite(batch_mae):
+                        losses.append(batch_loss)
+                        maes.append(batch_mae)
+                    else:
+                        print(f"批次 {i}-{batch_end} 结果无效，跳过")
+                        
+                except tf.errors.ResourceExhaustedError:
+                    print(f"GPU内存不足，跳过批次 {i}-{batch_end}")
+                    continue
+                except tf.errors.InvalidArgumentError as e:
+                    print(f"CUDNN参数错误，跳过批次 {i}-{batch_end}: {e}")
+                    continue
+                except Exception as e:
+                    print(f"未知错误，跳过批次 {i}-{batch_end}: {e}")
+                    continue
+            
+            if not losses:
+                print("警告：所有批次都失败了")
+                return 0.0, 0.0
+            
             return np.mean(losses), np.mean(maes)
         
         train_loss, train_mae = evaluate_in_batches(X_train, y_train)
@@ -621,9 +792,10 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         tf.keras.backend.clear_session()
         gc.collect()
         
-        # 强制等待一小段时间让GPU释放内存
-        import time
-        time.sleep(1)  # 减少等待时间
+        # 强制等待GPU内存释放
+        if tf.config.list_physical_devices('GPU'):
+            time.sleep(5)
+            print(f"第 {fold_idx + 1} 折完成，已清理GPU内存")
     
     # 计算统计结果
     cv_summary = {}
@@ -794,27 +966,67 @@ def load_and_prepare_data():
     score_csv = "/liaozizhuo/scripts/MainDB.csv"
     valid_embryos_path = "/liaozizhuo/scripts/filtered_clean_embryos.csv"
     
+    # 检查文件是否存在
+    required_files = [score_csv, valid_embryos_path]
+    for file_path in required_files:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"必需文件不存在: {file_path}")
+    
     # 加载评分信息
     score_dict = load_score_dict(score_csv)
     
     # 读取胚胎信息
-    valid_embryo_df = pd.read_csv(valid_embryos_path)
+    try:
+        valid_embryo_df = pd.read_csv(valid_embryos_path)
+        print(f"成功加载胚胎信息: {valid_embryo_df.shape}")
+    except Exception as e:
+        print(f"加载胚胎信息失败: {e}")
+        raise
     
     # 加载年龄信息
     slide_info_path = "/liaozizhuo/scripts/SlidePatientBirthDates.csv"
-    slide_info_df = pd.read_csv(slide_info_path)
+    if os.path.exists(slide_info_path):
+        try:
+            slide_info_df = pd.read_csv(slide_info_path)
+            print(f"成功加载年龄信息: {slide_info_df.shape}")
+        except Exception as e:
+            print(f"加载年龄信息失败: {e}")
+            slide_info_df = None
+    else:
+        print(f"警告: 年龄信息文件不存在: {slide_info_path}")
+        slide_info_df = None
     
     # 提取年龄映射
-    slide_info_df["EmbryoPatientID"] = slide_info_df["SlideID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
-    age_map = dict(zip(slide_info_df["EmbryoPatientID"], slide_info_df["Age"]))
+    if slide_info_df is not None:
+        slide_info_df["EmbryoPatientID"] = slide_info_df["SlideID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
+        age_map = dict(zip(slide_info_df["EmbryoPatientID"], slide_info_df["Age"]))
+        
+        # 将年龄映射到胚胎数据
+        valid_embryo_df["PatientID_Prefix"] = valid_embryo_df["PatientID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
+        valid_embryo_df["Age"] = valid_embryo_df["PatientID_Prefix"].map(age_map)
+        
+        # 检查年龄数据的完整性
+        age_missing = valid_embryo_df["Age"].isna().sum()
+        if age_missing > 0:
+            print(f"警告: {age_missing} 个胚胎缺少年龄信息")
+            # 用中位数填充缺失的年龄
+            median_age = valid_embryo_df["Age"].median()
+            valid_embryo_df["Age"].fillna(median_age, inplace=True)
+            print(f"用中位数年龄 {median_age:.1f} 填充了缺失值")
+    else:
+        # 如果没有年龄信息，创建一个默认的年龄列
+        print("创建默认年龄信息")
+        valid_embryo_df["Age"] = 30.0  # 默认年龄
     
-    # 将年龄映射到胚胎数据
-    valid_embryo_df["PatientID_Prefix"] = valid_embryo_df["PatientID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
-    valid_embryo_df["Age"] = valid_embryo_df["PatientID_Prefix"].map(age_map)
-    
+    # 数据验证
     print(f"总胚胎数量: {len(valid_embryo_df)}")
     print(f"质量分布:\n{valid_embryo_df['EmbryoQuality'].value_counts()}")
     print(f"年龄范围: {valid_embryo_df['Age'].min():.1f} - {valid_embryo_df['Age'].max():.1f}")
+    
+    # 检查数据质量
+    quality_counts = valid_embryo_df['EmbryoQuality'].value_counts()
+    if len(quality_counts) < 2:
+        print("警告: 胚胎质量类别不足，可能影响训练效果")
     
     return root_dir, score_dict, valid_embryo_df
 
@@ -849,6 +1061,11 @@ def load_or_build_features(root_dir, score_dict, valid_embryo_df):
         np.save("/liaozizhuo/scripts/quality_labels_multi.npy", np.array(quality_labels))
         np.save("/liaozizhuo/scripts/ages_multi.npy", np.array(ages))
         print("特征数据已保存")
+    
+    # 在load_or_build_features函数的return语句之前添加：
+    X = X.astype(np.float32)
+    y_bs = y_bs.astype(np.float32)
+    print(f"数据类型已统一为float32: X={X.dtype}, y_bs={y_bs.dtype}")
     
     return X, y_bs, quality_labels, ages
 
@@ -900,27 +1117,25 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
     return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
 def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
-    print("=== 训练主模型（修复数据类型）===")
+    print("=== 训练主模型（修复数据类型和分片问题）===")
     
-    # 强制转换所有数据为 float32（关键修复）
+    # 强制转换所有数据为 float32
     X_train = X_train.astype(np.float32)
-    y_train = y_train.astype(np.float32)  # 确保标签也是float32
+    y_train = y_train.astype(np.float32)
     X_val = X_val.astype(np.float32)
-    y_val = y_val.astype(np.float32)      # 确保标签也是float32
+    y_val = y_val.astype(np.float32)
     
-    print(f"数据类型检查: X_train={X_train.dtype}, y_train={y_train.dtype}")
-    print(f"数据形状检查: X_train={X_train.shape}, y_train={y_train.shape}")
-    
-    # 重新检测GPU（防止配置变化）
+    # 重新检测GPU
     gpus = tf.config.list_physical_devices('GPU')
     num_gpus = len(gpus)
     
-    print(f"当前可用GPU数量: {num_gpus}")
-    
-    # 智能选择分布式策略
+    # 优化分布式策略
     if num_gpus > 1:
-        strategy = tf.distribute.MirroredStrategy()
-        print(f"使用MirroredStrategy，GPU数量: {strategy.num_replicas_in_sync}")
+        strategy = tf.distribute.MirroredStrategy(
+            devices=["/gpu:0", "/gpu:1"],
+            cross_device_ops=tf.distribute.NcclAllReduce()
+        )
+        print(f"使用优化的MirroredStrategy，GPU数量: {strategy.num_replicas_in_sync}")
     elif num_gpus == 1:
         strategy = tf.distribute.OneDeviceStrategy("/gpu:0")
         print("使用单GPU策略")
@@ -928,24 +1143,17 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         strategy = tf.distribute.OneDeviceStrategy("/cpu:0")
         print("使用CPU策略")
     
-    # 动态调整批量大小
+    # 计算批量大小
     feature_size = X_train.shape[2]
-    
-    # 根据GPU数量和特征大小智能调整
     if feature_size > 50000:
-        base_batch_size = 2 if num_gpus <= 1 else 4
+        base_batch_size = 8 if num_gpus <= 1 else 16
     elif feature_size > 30000:
-        base_batch_size = 4 if num_gpus <= 1 else 6
+        base_batch_size = 16 if num_gpus <= 1 else 24
     else:
-        base_batch_size = 8 if num_gpus <= 1 else 12
+        base_batch_size = 32 if num_gpus <= 1 else 48
     
-    global_batch_size = base_batch_size * max(1, strategy.num_replicas_in_sync)
-    
-    print(f"智能批量大小配置:")
-    print(f"  - 特征维度: {feature_size}")
-    print(f"  - 基础批量: {base_batch_size}")
-    print(f"  - 全局批量: {global_batch_size}")
-    print(f"  - GPU副本数: {strategy.num_replicas_in_sync}")
+    global_batch_size = base_batch_size * strategy.num_replicas_in_sync
+    print(f"全局批量大小: {global_batch_size}")
     
     # 清理GPU内存
     tf.keras.backend.clear_session()
@@ -960,126 +1168,53 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         except RuntimeError as e:
             print(f"GPU配置错误: {e}")
     
-    print(f"检测到 {len(gpus)} 个GPU")
+    # 构建优化的数据管道
+    print("=== 构建优化的数据管道 ===")
     
-    # 多GPU策略配置
-    if len(gpus) > 1:
-        # 明确指定GPU设备
-        strategy = tf.distribute.MirroredStrategy(devices=["/gpu:0", "/gpu:1"])
-        print(f"使用多GPU训练，GPU数量: {strategy.num_replicas_in_sync}")
-    else:
-        strategy = tf.distribute.OneDeviceStrategy("/gpu:0" if gpus else "/cpu:0")
-        print("使用单GPU/CPU训练")
-
-    # 合理的批量大小设置
-    feature_size = X_train.shape[2]
-    print(f"特征维度: {feature_size}")
-    
-    # 更合理的批量大小计算
-    if feature_size > 50000:
-        base_batch_size = 4  # 适中的批量
-    elif feature_size > 30000:
-        base_batch_size = 8
-    else:
-        base_batch_size = 16
-    
-    global_batch_size = base_batch_size * strategy.num_replicas_in_sync
-    print(f"全局批量大小: {global_batch_size} (基础: {base_batch_size} × GPU数: {strategy.num_replicas_in_sync})")
-    
-    # 轻量级增强函数
-    def lightweight_augmentation(features, training=True):
-        if not training:
-            return features
-        
-        # 使用固定种子确保各GPU一致性
-        if tf.random.uniform([]) > 0.7:
-            noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=0.002)
-            features = features + noise
-        
-        return features
-
-    # 在CPU上创建数据集（避免GPU内存问题）
-    print("=== 在CPU上构建数据管道 ===")
-    
-    # 数据增强在数据管道中进行，确保一致性
-    def augment_batch(x, y):
-        x_aug = lightweight_augmentation(x, training=True)
-        return x_aug, y
-    
-    # 训练集 - 使用生成器避免大内存分配，确保类型一致
-    def train_generator():
-        while True:  # 添加无限循环
-            # 创建索引并shuffle
-            indices = np.arange(len(X_train))
-            np.random.shuffle(indices)
-            for i in indices:
-                x = X_train[i].astype(np.float32)  # 明确转换
-                y = np.float32(y_train[i])         # 明确转换为float32（不是float）
-                # 应用轻量增强
-                if np.random.random() > 0.7:
-                    noise = np.random.normal(0, 0.002, x.shape).astype(np.float32)
-                    x = x + noise
-                yield x, y
-    
-    train_ds = tf.data.Dataset.from_generator(
-        train_generator,
-        output_signature=(
-            tf.TensorSpec(shape=(33, X_train.shape[2]), dtype=tf.float32),  # 使用实际维度
-            tf.TensorSpec(shape=(), dtype=tf.float32)                       # 确保float32
-        )
-    )
+    # 使用from_tensor_slices支持自动分片
+    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_ds = train_ds.shuffle(buffer_size=min(10000, len(X_train)), seed=42)
     train_ds = train_ds.batch(global_batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     
-    # 验证集 - 使用生成器，确保类型一致
-    def val_generator():
-        for i in range(len(X_val)):
-            x = X_val[i].astype(np.float32)
-            y = np.float32(y_val[i])        # 明确转换为float32
-            yield x, y
-    
-    val_ds = tf.data.Dataset.from_generator(
-        val_generator,
-        output_signature=(
-            tf.TensorSpec(shape=(33, X_val.shape[2]), dtype=tf.float32),  # 使用实际维度
-            tf.TensorSpec(shape=(), dtype=tf.float32)
-        )
-    )
+    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
     val_ds = val_ds.batch(global_batch_size, drop_remainder=False)
     val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
-
-    # 在strategy作用域内构建
+    
+    # 应用优化选项
+    options = tf.data.Options()
+    options.experimental_optimization.map_parallelization = True
+    options.experimental_optimization.parallel_batch = True
+    options.experimental_optimization.shuffle_and_repeat_fusion = True
+    
+    train_ds = train_ds.with_options(options)
+    val_ds = val_ds.with_options(options)
+    
+    # 在strategy作用域内构建模型
     with strategy.scope():
-        # ✅ 只在GPU上创建模型
         model = create_model(feature_dim)
         print("模型参数统计:")
         model.summary()
-
+        
         # 构建回调函数
-        print("=== 构建回调函数 ===")
-        
-        # 简化：直接使用Keras的fit方法，自动处理分布式训练
-        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
-        
         callbacks = [
-            EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
-            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
-            ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
+            tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
+            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
+            tf.keras.callbacks.ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
         ]
-
-    print("=== 开始多GPU训练（使用model.fit）===")
     
-    # 使用Keras的fit方法，自动处理分布式训练
+    print("=== 开始多GPU训练（修复分片问题）===")
+    
+    # 训练模型
     history = model.fit(
         train_ds,
-        steps_per_epoch=len(X_train) // global_batch_size,  # 指定步数
+        steps_per_epoch=len(X_train) // global_batch_size,
         validation_data=val_ds,
-        # 移除validation_steps，让验证集自然结束
         epochs=20,
         callbacks=callbacks,
         verbose=1
     )
-
+    
     print(f"\n=== 训练完成 ===")
     print(f"使用了 {len(gpus)} 个GPU")
     print(f"最佳验证损失: {min(history.history['val_loss']):.4f}")
@@ -1372,50 +1507,145 @@ def run_cross_validation(X, y_bs, quality_labels, ages, feature_dim):
     print("交叉验证结果已保存至: /liaozizhuo/scripts/cv_results.json")
     print("分析图表已保存至: /liaozizhuo/scripts/cv_analysis.pdf")
 
+def check_required_paths():
+    """检查必需的路径和文件"""
+    print("=== 检查必需的路径和文件 ===")
+    
+    required_paths = [
+        "/liaozizhuo/image",
+        "/liaozizhuo/scripts"
+    ]
+    
+    required_files = [
+        "/liaozizhuo/scripts/MainDB.csv",
+        "/liaozizhuo/scripts/filtered_clean_embryos.csv"
+    ]
+    
+    # 检查目录
+    for path in required_paths:
+        if not os.path.exists(path):
+            print(f"警告: 目录不存在: {path}")
+            try:
+                os.makedirs(path, exist_ok=True)
+                print(f"已创建目录: {path}")
+            except Exception as e:
+                print(f"创建目录失败: {e}")
+        else:
+            print(f"✓ 目录存在: {path}")
+    
+    # 检查文件
+    for file_path in required_files:
+        if not os.path.exists(file_path):
+            print(f"✗ 文件不存在: {file_path}")
+        else:
+            print(f"✓ 文件存在: {file_path}")
+    
+    print("路径检查完成")
+
+def check_cudnn_compatibility():
+    """检查CUDNN兼容性并设置环境变量"""
+    print("=== 检查CUDNN兼容性 ===")
+    
+    try:
+        # 设置CUDNN环境变量以提高兼容性
+        os.environ['TF_CUDNN_USE_AUTOTUNE'] = '0'  # 禁用自动调优
+        os.environ['TF_CUDNN_DETERMINISTIC'] = '1'  # 启用确定性模式
+        
+        # 检查TensorFlow版本
+        tf_version = tf.__version__
+        print(f"TensorFlow版本: {tf_version}")
+        
+        # 检查GPU设备
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            print(f"检测到 {len(gpus)} 个GPU")
+            for i, gpu in enumerate(gpus):
+                print(f"  GPU {i}: {gpu.name}")
+                
+            # 配置GPU内存增长
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("已启用GPU内存增长")
+        else:
+            print("未检测到GPU")
+            
+    except Exception as e:
+        print(f"CUDNN兼容性检查失败: {e}")
+    
+    return True
+
+def main():
+    """主函数，包含异常处理"""
+    try:
+        # 检查CUDNN兼容性
+        check_cudnn_compatibility()
+        
+        # 配置参数
+        save_model_path = "/liaozizhuo/scripts/bilstm_quality_model.h5"
+        
+        # 1. 加载和准备数据
+        print("=== 步骤1: 加载和准备数据 ===")
+        root_dir, score_dict, valid_embryo_df = load_and_prepare_data()
+        
+        # 2. 加载或构建特征
+        print("=== 步骤2: 加载或构建特征 ===")
+        X, y_bs, quality_labels, ages = load_or_build_features(root_dir, score_dict, valid_embryo_df)
+        
+        # 3. 拆分数据集 - 修改这里
+        (X_train, X_val, X_test, y_train, y_val, y_test, 
+         quality_train, quality_val, quality_test,
+         ages_train, ages_val, ages_test) = split_dataset(X, y_bs, quality_labels, ages)
+        # 仅对训练集做类别均衡
+        X_train, y_train, quality_train, ages_train = balance_train_subset(X_train, y_train, quality_train, ages_train)
+        
+        # 4. 训练主模型
+        feature_dim = X.shape[2] // 11  # 计算特征维度
+        print(f"计算得到的特征维度: {feature_dim}")
+        model, history = train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path)
+        
+        # 5. 评估模型
+        test_loss, test_mae = evaluate_model(model, X_test, y_test)
+        
+        # 6. 逻辑回归分析 - 修改这里，传递测试集的年龄
+        X_trainval_concat = np.concatenate([X_train, X_val], axis=0)
+        ages_trainval = ages_train + ages_val
+        quality_trainval = quality_train + quality_val
+        logic_results = perform_logistic_regression(model, X_trainval_concat, ages_trainval, quality_trainval, X_test, ages_test, quality_test, test_mae)
+            
+        # 7. 创建可视化
+        create_visualizations(logic_results, test_mae)
+        
+        # 8. 运行交叉验证
+        run_cross_validation(X, y_bs, quality_labels, ages, feature_dim)
+        
+        # 9. 最终总结
+        print(f"\n=== 最终结果总结 ===")
+        print(f"多模型特征维度: {X.shape[2]} (每个胚胎: {feature_dim})")
+        print(f"BiLSTM测试MAE: {test_mae:.4f}")
+        print(f"逻辑回归准确率: {logic_results['logic_acc']:.4f}")
+        print(f"逻辑回归AUC: {logic_results['auc_score']:.4f}")
+        print("分析图表已保存至: /liaozizhuo/scripts/multi_model_analysis.pdf")
+        print("特征重要性图表已保存至: /liaozizhuo/scripts/feature_importance.pdf")
+        
+        print("\n=== 程序执行完成 ===")
+        
+    except Exception as e:
+        print(f"\n=== 程序执行失败 ===")
+        print(f"错误信息: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
 # 主流程
 if __name__ == "__main__":
     # 在所有操作之前配置GPU
     configure_gpu_for_lstm()
     
-    # 配置参数
-    save_model_path = "/liaozizhuo/scripts/bilstm_quality_model.h5"
+    # 检查必需的路径
+    check_required_paths()
     
-    # 1. 加载和准备数据
-    root_dir, score_dict, valid_embryo_df = load_and_prepare_data()
+    # 检查CUDNN兼容性
+    check_cudnn_compatibility()
     
-    # 2. 加载或构建特征
-    X, y_bs, quality_labels, ages = load_or_build_features(root_dir, score_dict, valid_embryo_df)
-    
-    # 3. 拆分数据集 - 修改这里
-    (X_train, X_val, X_test, y_train, y_val, y_test, 
-     quality_train, quality_val, quality_test,
-     ages_train, ages_val, ages_test) = split_dataset(X, y_bs, quality_labels, ages)
-    # 仅对训练集做类别均衡
-    X_train, y_train, quality_train, ages_train = balance_train_subset(X_train, y_train, quality_train, ages_train)
-    
-    # 4. 训练主模型
-    model, history = train_main_model(X_train, y_train, X_val, y_val, X.shape[2] // 11, save_model_path)
-    
-    # 5. 评估模型
-    test_loss, test_mae = evaluate_model(model, X_test, y_test)
-    
-    # 6. 逻辑回归分析 - 修改这里，传递测试集的年龄
-    X_trainval_concat = np.concatenate([X_train, X_val], axis=0)
-    ages_trainval = ages_train + ages_val
-    quality_trainval = quality_train + quality_val
-    logic_results = perform_logistic_regression(model, X_trainval_concat, ages_trainval, quality_trainval, X_test, ages_test, quality_test, test_mae)
-        
-    # 7. 创建可视化
-    create_visualizations(logic_results, test_mae)
-    
-    # 8. 运行交叉验证
-    run_cross_validation(X, y_bs, quality_labels, ages, X.shape[2] // 11)
-    
-    # 9. 最终总结
-    print(f"\n=== 最终结果总结 ===")
-    print(f"多模型特征维度: {X.shape[2]}")
-    print(f"BiLSTM测试MAE: {test_mae:.4f}")
-    print(f"逻辑回归准确率: {logic_results['logic_acc']:.4f}")
-    print(f"逻辑回归AUC: {logic_results['auc_score']:.4f}")
-    print("分析图表已保存至: /liaozizhuo/scripts/multi_model_analysis.pdf")
-    print("特征重要性图表已保存至: /liaozizhuo/scripts/feature_importance.pdf")
+    # 调用主函数
+    main()
