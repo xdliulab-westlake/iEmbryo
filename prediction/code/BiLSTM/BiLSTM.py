@@ -457,7 +457,6 @@ def create_model_simple(feature_dim):
         Bidirectional(LSTM(128, 
                           return_sequences=True, 
                           dropout=0.4,
-                          recurrent_dropout=0.3,
                           kernel_regularizer=l2(1e-3),
                           dtype=tf.float32
                          )),
@@ -465,7 +464,6 @@ def create_model_simple(feature_dim):
         
         Bidirectional(LSTM(64, 
                           dropout=0.4,
-                          recurrent_dropout=0.3,
                           kernel_regularizer=l2(1e-3),
                           dtype=tf.float32
                          )),
@@ -610,7 +608,7 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             ]
             
             # CV数据管道 - 更小的批量大小
-            cv_batch_size = 4 * strategy.num_replicas_in_sync  # 进一步减小
+            cv_batch_size = 32 * strategy.num_replicas_in_sync  # 进一步减小
             
             # 简化的训练类
             class SimpleCVModel(tf.keras.Model):
@@ -629,7 +627,7 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             initial_lr = 1e-5
             lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
                 initial_lr,
-                decay_steps=100,
+                decay_steps=200,
                 decay_rate=0.9,
                 staircase=True
             )
@@ -653,7 +651,7 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             # 训练模型
             history = cv_model.fit(
                 train_ds, validation_data=val_ds, 
-                epochs=12,              # 减少epoch数
+                epochs=50,              # 减少epoch数
                 callbacks=callbacks, 
                 verbose=1
             )
@@ -1143,14 +1141,7 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         strategy = tf.distribute.OneDeviceStrategy("/cpu:0")
         print("使用CPU策略")
     
-    # 计算批量大小
-    feature_size = X_train.shape[2]
-    if feature_size > 50000:
-        base_batch_size = 8 if num_gpus <= 1 else 16
-    elif feature_size > 30000:
-        base_batch_size = 16 if num_gpus <= 1 else 24
-    else:
-        base_batch_size = 32 if num_gpus <= 1 else 48
+    base_batch_size = 32
     
     global_batch_size = base_batch_size * strategy.num_replicas_in_sync
     print(f"全局批量大小: {global_batch_size}")
@@ -1598,8 +1589,12 @@ def main():
         # 仅对训练集做类别均衡
         X_train, y_train, quality_train, ages_train = balance_train_subset(X_train, y_train, quality_train, ages_train)
         
+        # 打印平衡后的实际样本数
+        print(f"平衡后训练集大小: {X_train.shape}")
+        print(f"平衡后训练集样本数: {len(X_train)}")
+        
         # 4. 训练主模型
-        feature_dim = X.shape[2] // 11  # 计算特征维度
+        feature_dim = X.shape[2] // 11
         print(f"计算得到的特征维度: {feature_dim}")
         model, history = train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path)
         
