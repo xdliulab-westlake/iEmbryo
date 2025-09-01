@@ -88,16 +88,35 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
     # Check GPU availability
     check_gpu_availability()
     
-    # Balance classes
-    balanced_images, balanced_labels, balanced_ages, balanced_qualities = balance_classes(images, labels, ages, qualities)
+    # 检查输入数据是否已经分割
+    if len(images.shape) == 3 and images.shape[1] == 224 and images.shape[2] == 224:
+        # 数据已经是预处理好的图像数组，直接使用
+        print("检测到已预处理的数据，跳过数据分割步骤")
+        X_train, y_train, age_train, quality_train = images, labels, ages, qualities
+        
+        # 创建虚拟的验证集（用于训练时的验证）
+        # 这里可以从训练集中分出一部分作为验证集
+        from sklearn.model_selection import train_test_split
+        X_train, X_val, y_train, y_val, age_train, age_val, quality_train, quality_val = train_test_split(
+            X_train, y_train, age_train, quality_train, test_size=0.2, random_state=42, stratify=y_train
+        )
+        
+        # 创建虚拟的测试集（保持与原来接口一致）
+        X_test, y_test, age_test, quality_test = X_val, y_val, age_val, quality_val
+        
+    else:
+        # 原来的逻辑：平衡类别并分割数据
+        print("使用原始数据分割逻辑")
+        # Balance classes
+        balanced_images, balanced_labels, balanced_ages, balanced_qualities = balance_classes(images, labels, ages, qualities)
 
-    # Split the dataset with stratification
-    X_train, X_temp, y_train, y_temp, age_train, age_temp, quality_train, quality_temp = train_test_split(
-        balanced_images, balanced_labels, balanced_ages, balanced_qualities, test_size=0.3, random_state=42, stratify=balanced_labels
-    )
-    X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
-        X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
-    )
+        # Split the dataset with stratification
+        X_train, X_temp, y_train, y_temp, age_train, age_temp, quality_train, quality_temp = train_test_split(
+            balanced_images, balanced_labels, balanced_ages, balanced_qualities, test_size=0.3, random_state=42, stratify=balanced_labels
+        )
+        X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
+            X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
+        )
 
     # Output class distribution confirmation
     print(f"Train samples: {len(y_train)}, Validation: {len(y_val)}, Test: {len(y_test)}")
@@ -210,7 +229,7 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
             model.save('vgg16_model_at_interruption')
             print("Model saved at interruption point.")
 
-    return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
+    return model, history
 
 def generate_gradcam(model, image, class_index, layer_name='block5_conv3'):
     """
@@ -554,12 +573,23 @@ if __name__ == "__main__":
     batch_size_per_replica = 64
     global_batch_size = batch_size_per_replica * max(1, num_gpus)
 
-    # load data (with augmentation enabled for training set)
-    images, labels, qualities, image_paths = load_data(data_dir, img_size=224, batch_size=global_batch_size, is_training=True)
-
-    # Train the model 
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
-        images, labels, np.zeros(len(labels)), qualities, 
+    # 使用新的数据加载函数
+    print("=== 加载和分割数据 ===")
+    (X_train, y_train, q_train,
+     X_val, y_val, q_val,
+     X_test, y_test, q_test) = load_data_with_split(
+        data_dir, img_size=224, batch_size=global_batch_size, test_size=0.3, val_size=0.15
+    )
+    
+    print(f"训练集: {len(y_train)} 样本")
+    print(f"验证集: {len(y_val)} 样本") 
+    print(f"测试集: {len(y_test)} 样本")
+    
+    # 训练模型（传入已分割的数据）
+    print("=== 开始训练 ===")
+    # 注意：这里需要修改train_model_with_augmentation函数，让它接收已分割的数据
+    model, history = train_model_with_augmentation(
+        X_train, y_train, np.zeros(len(y_train)), q_train, 
         num_epochs=2000, 
         global_batch_size=global_batch_size, 
         img_size=224, 
@@ -567,15 +597,12 @@ if __name__ == "__main__":
         fine_tune=True,
         copy_images=False
     )
-
-    # Reload test data without augmentation
-    _, _, _, image_paths = load_data(data_dir, img_size=224, batch_size=global_batch_size, is_training=False)
     
-    # Evaluate the deep learning model with Grad-CAM visualization
+    # 评估模型（使用已分割的测试数据）
+    print("=== 评估模型 ===")
     latest_model_path = 'vgg16_best_model'
     if os.path.exists(latest_model_path):
         print(f"Evaluating model: {latest_model_path}")
-        # 启用Grad-CAM可视化，分析8个样本
         evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
                                    save_path="test_auc.pdf",
                                    generate_gradcam_viz=True, 

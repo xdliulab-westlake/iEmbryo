@@ -121,3 +121,67 @@ def load_data_vgg16(data_dir, img_size=224, batch_size=32, is_training=True):
 def load_data(data_dir, img_size=224, batch_size=32, is_training=True):
     """向后兼容的函数名"""
     return load_data_vgg16(data_dir, img_size, batch_size, is_training)
+
+def load_data_with_split(data_dir, img_size=224, batch_size=32, test_size=0.3, val_size=0.15):
+    """
+    一次性加载数据，然后分别处理训练集和验证/测试集
+    """
+    image_paths = []
+    labels = []
+    qualities = []
+    
+    # 收集图像路径和标签
+    for label, class_name in enumerate(['class_0', 'class_1']):
+        class_dir = os.path.join(data_dir, 'train', class_name)
+        if not os.path.exists(class_dir):
+            print(f"Warning: Directory {class_dir} does not exist.")
+            continue
+            
+        for img_file in sorted(os.listdir(class_dir)):
+            if not img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                continue
+                
+            img_path = os.path.join(class_dir, img_file)
+            image_paths.append(img_path)
+            labels.append(label)
+            qualities.append(1 if class_name == 'class_1' else 0)
+    
+    print(f"找到 {len(image_paths)} 张图像")
+    print(f"Class 0: {labels.count(0)} 张，Class 1: {labels.count(1)} 张")
+    
+    # 先分割数据（基于路径，不处理图像）
+    from sklearn.model_selection import train_test_split
+    
+    # 第一次分割：训练集 vs 临时集
+    train_paths, temp_paths, train_labels, temp_labels, train_quals, temp_quals = train_test_split(
+        image_paths, labels, qualities, test_size=test_size, random_state=42, stratify=labels
+    )
+    
+    # 第二次分割：验证集 vs 测试集
+    val_paths, test_paths, val_labels, test_labels, val_quals, test_quals = train_test_split(
+        temp_paths, temp_labels, temp_quals, test_size=0.5, random_state=42, stratify=temp_labels
+    )
+    
+    # 分别处理三个数据集
+    def preprocess_images(paths, is_training):
+        """预处理图像列表"""
+        processed_images = []
+        for path in paths:
+            img = tf.io.read_file(path)
+            img = tf.image.decode_image(img, expand_animations=False)
+            img = preprocess_image_vgg16(img, img_size, is_training)
+            processed_images.append(img.numpy())
+        return np.array(processed_images)
+    
+    print("=== 预处理训练集（启用增强）===")
+    X_train = preprocess_images(train_paths, is_training=True)
+    
+    print("=== 预处理验证集（不增强）===")
+    X_val = preprocess_images(val_paths, is_training=False)
+    
+    print("=== 预处理测试集（不增强）===")
+    X_test = preprocess_images(test_paths, is_training=False)
+    
+    return (X_train, train_labels, train_quals,
+            X_val, val_labels, val_quals,
+            X_test, test_labels, test_quals)

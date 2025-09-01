@@ -1,108 +1,60 @@
 import os
 import re
+import math
+import time
 import glob
+import copy
+import gc
 import joblib
+import shutil
+import concurrent.futures
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import tensorflow as tf
 import matplotlib.pyplot as plt
-from PIL import Image
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.regularizers import l2
+from PIL import Image, ImageFile
+import tensorflow as tf
+import tensorflow.keras.backend as K
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Concatenate, Dropout, Dense, GlobalAveragePooling2D
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.layers import (
+    Input, GlobalAveragePooling2D, Dense, Dropout, Flatten
+)
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
-from sklearn.metrics import roc_curve
-from sklearn.model_selection import GridSearchCV
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
+from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l1_l2, l2
+from tensorflow.keras.metrics import Precision, Recall, CategoricalAccuracy
+from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
+from tensorflow.keras.applications import InceptionV3, EfficientNetB0, ResNet50
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix, accuracy_score
 from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+import absl.logging
+from preprocessing.data_loader import *
+from preprocessing.image_utils import copy_images_by_split
+from utils.data_utils import balance_classes, check_class_distribution
 
-# 1. Data Loading and Preprocessing
-def load_data(data_dir, img_size=299):
-    images = []
-    labels = []
-    ages = []
-    qualities = []  # Embryo quality labels
-    
-    for label, class_name in enumerate(['class_0', 'class_1']):
-        class_dir = os.path.join(data_dir, 'train', class_name)
-        for img_file in os.listdir(class_dir):
-            img_path = os.path.join(class_dir, img_file)
-            img = Image.open(img_path).resize((img_size, img_size))
-            img_array = np.array(img) / 255.0  # Normalize
-            if img_array.ndim == 2:  # If grayscale, convert to RGB
-                img_array = np.stack((img_array,) * 3, axis=-1)
-            images.append(img_array)
-            labels.append(label)
-            
-            # Add age information
-            age = int(re.search(r'_RUN\d+_(\d+)\.jpeg$', img_file).group(1))
-            ages.append(age)
-            
-            # Add quality information
-            quality = 1 if class_name == 'class_1' else 0  # Set quality based on class name
-            qualities.append(quality)
-    
-    images = np.array(images)
-    labels = np.array(labels)
-    ages = np.array(ages)
-    qualities = np.array(qualities)  # Embryo quality labels
-    
-    return images, labels, ages, qualities
+# Build a pre-trained VGG16 model with custom top layers
+def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2, fine_tune_at=18, fine_tune=False):
+    # Load the VGG16 model without the top layers
+    base_model = VGG16(weights='imagenet', include_top=False, input_shape=input_shape)
 
-# 2. Build Deep Learning Model
-def inception_module(x, filters_1x1, filters_3x3_reduce, filters_3x3, filters_5x5_reduce, filters_5x5, filters_pool_proj):
-    conv_1x1 = Conv2D(filters_1x1, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
+    if fine_tune:
+        for layer in base_model.layers[:]:
+            layer.trainable = True
+        # Freeze the base model layers up to the specified layer
+        # for layer in base_model.layers[fine_tune_at:]:
+        #     layer.trainable = True
+    else:
+        base_model.trainable = False
 
-    conv_3x3_reduce = Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
-    conv_3x3 = Conv2D(filters_3x3, (3, 3), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(conv_3x3_reduce)
-
-    conv_5x5_reduce = Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
-    conv_5x5 = Conv2D(filters_5x5, (5, 5), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(conv_5x5_reduce)
-
-    maxpool = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
-    pool_proj = Conv2D(filters_pool_proj, (1, 1), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(maxpool)
-
-    output = Concatenate()([conv_1x1, conv_3x3, conv_5x5, pool_proj])
-    return output
-
-def build_inception_v1(input_shape, num_classes):
+    # Create the new model on top
     inputs = Input(shape=input_shape)
-
-    # Initial convolution
-    x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(inputs)
-    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
-    x = Conv2D(192, (3, 3), padding='same', activation='relu', kernel_regularizer=l2(0.0002))(x)
-    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
-
-    # Inception modules
-    x = inception_module(x, 64, 96, 128, 16, 32, 32)
-    x = inception_module(x, 128, 128, 192, 32, 96, 64)
-
-    # Reduction
-    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
-
-    # More Inception modules
-    x = inception_module(x, 192, 96, 208, 16, 48, 64)
-    x = inception_module(x, 160, 112, 224, 24, 64, 64)
-    x = inception_module(x, 128, 128, 256, 24, 64, 64)
-    x = inception_module(x, 112, 144, 288, 32, 64, 64)
-    x = inception_module(x, 256, 160, 320, 32, 128, 128)
-
-    # Reduction
-    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
-
-    # Final Inception module
-    x = inception_module(x, 256, 160, 320, 32, 128, 128)
-    x = inception_module(x, 384, 192, 384, 48, 128, 128)
-
+    x = base_model(inputs, training=False)
+  
     # Global average pooling
     x = GlobalAveragePooling2D()(x)
-
-    # Fully connected layers with dropout
     x = Dense(1024, activation='relu', kernel_regularizer=l2(0.0002))(x)
     x = Dropout(0.5)(x)
     x = Dense(1024, activation='relu', kernel_regularizer=l2(0.0002))(x)
@@ -113,64 +65,29 @@ def build_inception_v1(input_shape, num_classes):
     model = Model(inputs=inputs, outputs=outputs)
 
     # Compile the model with a learning rate schedule
-    initial_learning_rate = 0.01
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate,
-        decay_steps=10000,
-        decay_rate=0.00004,
-        staircase=True
-    )
-    optimizer = Adam(learning_rate=lr_schedule)
+    optimizer = Adam(learning_rate=1e-4, weight_decay=1e-5)
     
     model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
     return model
 
-# 3. Train Deep Learning Model with Data Augmentation
-def balance_classes(images, labels, ages, qualities):
-    class_counts = np.bincount(labels)
-    min_count = min(class_counts)
-    balanced_images = []
-    balanced_labels = []
-    balanced_ages = []
-    balanced_qualities = []
+# check gpu availability
+def check_gpu_availability():
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
     
-    for class_label in range(len(class_counts)):
-        class_indices = np.where(labels == class_label)[0]
-        if len(class_indices) > min_count:
-            selected_indices = np.random.choice(class_indices, size=min_count, replace=False)
-        else:
-            selected_indices = class_indices
-        
-        balanced_images.extend(images[selected_indices])
-        balanced_labels.extend(labels[selected_indices])
-        balanced_ages.extend(ages[selected_indices])
-        balanced_qualities.extend(qualities[selected_indices])
-    
-    return np.array(balanced_images), np.array(balanced_labels), np.array(balanced_ages), np.array(balanced_qualities)
+    # Print detailed information about each device
+    for device in tf.config.list_physical_devices():
+        print(device)
 
-# Check class distribution
-def check_class_distribution(y_train, y_val, y_test):
-    class_names = ['Class 0', 'Class 1']    
-    train_counts = np.bincount(y_train)
-    val_counts = np.bincount(y_val)
-    test_counts = np.bincount(y_test)
+# Training the model with augmentation
+def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True, fine_tune=False, copy_images=False):
+    # Set strategy for distributed training
+    strategy = tf.distribute.MirroredStrategy()
     
-    print("Train set class distribution:")
-    for i, count in enumerate(train_counts):
-        print(f"{class_names[i]}: {count}")
+    start_time = time.time()
     
-    print("Validation set class distribution:")
-    for i, count in enumerate(val_counts):
-        print(f"{class_names[i]}: {count}")
-    
-    print("Test set class distribution:")
-    for i, count in enumerate(test_counts):
-        print(f"{class_names[i]}: {count}")
-
-def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_size=299, resume_training=True):
-    # Load data
-    images, labels, ages, qualities = load_data(data_dir, img_size)
+    # Check GPU availability
+    check_gpu_availability()
     
     # Balance classes
     balanced_images, balanced_labels, balanced_ages, balanced_qualities = balance_classes(images, labels, ages, qualities)
@@ -182,106 +99,183 @@ def train_model_with_augmentation(data_dir, num_epochs=3, batch_size=32, img_siz
     X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
         X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
     )
-    
+
+    # Output class distribution confirmation
+    print(f"Train samples: {len(y_train)}, Validation: {len(y_val)}, Test: {len(y_test)}")
+    print(f"Train positive ratio: {np.mean(y_train):.2f}, Validation: {np.mean(y_val):.2f}, Test: {np.mean(y_test):.2f}")
     check_class_distribution(y_train, y_val, y_test)
-    
-    # Define the model
-    model_path = 'inception_v1_model.h5'
+
+    with tf.device('/CPU:0'):
+        X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
+        y_train = tf.convert_to_tensor(y_train, dtype=tf.int64)
+        X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
+        y_val = tf.convert_to_tensor(y_val, dtype=tf.int64)
+
+    # Define the model path and callbacks
+    model_path = 'vgg16_best_model'  # Save only the best model based on validation loss
     initial_epoch = 0
-    
-    if resume_training and os.path.exists(model_path):
-        print("Loading existing model from", model_path)
-        model = tf.keras.models.load_model(model_path)
-        
-        # Try to extract the epoch number from the training log
-        if os.path.exists('training.log'):
-            with open('training.log', 'r') as f:
-                lines = f.readlines()
-                if lines:
-                    last_line = lines[-1]
-                    initial_epoch = int(last_line.split(',')[0]) + 1
-        else:
-            print("Training log not found. Setting initial epoch to 0.")
-            initial_epoch = 0
-    else:
-        print("Building new model from scratch.")
-        model = build_inception_v1((img_size, img_size, 3), num_classes=2)
-    
-    # Define CSV logger to log training history
     csv_logger = CSVLogger('training.log', append=True)
     
-    # Data augmentation
-    datagen = ImageDataGenerator(
-        rotation_range=20,  # Random rotation
-        width_shift_range=0.1,  # Width shift
-        height_shift_range=0.1,  # Height shift
-        shear_range=0.1,  # Shear intensity
-        zoom_range=0.1,  # Zoom range
-        horizontal_flip=True,  # Horizontal flip
-        fill_mode='nearest',  # Fill mode
-        brightness_range=[0.8, 1.2],  # Random brightness adjustment
-        channel_shift_range=10,  # Random channel shift
+    # Define checkpoint callback to save only the best model (based on validation loss)
+    checkpoint_callback = ModelCheckpoint(
+        filepath=model_path,
+        save_weights_only=False,  # Save the full model (architecture + weights)
+        monitor='val_loss',  # Monitor validation loss
+        mode='min',  # Save when validation loss is minimized
+        save_best_only=True  # Save only the best model
+    )
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True
+    )
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=5,
+        min_lr=1e-6
     )
 
-    # Train the model with data augmentation
-    history = model.fit(
-        datagen.flow(X_train, y_train, batch_size=batch_size),
-        validation_data=(X_val, y_val),
-        epochs=num_epochs,
-        initial_epoch=initial_epoch,
-        steps_per_epoch=len(X_train) // batch_size,
-        callbacks=[csv_logger]
-    )
+    # Initialize train_dataset if X_train or y_train is not None
+    if X_train is None or y_train is None:
+        raise ValueError("Error: X_train or y_train is None.")
 
-    
-    # Save the model
-    model.save(model_path) 
-    print("Inception-V1 Model saved as", model_path)
-    
+    # Build tf.data.Dataset
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_dataset = train_dataset.shuffle(1024).batch(global_batch_size).repeat().prefetch(tf.data.AUTOTUNE)
+    steps_per_epoch = math.ceil(X_train.shape[0] / global_batch_size)
+    val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
+
+    with strategy.scope():
+        model = build_vgg16_model((img_size, img_size, 3), num_classes=2)
+
+        if resume_training and os.path.exists(model_path):
+            print("Loading existing model from", model_path)
+            model = tf.keras.models.load_model(model_path)
+
+            # if fine_tune:
+            #     print("Fine-tuning enabled: Unfreezing layers starting from", fine_tune_at)
+            #     for layer in model.layers[:fine_tune_at]:
+            #         layer.trainable = False
+            #     for layer in model.layers[fine_tune_at:]:
+            #         layer.trainable = True
+            # else:
+            #     print("Fine-tuning disabled: Keeping all previously frozen layers.")
+
+            if os.path.exists('training.log'):
+                with open('training.log', 'r') as f:
+                    lines = f.readlines()
+                    if lines:
+                        last_line = lines[-1]
+                        initial_epoch = int(last_line.split(',')[0]) + 1
+            else:
+                print("Training log not found. Setting initial epoch to 0.")
+                initial_epoch = 0
+        else:
+            print("Building new model from scratch.")
+        
+        # Train the model with data augmentation
+        try:
+            print(f"Final batch size: {global_batch_size} ({global_batch_size // strategy.num_replicas_in_sync} per GPU)")
+            print(f"Total global batch size: {global_batch_size}")
+            print(f"Train dataset size: {len(y_train)} | Batch size: {global_batch_size}")
+            steps_per_epoch = math.ceil(len(X_train) / global_batch_size)
+            val_steps = max(len(X_val) // global_batch_size, 1)
+            history = model.fit(
+                    train_dataset,
+                    validation_data=val_dataset,
+                    epochs=num_epochs,
+                    initial_epoch=initial_epoch,
+                    steps_per_epoch=steps_per_epoch,
+                    validation_steps=val_steps,
+                    callbacks=[csv_logger, checkpoint_callback, early_stopping, reduce_lr]
+                )
+
+            # Check if best model was saved; if not, save the current model
+            # (inserted as per instructions)
+            if os.path.exists(model_path):
+                print(f"Best model saved at: {model_path}")
+            else:
+                print(f"No best model found at {model_path}, saving final model manually.")
+                model.save(model_path)
+                print(f"Final model saved at: {model_path}")
+
+            # Calculate the time consumed
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            print(f"Total training time: {elapsed_time:.2f} seconds")
+
+        except Exception as e:
+            print(f"Training was interrupted due to an error: {e}")
+            # Optionally save the model in case of interruption (though not needed if only saving the best model)
+            model.save('vgg16_model_at_interruption')
+            print("Model saved at interruption point.")
+
     return X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test
 
 # 4. Evaluate Deep Learning Model
-def evaluate_deep_learning_model(X_test, y_test, model_path):
+def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test", save_path="auc_curve.pdf"):
+    """
+    Evaluate a deep learning model on a given dataset and save the ROC AUC curve as a PDF.
+    
+    Parameters:
+    - X_eval: Input features for evaluation.
+    - y_eval: True labels for evaluation.
+    - model_path: Path to the trained model.
+    - dataset_name: Name of the dataset (e.g., "Test" or "Validation").
+    - save_path: Path to save the ROC AUC plot as a PDF.
+    """
+    
     # Load model
     dl_model = tf.keras.models.load_model(model_path)
     
+    # Ensure evaluation is done using the same global batch size as training with proper sharding for multi-GPU
+    eval_batch_size = min(global_batch_size, 128)  # Ensure batch size is not too large for evaluation
+    eval_dataset = tf.data.Dataset.from_tensor_slices((X_eval, y_eval)).batch(eval_batch_size).prefetch(tf.data.AUTOTUNE)
+
     # Evaluate model
-    test_loss, test_accuracy = dl_model.evaluate(X_test, y_test)
-    print(f"Deep Learning Model Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
+    eval_loss, eval_accuracy = dl_model.evaluate(eval_dataset)
+    print(f"Deep Learning Model {dataset_name} Loss: {eval_loss:.4f}, {dataset_name} Accuracy: {eval_accuracy:.4f}")
     
+    # Convert one-hot labels to integer labels if necessary
+    if y_eval.ndim > 1 and y_eval.shape[1] == 2:
+        y_eval = np.argmax(y_eval, axis=1)
     # Compute AUC for model
-    probabilities_dl = dl_model.predict(X_test)
-    if len(np.unique(y_test)) < 2:
-        print("Only one class present in y_test. ROC AUC score is not defined in that case for the Deep Learning Model.")
+    probabilities_dl = dl_model.predict(eval_dataset)
+    
+    if len(np.unique(y_eval)) < 2:
+        print(f"Only one class present in {dataset_name} set. ROC AUC score is not defined.")
     else:
-        auc_dl = roc_auc_score(y_test, probabilities_dl[:, 1])
-        print(f"Deep Learning Model Test AUC: {auc_dl:.4f}")
+        auc_dl = roc_auc_score(y_eval, probabilities_dl[:, 1])
+        print(f"Deep Learning Model {dataset_name} AUC: {auc_dl:.4f}")
         
         # Plot ROC curve
-        fpr, tpr, _ = roc_curve(y_test, probabilities_dl[:, 1])
-        # plt.figure(figsize=(8, 6))
-        # plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (area = {auc_dl:.2f})')
-        # plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
-        # plt.xlim([0.0, 1.0])
-        # plt.ylim([0.0, 1.05])
-        # plt.xlabel('False Positive Rate')
-        # plt.ylabel('True Positive Rate')
-        # plt.title('Receiver Operating Characteristic (ROC) Curve')
-        # plt.legend(loc="lower right")
-        # plt.show()
+        fpr, tpr, _ = roc_curve(y_eval, probabilities_dl[:, 1])
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (AUC = {auc_dl:.2f})')
+        plt.plot([0, 1], [0, 1], color='gray', linestyle='--')  # Diagonal reference line
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'{dataset_name} Set ROC Curve')
+        plt.legend(loc="lower right")
+        
+        # Save the figure as a PDF
+        plt.savefig(save_path, format='pdf', bbox_inches='tight')
+        print(f"ROC AUC curve saved as {save_path}")
+        plt.close()
+
+    # Compute confusion matrix
+    y_pred_dl = (probabilities_dl > 0.5).astype(int).flatten()
+    cm_dl = confusion_matrix(y_eval, y_pred_dl)
     
-    # Compute confusion matrix for deep learning model
-    y_pred_dl = np.argmax(probabilities_dl, axis=1)
-    cm_dl = confusion_matrix(y_test, y_pred_dl)
-    
-    # Create confusion matrix 
+    # Create confusion matrix DataFrame
     class_names = ['Class 1', 'Class 0']
     cm_df = pd.DataFrame(cm_dl, index=class_names, columns=class_names)
-    print("Deep Learning Model Confusion Matrix:")
+    print(f"Deep Learning Model {dataset_name} Confusion Matrix:")
     print(cm_df)
     
-
-
 # 5. Build Decision Tree Model
 def build_decision_tree(X_train, y_train, age_train, quality_train):
     # Combine image features, age, and quality into a single feature matrix
@@ -307,6 +301,11 @@ def build_decision_tree(X_train, y_train, age_train, quality_train):
 
 # 6. Train Decision Tree Model
 def train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, model_path):
+    # Convert one-hot labels to integer labels if necessary
+    if y_train.ndim > 1 and y_train.shape[1] == 2:
+        y_train = np.argmax(y_train, axis=1)
+    if y_test.ndim > 1 and y_test.shape[1] == 2:
+        y_test = np.argmax(y_test, axis=1)
     # Load the deep learning model
     dl_model = tf.keras.models.load_model(model_path)
     
@@ -326,6 +325,9 @@ def train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_te
 
 # 7. Evaluate Decision Tree Model
 def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model):
+    # Convert one-hot labels to integer labels if necessary
+    if y_test.ndim > 1 and y_test.shape[1] == 2:
+        y_test = np.argmax(y_test, axis=1)
     # Combine image features, age, and quality into a single feature matrix
     X_test_combined = np.hstack((X_test_features, age_test.reshape(-1, 1), quality_test.reshape(-1, 1)))
     
@@ -371,7 +373,7 @@ def evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_
     plt.show()
     
     # Calculate and display the probability of successful pregnancy for each leaf node
-    def calculate_leaf_probabilities(dt_model, X_test_combined, y_test):
+    def calculate_leaf_probabilities(dt_model, X_test_combined, y_test):    
         # Predict the leaf nodes for the test data
         leaf_nodes = dt_model.apply(X_test_combined)
         
@@ -410,28 +412,90 @@ def show_samples(images, labels, num_samples=25):
         axes[i].axis('off')
     plt.show()
 
+
 # Main function
 if __name__ == "__main__":
-    data_dir = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/images'
+    os.chdir("/liaozizhuo/scripts")
+    data_dir = '/liaozizhuo/selected_images/'
+
+    # Get all available GPUs
+    gpus = tf.config.list_physical_devices('GPU')
+
+    if gpus:
+        try:
+            # Set memory growth to avoid TensorFlow allocating all GPU memory at once
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                print(f"GPU {gpu} is set to memory growth.")
+        except RuntimeError as e:
+            print(f"Error in setting memory growth: {e}")
+
+    # Define the strategy for multi-GPU training
+    num_gpus = len(tf.config.list_physical_devices('GPU'))
+    batch_size_per_replica = 64
+    global_batch_size = batch_size_per_replica * max(1, num_gpus)
 
     # Run dataset_prepration.py
     # with open('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code/dataset_preparation_blastocyst.py') as f:
     #     code = f.read()
     # exec(code)
 
-    # Train the deep learning model with data augmentation
-    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(data_dir, resume_training=False)
-    
-    # Check sample labels
+    # Kmeans.py
+
+    # remove black images    
+    # csv_path = "/liaozizhuo/selected_images/images_train/prediction_Kmeans_F0_all.csv"
+    # df = pd.read_csv(csv_path)
+
+    # black_images = df[df['Cluster Label'] == 1]
+    # filtered_df = df[df['Cluster Label'] != 1]
+
+    # output_filtered_csv_path = "/liaozizhuo/selected_images/images_train/prediction_Kmeans_F0_filtered.csv"
+    # filtered_df.to_csv(output_filtered_csv_path, index=False)
+    # print(f"Filtered CSV saved to {output_filtered_csv_path}")
+
+    # for index, row in black_images.iterrows():
+    #     img_path = row['Absolute Path']
+    #     if os.path.exists(img_path):
+    #         try:
+    #             os.remove(img_path)
+    #         except Exception as e:
+    #             print(f"Failed to remove image {img_path}: {e}")
+    #     else:
+    #         print(f"Image not found: {img_path}")
+
+    # print("Black images removal completed.")
+
+    # load data (with augmentation enabled for training set)
+    images, labels, qualities, image_paths = load_data(data_dir, img_size=224, batch_size=global_batch_size, is_training=True)
+
+    # Train the model 
+    X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test = train_model_with_augmentation(
+        images, labels, np.zeros(len(labels)), qualities, 
+        num_epochs=2000, 
+        global_batch_size=global_batch_size, 
+        img_size=224, 
+        resume_training=False,
+        fine_tune=True,
+        copy_images=False
+    )
+
+
     # show_samples(X_train, y_train)
     # show_samples(X_test, y_test)
 
+    # Reload test data without augmentation
+    _, _, _, image_paths = load_data(data_dir, img_size=224, batch_size=global_batch_size, is_training=False)
+    # X_test, y_test, age_test, quality_test already returned from train function
     # Evaluate the deep learning model
-    latest_model = max(glob.glob('inception_v1_model.h5'), key=os.path.getctime)
-    evaluate_deep_learning_model(X_test, y_test, latest_model)
-    
+    latest_model_path = 'vgg16_best_model'
+    if os.path.exists(latest_model_path):
+        print(f"Evaluating model: {latest_model_path}")
+        evaluate_deep_learning_model(X_test, y_test, latest_model_path, save_path="test_auc.pdf")
+    else:
+        print("No model found at the specified path.")
+                                   
     # Train the decision tree model
-    dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, 'deep_learning_model.h5')
+    dt_model, X_test_features = train_decision_tree(X_train, y_train, age_train, quality_train, X_test, y_test, age_test, quality_test, latest_model_path)
 
     # Evaluate the decision tree model
     evaluate_decision_tree_model(X_test, y_test, age_test, quality_test, X_test_features, dt_model)
