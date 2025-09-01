@@ -432,52 +432,8 @@ def create_model(feature_dim):
         Dense(1, dtype=tf.float32)
     ])
     
-    # 降低学习率
-    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5)
-    model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
-    
-    return model
-
-def create_model_simple(feature_dim):
-    """创建简化版本的BiLSTM模型，减少过拟合"""
-    from tensorflow.keras.regularizers import l2
-    
-    input_dim = 11 * feature_dim
-    
-    model = Sequential([
-        Input(shape=(33, input_dim), dtype=tf.float32),
-        
-        # 减少特征维度
-        TimeDistributed(Dense(1024, activation='relu', 
-                            kernel_regularizer=l2(1e-3),
-                            dtype=tf.float32)),
-        tf.keras.layers.Dropout(0.4),
-        
-        # 减少LSTM单元数
-        Bidirectional(LSTM(128, 
-                          return_sequences=True, 
-                          dropout=0.4,
-                          kernel_regularizer=l2(1e-3),
-                          dtype=tf.float32
-                         )),
-        tf.keras.layers.Dropout(0.4),
-        
-        Bidirectional(LSTM(64, 
-                          dropout=0.4,
-                          kernel_regularizer=l2(1e-3),
-                          dtype=tf.float32
-                         )),
-        
-        # 减少全连接层
-        tf.keras.layers.Dropout(0.5),
-        Dense(32, activation='relu', 
-              kernel_regularizer=l2(1e-3), 
-              dtype=tf.float32),
-        tf.keras.layers.Dropout(0.5),
-        Dense(1, dtype=tf.float32)
-    ])
-    
-    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-6)  # 更低的学习率
+    # 使用固定学习率的Adam优化器
+    optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
     model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
     
     return model
@@ -604,7 +560,7 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             # 回调函数
             callbacks = [
                 EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0),
-                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7, verbose=0)
+                ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=0)
             ]
             
             # CV数据管道 - 更小的批量大小
@@ -623,17 +579,8 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             
             cv_model = SimpleCVModel(model)
             
-            # 使用学习率调度
-            initial_lr = 1e-5
-            lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-                initial_lr,
-                decay_steps=200,
-                decay_rate=0.9,
-                staircase=True
-            )
-            
-            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-            
+            # 使用固定学习率的Adam优化器，和主训练保持一致
+            optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
             # 编译模型
             cv_model.compile(
                 optimizer=optimizer,
@@ -651,7 +598,7 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
             # 训练模型
             history = cv_model.fit(
                 train_ds, validation_data=val_ds, 
-                epochs=50,              # 减少epoch数
+                epochs=300,              # 减少epoch数
                 callbacks=callbacks, 
                 verbose=1
             )
@@ -1190,7 +1137,7 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         # 构建回调函数
         callbacks = [
             tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=1),
+            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1),
             tf.keras.callbacks.ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
         ]
     
@@ -1201,7 +1148,7 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         train_ds,
         steps_per_epoch=len(X_train) // global_batch_size,
         validation_data=val_ds,
-        epochs=20,
+        epochs=200,
         callbacks=callbacks,
         verbose=1
     )
