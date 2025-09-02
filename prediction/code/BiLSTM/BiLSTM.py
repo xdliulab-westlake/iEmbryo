@@ -31,10 +31,17 @@ import time            # 时间函数
 import json            # JSON处理
 
 # 交叉验证相关导入
-from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score, cross_validate
 from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 import warnings
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
+import gc
+
 warnings.filterwarnings('ignore')
 
 # 多GPU环境变量（在导入tensorflow之前）
@@ -42,6 +49,9 @@ warnings.filterwarnings('ignore')
 import tensorflow as tf
 
 import pandas as pd
+
+# 安全初始化全局增强函数
+UNIFIED_AUGMENTATION_FN = None
 
 def configure_gpu_for_lstm():
     """配置GPU环境，优化LSTM训练"""
@@ -285,24 +295,9 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
     # Step 2: 高效批量GPU特征提取
     print("Step 2: 批量GPU特征提取...")
     
-    def create_augmentation_fn():
-        """创建数据增强函数"""
-        if not training:
-            return lambda x: x
-            
-        def augment(image):
-            if tf.random.uniform([]) > 0.5:
-                image = tf.image.flip_left_right(image)  # 左右翻转
-            if tf.random.uniform([]) > 0.7:
-                image = tf.image.flip_up_down(image)     # 上下翻转
-            if tf.random.uniform([]) > 0.5:
-                image = tf.image.random_brightness(image, max_delta=0.1)  # 亮度调整
-            if tf.random.uniform([]) > 0.5:
-                image = tf.image.random_contrast(image, lower=0.9, upper=1.1)  # 对比度调整
-            return image
-        return augment
-    
-    augmentation_fn = create_augmentation_fn()
+    # 如果需要增强，使用统一的增强函数
+    if training:
+        print("注意：build_dataset_fast中的增强功能已被统一增强函数替代")
     
     # 创建高效的数据pipeline
     all_paths = [info[3] for info in image_info_list]
@@ -311,11 +306,6 @@ def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, 
         img = tf.io.read_file(path)
         img = tf.image.decode_jpeg(img, channels=3)
         img = tf.image.resize(img, [224, 224])
-        
-        # 只在训练时应用增强
-        if training:
-            img = augmentation_fn(img)
-        
         img = tf.cast(img, tf.uint8)
         return img
     
@@ -441,12 +431,8 @@ def create_model(feature_dim):
 # 5. 交叉验证相关函数（保持这些，因为它们是核心功能）
 def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=1):
     """
-    对BiLSTM模型进行交叉验证评估
+    对BiLSTM模型进行交叉验证评估 - 使用统一数据增强
     """
-    # 添加缺失的导入
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-    from sklearn.preprocessing import StandardScaler
-    import gc
     
     print(f"=== 开始 {n_folds}折交叉验证 (重复{n_repeats}次) ===")
     
@@ -459,17 +445,14 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
     if X.shape[2] != expected_input_dim:
         print(f"特征维度不匹配，正在修正...")
         print(f"期望: {expected_input_dim}, 实际: {X.shape[2]}")
-        # 如果维度不匹配，重新reshape数据
         if X.shape[2] == feature_dim:
-            # 数据是 (n_samples, 33, feature_dim)，需要reshape为 (n_samples, 33, 11*feature_dim)
             X = X.reshape(X.shape[0], 33, 11, feature_dim).reshape(X.shape[0], 33, -1)
         elif X.shape[2] == 11 * feature_dim:
-            # 维度已经正确
             pass
         else:
             raise ValueError(f"无法自动修正特征维度: {X.shape[2]}")
     
-    print(f"修正后数据形状: {X.shape}")
+    print(f"修正后特征形状: {X.shape}")
     
     # 使用分层K折交叉验证（基于质量标签）
     cv = RepeatedStratifiedKFold(n_splits=n_folds, n_repeats=n_repeats, random_state=42)
@@ -515,13 +498,14 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         ages_train    = [ages_train_val[i]    for i in idx_tr]
         ages_val      = [ages_train_val[i]    for i in idx_va]
         
+        # 对训练集做类别均衡（与主训练保持一致）
         X_train, y_train, quality_train, ages_train = balance_train_subset(
              X_train, y_train, quality_train, ages_train
         )
 
         print(f"训练集: {X_train.shape}, 验证集: {X_val.shape}, 测试集: {X_test.shape}")
         
-        # 创建和训练模型 - 使用更保守的内存策略
+        # 创建和训练模型 - 使用与主训练相同的策略
         try:
             # 尝试使用GPU策略
             strategy = tf.distribute.MirroredStrategy()
@@ -534,77 +518,72 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         with strategy.scope():
             model = create_model(feature_dim)
             
-            # 改进的CV数据增强
-            def improved_cv_augmentation(features, training=True):
-                if not training:
-                    return features
-                
-                # 添加高斯噪声
-                if tf.random.uniform([]) > 0.7:
-                    noise_std = tf.random.uniform([], 0.001, 0.005)
-                    noise = tf.random.normal(tf.shape(features), mean=0.0, stddev=noise_std)
-                    features = features + noise
-                
-                # 随机缩放
-                if tf.random.uniform([]) > 0.8:
-                    scale_factor = tf.random.uniform([], 0.95, 1.05)
-                    features = features * scale_factor
-                
-                # 随机掩码（模拟dropout）
-                if tf.random.uniform([]) > 0.9:
-                    mask = tf.random.uniform(tf.shape(features)) > 0.1
-                    features = features * tf.cast(mask, tf.float32)
-                
-                return features
+            # 使用统一的增强函数
+            print(f"第 {fold_idx + 1} 折使用统一的数据增强函数")
             
-            # 回调函数
+            # 回调函数 - 与主训练保持一致
             callbacks = [
                 EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True, verbose=0),
                 ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=0)
             ]
             
-            # CV数据管道 - 更小的批量大小
-            cv_batch_size = 32 * strategy.num_replicas_in_sync  # 进一步减小
-            
-            # 简化的训练类
-            class SimpleCVModel(tf.keras.Model):
-                def __init__(self, base_model):
-                    super().__init__()
-                    self.base_model = base_model
-                    
-                def call(self, inputs, training=None):
-                    if training:
-                        inputs = improved_cv_augmentation(inputs, training=True)
-                    return self.base_model(inputs, training=training)
-            
-            cv_model = SimpleCVModel(model)
+            # CV数据管道 - 与主训练保持一致
+            cv_batch_size = 32 * strategy.num_replicas_in_sync
             
             # 使用固定学习率的Adam优化器，和主训练保持一致
             optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
             # 编译模型
-            cv_model.compile(
+            model.compile(
                 optimizer=optimizer,
                 loss='mse',
                 metrics=['mae']
             )
             
-            # 数据管道
-            train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+            # 构建训练数据管道（应用增强）
+            def cv_train_data_generator():
+                for i in range(len(X_train)):
+                    features = X_train[i]
+                    label = y_train[i]
+                    # 应用统一的数据增强
+                    augmented_features = UNIFIED_AUGMENTATION_FN(features)
+                    yield augmented_features, label
+            
+            # 构建验证数据管道（不应用增强）
+            def cv_val_data_generator():
+                for i in range(len(X_val)):
+                    features = X_val[i]
+                    label = y_val[i]
+                    yield features, label
+            
+            # 使用from_generator构建数据集
+            train_ds = tf.data.Dataset.from_generator(
+                cv_train_data_generator,
+                output_signature=(
+                    tf.TensorSpec(shape=(33, 11*feature_dim), dtype=tf.float32),
+                    tf.TensorSpec(shape=(), dtype=tf.float32)
+                )
+            )
             train_ds = train_ds.shuffle(512).batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
             
-            val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-            val_ds = val_ds.batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+            val_ds = tf.data.Dataset.from_generator(
+                cv_val_data_generator,
+                output_signature=(
+                    tf.TensorSpec(shape=(33, 11*feature_dim), dtype=tf.float32),
+                    tf.TensorSpec(shape=(), dtype=tf.float32)
+                )
+            )
+            val_ds = val_ds.batch(cv_batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
             
             # 训练模型
-            history = cv_model.fit(
+            history = model.fit(
                 train_ds, validation_data=val_ds, 
                 epochs=300,              # 减少epoch数
                 callbacks=callbacks, 
                 verbose=1
             )
         
-        # 评估模型 - 使用更小的批量
-        def evaluate_in_batches(X, y, batch_size=2):  # 降低批量大小避免OOM
+        # 评估模型 - 使用与主训练相同的评估方式
+        def evaluate_in_batches(X, y, batch_size=16):  # 与主训练保持一致
             losses = []
             maes = []
             
@@ -665,6 +644,9 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         val_loss, val_mae = evaluate_in_batches(X_val, y_val)
         test_loss, test_mae = evaluate_in_batches(X_test, y_test)
         
+        # 逻辑回归部分 - 与主训练保持一致
+        print("执行逻辑回归分析...")
+        
         # 1) 用 BiLSTM 计算 train_val 的 BS 预测
         y_bs_pred_trainval = []
         for i in range(0, len(X_train_val), 8):
@@ -684,9 +666,11 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         features_trainval = features_trainval[valid_trainval]
         quality_train_val_filtered = [quality_train_val[i] for i in range(len(quality_train_val)) if valid_trainval[i]]
 
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler().fit(features_trainval)
+        if len(features_trainval) == 0:
+            print(f"第 {fold_idx + 1} 折训练特征无效，跳过")
+            continue
 
+        scaler = StandardScaler().fit(features_trainval)
         clf = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
         clf.fit(scaler.transform(features_trainval), quality_train_val_filtered)
 
@@ -708,9 +692,14 @@ def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_fo
         features_test = features_test[valid_test]
         quality_test_filtered = [quality_test[i] for i in range(len(quality_test)) if valid_test[i]]
 
+        if len(features_test) == 0:
+            print(f"第 {fold_idx + 1} 折测试特征无效，跳过")
+            continue
+
         X_test_scaled = scaler.transform(features_test)
         y_pred_proba = clf.predict_proba(X_test_scaled)[:, 1]
-        logic_acc = accuracy_score(quality_test_filtered, (y_pred_proba > 0.5).astype(int))
+        y_pred_cls = (y_pred_proba > 0.5).astype(int)
+        logic_acc = accuracy_score(quality_test_filtered, y_pred_cls)
         logic_auc = roc_auc_score(quality_test_filtered, y_pred_proba)
         logic_loss = log_loss(quality_test_filtered, y_pred_proba)
         
@@ -1511,6 +1500,71 @@ def check_cudnn_compatibility():
         print(f"CUDNN兼容性检查失败: {e}")
     
     return True
+
+def create_unified_augmentation_fn():
+    """
+    创建统一的数据增强函数，用于主训练和交叉验证
+    
+    Returns:
+        function: 数据增强函数
+    """
+    def augment(features):
+        """
+        对特征张量应用数据增强
+        
+        Args:
+            features: 特征张量，形状为 [33, 11*feature_dim]
+        
+        Returns:
+            augmented_features: 增强后的特征张量
+        """
+        # 确保输入是tensor
+        if not isinstance(features, tf.Tensor):
+            features = tf.convert_to_tensor(features, dtype=tf.float32)
+        
+        # 重塑为 [33, 11, feature_dim] 以便应用空间增强
+        original_shape = tf.shape(features)
+        feature_dim = original_shape[1] // 11
+        
+        # 重塑为 [33, 11, feature_dim]
+        features_reshaped = tf.reshape(features, [33, 11, feature_dim])
+        
+        # 应用数据增强
+        augmented_features = features_reshaped
+        
+        # 1. 随机左右翻转（时间维度）
+        if tf.random.uniform([]) > 0.5:
+            augmented_features = tf.reverse(augmented_features, axis=[0])
+        
+        # 2. 随机上下翻转（焦平面维度）
+        if tf.random.uniform([]) > 0.7:
+            augmented_features = tf.reverse(augmented_features, axis=[1])
+        
+        # 3. 随机亮度调整（特征值缩放）
+        if tf.random.uniform([]) > 0.5:
+            scale_factor = tf.random.uniform([], 0.9, 1.1)
+            augmented_features = augmented_features * scale_factor
+        
+        # 4. 随机对比度调整（特征值偏移）
+        if tf.random.uniform([]) > 0.5:
+            offset = tf.random.uniform([], -0.05, 0.05)
+            augmented_features = augmented_features + offset
+        
+        # 5. 随机高斯噪声
+        if tf.random.uniform([]) > 0.8:
+            noise_std = tf.random.uniform([], 0.001, 0.005)
+            noise = tf.random.normal(tf.shape(augmented_features), mean=0.0, stddev=noise_std)
+            augmented_features = augmented_features + noise
+        
+        # 重塑回原始形状 [33, 11*feature_dim]
+        augmented_features = tf.reshape(augmented_features, original_shape)
+        
+        return augmented_features
+    
+    return augment
+
+# 创建全局增强函数实例
+UNIFIED_AUGMENTATION_FN = create_unified_augmentation_fn()
 
 def main():
     """主函数，包含异常处理"""
