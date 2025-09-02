@@ -32,6 +32,7 @@ import absl.logging
 from preprocessing.data_loader import *
 from preprocessing.image_utils import copy_images_by_split
 from utils.data_utils import balance_classes, check_class_distribution
+from preprocessing.data_loader_vgg16 import load_data_with_split
 import cv2
 
 # Build a pre-trained VGG16 model with custom top layers
@@ -89,7 +90,7 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
     check_gpu_availability()
     
     # 检查输入数据是否已经分割
-    if len(images.shape) == 3 and images.shape[1] == 224 and images.shape[2] == 224:
+    if len(images.shape) == 4 and images.shape[1] == 224 and images.shape[2] == 224:
         # 数据已经是预处理好的图像数组，直接使用
         print("检测到已预处理的数据，跳过数据分割步骤")
         X_train, y_train, age_train, quality_train = images, labels, ages, qualities
@@ -130,7 +131,7 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
         y_val = tf.convert_to_tensor(y_val, dtype=tf.int64)
 
     # Define the model path and callbacks
-    model_path = 'vgg16_best_model'  # Save only the best model based on validation loss
+    model_path = 'vgg16_best_model.h5'  # Save only the best model based on validation loss
     initial_epoch = 0
     csv_logger = CSVLogger('training.log', append=True)
     
@@ -226,7 +227,7 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
         except Exception as e:
             print(f"Training was interrupted due to an error: {e}")
             # Optionally save the model in case of interruption (though not needed if only saving the best model)
-            model.save('vgg16_model_at_interruption')
+            model.save('vgg16_model_at_interruption.h5')
             print("Model saved at interruption point.")
 
     return model, history
@@ -312,22 +313,71 @@ def visualize_gradcam_samples(model, X_eval, y_eval, image_paths, num_samples=5,
     # 创建保存目录
     os.makedirs(save_dir, exist_ok=True)
     
-    # 随机选择样本
-    indices = np.random.choice(len(X_eval), min(num_samples, len(X_eval)), replace=False)
+    # 智能样本选择策略
+    def select_representative_samples(X_eval, y_eval, num_samples):
+        """智能选择代表性样本"""
+        if num_samples >= len(X_eval):
+            return np.arange(len(X_eval))
+        
+        # 按类别分配样本数量
+        class_0_indices = np.where(y_eval == 0)[0]
+        class_1_indices = np.where(y_eval == 1)[0]
+        
+        # 计算每个类别应该选择的样本数
+        samples_per_class = max(1, num_samples // 2)
+        
+        # 为每个类别选择样本
+        selected_indices = []
+        
+        # 选择类别0的样本（确保每个类别都有代表）
+        if len(class_0_indices) > 0:
+            class_0_samples = np.random.choice(class_0_indices, 
+                                             min(samples_per_class, len(class_0_indices)), 
+                                             replace=False)
+            selected_indices.extend(class_0_samples)
+        
+        # 选择类别1的样本
+        if len(class_1_indices) > 0:
+            class_1_samples = np.random.choice(class_1_indices, 
+                                             min(samples_per_class, len(class_1_indices)), 
+                                             replace=False)
+            selected_indices.extend(class_1_samples)
+        
+        # 如果样本数不够，从剩余样本中随机选择
+        remaining_samples = num_samples - len(selected_indices)
+        if remaining_samples > 0:
+            all_indices = set(range(len(X_eval)))
+            used_indices = set(selected_indices)
+            available_indices = list(all_indices - used_indices)
+            
+            if available_indices:
+                additional_samples = np.random.choice(available_indices, 
+                                                   min(remaining_samples, len(available_indices)), 
+                                                   replace=False)
+                selected_indices.extend(additional_samples)
+        
+        return np.array(selected_indices)
+    
+    # 使用智能选择策略
+    selected_indices = select_representative_samples(X_eval, y_eval, num_samples)
+    
+    print(f"智能选择了 {len(selected_indices)} 个代表性样本进行Grad-CAM分析")
+    print(f"选择的样本索引: {selected_indices}")
     
     # 为每个类别选择样本
-    class_0_indices = [i for i in indices if y_eval[i] == 0]
-    class_1_indices = [i for i in indices if y_eval[i] == 1]
+    class_0_indices = [i for i in selected_indices if y_eval[i] == 0]
+    class_1_indices = [i for i in selected_indices if y_eval[i] == 1]
     
     # 确保每个类别都有样本
     if len(class_0_indices) == 0:
-        class_0_indices = [i for i in range(len(X_eval)) if y_eval[i] == 0][:2]
+        class_0_indices = [i for i in range(len(X_eval)) if y_eval[i] == 0][:1]
     if len(class_1_indices) == 0:
-        class_1_indices = [i for i in range(len(X_eval)) if y_eval[i] == 1][:2]
+        class_1_indices = [i for i in range(len(X_eval)) if y_eval[i] == 1][:1]
     
     selected_indices = class_0_indices + class_1_indices
     
     print(f"生成 {len(selected_indices)} 个样本的Grad-CAM可视化...")
+    print(f"类别0样本: {len(class_0_indices)} 个，类别1样本: {len(class_1_indices)} 个")
     
     # 创建子图
     fig, axes = plt.subplots(len(selected_indices), 3, figsize=(15, 5*len(selected_indices)))
@@ -396,6 +446,7 @@ def visualize_gradcam_samples(model, X_eval, y_eval, image_paths, num_samples=5,
     plt.show()
     
     print(f"Grad-CAM结果已保存到: {save_dir}")
+    print(f"生成了 {len(selected_indices)} 个样本的详细分析")
 
 def analyze_attention_patterns(model, X_eval, y_eval, save_dir="attention_analysis"):
     """
@@ -600,12 +651,12 @@ if __name__ == "__main__":
     
     # 评估模型（使用已分割的测试数据）
     print("=== 评估模型 ===")
-    latest_model_path = 'vgg16_best_model'
+    latest_model_path = 'vgg16_best_model.h5'
     if os.path.exists(latest_model_path):
         print(f"Evaluating model: {latest_model_path}")
         evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
                                    save_path="test_auc.pdf",
                                    generate_gradcam_viz=True, 
-                                   num_gradcam_samples=8)
+                                   num_gradcam_samples=10)  # 减少到3个样本
     else:
         print("No model found at the specified path.")
