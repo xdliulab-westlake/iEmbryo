@@ -32,7 +32,6 @@ import absl.logging
 from preprocessing.data_loader import *
 from preprocessing.image_utils import copy_images_by_split
 from utils.data_utils import balance_classes, check_class_distribution
-from preprocessing.data_loader_vgg16 import load_data_with_split
 import cv2
 
 # Build a pre-trained VGG16 model with custom top layers
