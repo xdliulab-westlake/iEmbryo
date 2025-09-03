@@ -2,108 +2,84 @@ import os
 import numpy as np
 import pandas as pd
 import cv2
+import random
+import time
+import json
+import gc
+import warnings
+from tqdm import tqdm
+
+# TensorFlow相关
 import tensorflow as tf
 from tensorflow.keras.applications import VGG16, ResNet152V2, DenseNet201
 from tensorflow.keras.applications.vgg16 import preprocess_input as preprocess_vgg16
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_resnet
 from tensorflow.keras.applications.densenet import preprocess_input as preprocess_densenet
-# EfficientNetV2 需要单独导入
+
+# EfficientNetV2处理
 try:
     from tensorflow.keras.applications.efficientnet_v2 import EfficientNetV2M, preprocess_input as preprocess_efficientnet
 except ImportError:
-    # 如果EfficientNetV2不可用，使用更轻量的EfficientNetB3
     from tensorflow.keras.applications.efficientnet import EfficientNetB3 as EfficientNetV2M
     from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_efficientnet
+
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.layers import Input, TimeDistributed, Bidirectional, LSTM, Dense
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+
+# Scikit-learn相关  
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, roc_curve
-from sklearn.metrics import log_loss, accuracy_score
-import matplotlib.pyplot as plt
-import random
-
-# 新增缺失的导入
-from tqdm import tqdm  # 进度条
-import gc              # 垃圾回收
-import time            # 时间函数
-import json            # JSON处理
-
-# 交叉验证相关导入
-from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
-import warnings
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.model_selection import train_test_split, RepeatedKFold, RepeatedStratifiedKFold, KFold, StratifiedKFold
+from sklearn.metrics import (classification_report, roc_auc_score, roc_curve, log_loss, accuracy_score, 
+                           mean_squared_error, mean_absolute_error, precision_score, recall_score)
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
-import gc
+from sklearn.utils import resample
+
+# 可视化
+import matplotlib.pyplot as plt
 
 warnings.filterwarnings('ignore')
-
-# 多GPU环境变量（在导入tensorflow之前）
-# 智能GPU配置（自动检测）
-import tensorflow as tf
-
-import pandas as pd
 
 # 安全初始化全局增强函数
 UNIFIED_AUGMENTATION_FN = None
 
-def configure_gpu_for_lstm():
-    """配置GPU环境，优化LSTM训练"""
-    print("=== 配置GPU环境 ===")
-    
-    # 先检测有多少GPU
+# 数据类型转换工具函数
+def ensure_float32(*arrays):
+    """统一转换数据类型为float32"""
+    return [arr.astype(np.float32) if hasattr(arr, 'astype') else np.array(arr, dtype=np.float32) for arr in arrays]
+
+def configure_gpu():
+    """简化的GPU配置"""
     gpus = tf.config.list_physical_devices('GPU')
     num_gpus = len(gpus)
-
-    print(f"检测到 {num_gpus} 个GPU: {[gpu.name for gpu in gpus]}")
-
-    # 根据GPU数量动态设置环境变量
-    if num_gpus > 0:
-        # 自动设置可见GPU
-        gpu_ids = ','.join([str(i) for i in range(num_gpus)])
-        os.environ['CUDA_VISIBLE_DEVICES'] = gpu_ids
-        print(f"设置CUDA_VISIBLE_DEVICES = {gpu_ids}")
-        
-        # 动态设置线程数
-        os.environ['TF_GPU_THREAD_COUNT'] = str(num_gpus)
-        print(f"设置GPU线程数 = {num_gpus}")
-    else:
-        print("未检测到GPU，将使用CPU")
-
-    # 通用GPU优化设置
-    os.environ['TF_GPU_ALLOCATOR'] = 'cuda_malloc_async'
-    os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-    os.environ['TF_XLA_FLAGS'] = '--tf_xla_enable_xla_devices'
-    os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
-
-    # 多GPU时的NCCL优化
-    if num_gpus > 1:
-        os.environ['NCCL_DEBUG'] = 'INFO'
-        os.environ['NCCL_TREE_THRESHOLD'] = '0'
-        print("启用多GPU NCCL通信优化")
-
-    # GPU内存配置
+    
     if gpus:
         try:
+            # 基本GPU配置
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            print(f"已为 {num_gpus} 个GPU启用内存增长")
+            
+            # 设置环境变量
+            os.environ.update({
+                'TF_GPU_ALLOCATOR': 'cuda_malloc_async',
+                'TF_FORCE_GPU_ALLOW_GROWTH': 'true',
+                'TF_CUDNN_USE_AUTOTUNE': '0',
+                'TF_CUDNN_DETERMINISTIC': '1'
+            })
+            
+            if num_gpus > 1:
+                os.environ['NCCL_DEBUG'] = 'INFO'
+            
+            print(f"GPU配置完成，共{num_gpus}个GPU")
         except RuntimeError as e:
-            print(f"GPU配置错误: {e}")
-    
-    # 不使用混合精度，保持float32
-    print("使用标准float32精度策略")
+            print(f"GPU配置失败: {e}")
+    else:
+        print("未检测到GPU，将使用CPU")
     
     return num_gpus
 
 # 配置GPU
-num_gpus = configure_gpu_for_lstm()
+num_gpus = configure_gpu()
 
 # 1. 加载评分信息，计算BS_prime
 def load_score_dict(csv_path):
@@ -417,11 +393,6 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
 
     print(f"=== 最终数据集形状: {X.shape} ===")
     return X, np.array(y_bs), quality_labels, ages
-
-# 保持向后兼容的别名
-def build_dataset_fast(data_root, score_dict, multi_extractor, valid_embryo_df, training=True, balance=False):
-    """向后兼容的接口，默认不使用图像增强"""
-    return build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor, valid_embryo_df, training, balance, use_augmentation=False)
 
 # 4. 模型结构
 def create_model(feature_dim):
@@ -1160,136 +1131,33 @@ def balance_train_subset(X, y_bs, quality_labels, ages):
     sel = np.concatenate([sel_good, sel_poor])
     return X[sel], np.array(y_bs)[sel], [quality_labels[i] for i in sel], [ages[i] for i in sel]
 
-def train_main_model_with_image_augmentation(root_dir, score_dict, valid_embryo_df, X_train_indices, X_val, y_val, feature_dim, save_model_path):
-    """
-    使用图像级别增强训练主模型
+def train_model(X_train, y_train, X_val, y_val, feature_dim, save_path, 
+                use_augmentation=False, root_dir=None, score_dict=None, 
+                valid_embryo_df=None, train_indices=None):
+    """统一的训练函数，支持图像增强和常规训练"""
+    print(f"=== 训练模型 (use_augmentation={use_augmentation}) ===")
     
-    Args:
-        root_dir: 图像根目录
-        score_dict: 评分字典
-        valid_embryo_df: 有效胚胎DataFrame
-        X_train_indices: 训练集索引
-        X_val: 验证集特征
-        y_val: 验证集标签
-        feature_dim: 特征维度
-        save_model_path: 模型保存路径
-    """
-    print("=== 使用图像增强训练主模型 ===")
-    
-    # 重新为训练集构建增强特征
-    print("为训练集构建增强特征...")
-    multi_extractor = MultiModelFeatureExtractor()
-    
-    # 获取训练集对应的胚胎信息
-    all_embryo_ids = list(set(valid_embryo_df["EmbryoID"]) & set(score_dict.keys()))
-    train_embryo_ids = [all_embryo_ids[i] for i in X_train_indices if i < len(all_embryo_ids)]
-    train_embryo_df = valid_embryo_df[valid_embryo_df["EmbryoID"].isin(train_embryo_ids)]
-    
-    # 使用图像增强构建训练特征
-    X_train_aug, y_train_aug, _, _ = build_dataset_with_image_augmentation(
-        root_dir, score_dict, multi_extractor, train_embryo_df, 
-        training=True, balance=False, use_augmentation=True
-    )
-    
-    # 强制转换所有数据为 float32
-    X_train_aug = X_train_aug.astype(np.float32)
-    y_train_aug = y_train_aug.astype(np.float32)
-    X_val = X_val.astype(np.float32)
-    y_val = y_val.astype(np.float32)
-    
-    print(f"增强后训练集形状: {X_train_aug.shape}")
-    print(f"验证集形状: {X_val.shape}")
-    
-    # GPU配置
-    gpus = tf.config.list_physical_devices('GPU')
-    num_gpus = len(gpus)
-    
-    # 优化分布式策略
-    if num_gpus > 1:
-        strategy = tf.distribute.MirroredStrategy(
-            devices=["/gpu:0", "/gpu:1"],
-            cross_device_ops=tf.distribute.NcclAllReduce()
-        )
-        print(f"使用优化的MirroredStrategy，GPU数量: {strategy.num_replicas_in_sync}")
-    elif num_gpus == 1:
-        strategy = tf.distribute.OneDeviceStrategy("/gpu:0")
-        print("使用单GPU策略")
-    else:
-        strategy = tf.distribute.OneDeviceStrategy("/cpu:0")
-        print("使用CPU策略")
-    
-    # 获取统一的训练配置
-    config = get_unified_training_config()
-    
-    global_batch_size = config['batch_size'] * strategy.num_replicas_in_sync
-    print(f"全局批量大小: {global_batch_size}")
-    
-    # 清理GPU内存
-    tf.keras.backend.clear_session()
-    import gc
-    gc.collect()
-    
-    # 配置GPU内存增长
-    if gpus:
-        try:
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-        except RuntimeError as e:
-            print(f"GPU配置错误: {e}")
-    
-    # 构建数据管道（训练集已经增强过，不需要再次增强）
-    print("=== 构建数据管道 ===")
-    
-    # 构建训练数据集（已经增强过的数据）
-    train_ds = tf.data.Dataset.from_tensor_slices((X_train_aug, y_train_aug))
-    train_ds = train_ds.shuffle(512).batch(global_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
-    
-    # 构建验证数据集（不增强）
-    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-    val_ds = val_ds.batch(global_batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
-    
-    # 在strategy作用域内构建模型
-    with strategy.scope():
-        model = create_model(feature_dim)
-        print("模型参数统计:")
-        model.summary()
+    # 如果使用图像增强且提供了必要参数，重新构建增强训练数据
+    if use_augmentation and all([root_dir, score_dict, valid_embryo_df, train_indices]):
+        print("重新构建图像增强训练数据...")
+        multi_extractor = MultiModelFeatureExtractor()
         
-        # 构建回调函数 - 使用统一配置
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=config['early_stopping_patience'], restore_best_weights=True, verbose=1),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=config['lr_factor'], patience=config['reduce_lr_patience'], min_lr=config['min_lr'], verbose=1),
-            tf.keras.callbacks.ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
-        ]
+        # 获取训练集对应的胚胎信息
+        all_embryo_ids = list(set(valid_embryo_df["EmbryoID"]) & set(score_dict.keys()))
+        train_embryo_ids = [all_embryo_ids[i] for i in train_indices if i < len(all_embryo_ids)]
+        train_embryo_df = valid_embryo_df[valid_embryo_df["EmbryoID"].isin(train_embryo_ids)]
+        
+        # 使用图像增强构建训练特征
+        X_train, y_train, _, _ = build_dataset_with_image_augmentation(
+            root_dir, score_dict, multi_extractor, train_embryo_df, 
+            training=True, balance=False, use_augmentation=True
+        )
+        print(f"增强后训练集形状: {X_train.shape}")
     
-    print("=== 开始训练（使用图像增强数据）===")
+    # 数据类型统一
+    X_train, y_train, X_val, y_val = ensure_float32(X_train, y_train, X_val, y_val)
     
-    # 训练模型
-    history = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=config['epochs'],
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    print(f"\n=== 训练完成 ===")
-    print(f"使用了 {len(gpus)} 个GPU")
-    print(f"最佳验证损失: {min(history.history['val_loss']):.4f}")
-    print(f"训练集使用了图像级别增强，验证集使用原始数据")
-    
-    return model, history
-
-def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_path):
-    """向后兼容的训练函数（不使用图像增强）"""
-    print("=== 训练主模型（不使用图像增强）===")
-    
-    # 强制转换所有数据为 float32
-    X_train = X_train.astype(np.float32)
-    y_train = y_train.astype(np.float32)
-    X_val = X_val.astype(np.float32)
-    y_val = y_val.astype(np.float32)
-    
-    # GPU配置
+    # GPU策略配置
     gpus = tf.config.list_physical_devices('GPU')
     num_gpus = len(gpus)
     
@@ -1303,12 +1171,13 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         strategy = tf.distribute.OneDeviceStrategy("/cpu:0")
         print("使用CPU策略")
     
+    # 获取统一的训练配置
     config = get_unified_training_config()
-    global_batch_size = config['batch_size'] * strategy.num_replicas_in_sync
+    batch_size = config['batch_size'] * strategy.num_replicas_in_sync
+    print(f"全局批量大小: {batch_size}")
     
     # 清理GPU内存
     tf.keras.backend.clear_session()
-    import gc
     gc.collect()
     
     # 配置GPU内存增长
@@ -1319,22 +1188,25 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
         except RuntimeError as e:
             print(f"GPU配置错误: {e}")
     
-    # 构建简单的数据管道
-    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    train_ds = train_ds.shuffle(512).batch(global_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
-    
-    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-    val_ds = val_ds.batch(global_batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
-    
     # 在strategy作用域内构建模型
     with strategy.scope():
         model = create_model(feature_dim)
         
+        # 构建回调函数
         callbacks = [
-            tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=config['early_stopping_patience'], restore_best_weights=True, verbose=1),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=config['lr_factor'], patience=config['reduce_lr_patience'], min_lr=config['min_lr'], verbose=1),
-            tf.keras.callbacks.ModelCheckpoint(save_model_path, monitor='val_loss', save_best_only=True, verbose=1)
+            EarlyStopping(monitor='val_loss', patience=config['early_stopping_patience'], restore_best_weights=True, verbose=1),
+            ReduceLROnPlateau(monitor='val_loss', factor=config['lr_factor'], patience=config['reduce_lr_patience'], min_lr=config['min_lr'], verbose=1),
+            ModelCheckpoint(save_path, monitor='val_loss', save_best_only=True, verbose=1)
         ]
+    
+    # 构建数据管道
+    train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+    train_ds = train_ds.shuffle(512).batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+    
+    val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+    val_ds = val_ds.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+    
+    print("=== 开始训练 ===")
     
     # 训练模型
     history = model.fit(
@@ -1346,7 +1218,10 @@ def train_main_model(X_train, y_train, X_val, y_val, feature_dim, save_model_pat
     )
     
     print(f"\n=== 训练完成 ===")
+    print(f"使用了 {num_gpus} 个GPU")
     print(f"最佳验证损失: {min(history.history['val_loss']):.4f}")
+    if use_augmentation:
+        print("训练集使用了图像级别增强，验证集使用原始数据")
     
     return model, history
 
@@ -1585,31 +1460,32 @@ def create_visualizations(logic_results, test_mae):
 
 def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, y_train, quality_train, ages_train, feature_dim):
     """
-    按照论文方法进行交叉验证：
-    1. 只在训练集上进行5折交叉验证
-    2. 每折训练BiLSTM，用BiLSTM预测训练集BS分数
-    3. 用预测的BS分数+年龄训练逻辑回归
-    4. 在训练集上评估逻辑回归性能
-    5. 平均5折的逻辑回归性能
+    按照论文精确方法进行交叉验证：
+    1. 只在训练集上进行4折交叉验证 (论文策略)
+    2. 每折训练BiLSTM回归模型，留出数据监控验证损失
+    3. 用BiLSTM预测训练集BS分数+母体年龄训练逻辑回归
+    4. 每折都训练独立的逻辑回归模型
+    5. 对所有逻辑回归模型性能指标取平均
+    6. 使用accuracy, AUC, precision, recall评估
     """
-    print("=== 论文方法：在训练集上进行5折交叉验证 ===")
+    print("=== 论文精确方法：训练集上4折交叉验证 ===")
     
     # 强制清理GPU内存
     tf.keras.backend.clear_session()
     gc.collect()
     
-    # 使用分层K折交叉验证（基于质量标签）
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    # 使用4折分层K折交叉验证（论文策略）
+    cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=42)
     
-    # 存储每折的逻辑回归性能
+    # 存储每折的逻辑回归性能（论文关注指标）
     fold_logistic_performances = []
     fold_bilstm_performances = []
     
     print(f"训练集形状: {X_train.shape}")
-    print(f"将进行5折交叉验证...")
+    print(f"将按论文策略进行4折交叉验证...")
     
     for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_train, quality_train)):
-        print(f"\n--- 第 {fold_idx + 1} 折 ---")
+        print(f"\n--- 第 {fold_idx + 1}/4 折（论文策略）---")
         
         # 强制清理GPU内存
         tf.keras.backend.clear_session()
@@ -1619,7 +1495,7 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
         if tf.config.list_physical_devices('GPU'):
             time.sleep(3)
         
-        # 获取当前折的训练和验证数据
+        # 获取当前折的训练和验证数据（用于监控验证损失）
         X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
         y_fold_train, y_fold_val = y_train[train_idx], y_train[val_idx]
         quality_fold_train = [quality_train[i] for i in train_idx]
@@ -1687,11 +1563,11 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
                 'best_epoch': np.argmin(history.history['val_loss']) + 1
             })
         
-        # === 关键：按照论文方法进行逻辑回归 ===
-        print(f"第 {fold_idx + 1} 折：按照论文方法训练逻辑回归")
+        # === 按照精确策略：逻辑回归训练与评估 ===
+        print(f"第 {fold_idx + 1}/4 折：训练逻辑回归")
         
-        # 1) 用BiLSTM预测整个当前折训练集的BS分数
-        print("使用BiLSTM预测训练集BS分数...")
+        # 1) 使用BiLSTM预测整个训练集的blastocyst scores
+        print("使用BiLSTM预测训练集blastocyst scores...")
         y_bs_pred_train = []
         for i in range(0, len(X_fold_train), 8):
             j = min(i + 8, len(X_fold_train))
@@ -1699,14 +1575,13 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
             y_bs_pred_train.extend(pred_batch.flatten())
         y_bs_pred_train = np.array(y_bs_pred_train)
         
-        # 2) 构建逻辑回归特征：年龄 + 预测BS分数
+        # 2) 构建逻辑回归特征：predicted blastocyst scores + maternal age
         ages_fold_train_array = np.array(ages_fold_train)
+        
+        # 简化特征向量
         features_train = np.column_stack([
-            ages_fold_train_array, y_bs_pred_train,
-            ages_fold_train_array ** 2, y_bs_pred_train ** 2,
-            ages_fold_train_array * y_bs_pred_train, 
-            np.log(ages_fold_train_array + 1),
-            1.0 / (y_bs_pred_train + 1e-6)
+            y_bs_pred_train,     # predicted blastocyst scores
+            ages_fold_train_array # maternal age
         ])
         
         # 检查特征有效性
@@ -1718,28 +1593,24 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
             print(f"第 {fold_idx + 1} 折训练特征无效，跳过")
             continue
         
-        # 3) 训练逻辑回归
-        from sklearn.preprocessing import StandardScaler
+        # 3) 训练独立的逻辑回归模型
         scaler = StandardScaler().fit(features_train)
         clf = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
         clf.fit(scaler.transform(features_train), quality_train_filtered)
         
-        # 4) ⭐ 关键：在训练集上评估逻辑回归（论文方法）
-        print("在训练集上评估逻辑回归性能（论文方法）")
+        # 4) 在训练集上评估逻辑回归
+        print("在训练集上评估逻辑回归性能")
         y_pred_proba_train = clf.predict_proba(scaler.transform(features_train))[:, 1]
         y_pred_cls_train = (y_pred_proba_train > 0.5).astype(int)
         
-        # 计算性能指标
-        from sklearn.metrics import precision_score, recall_score
-        
+        # 5) 计算性能指标：accuracy, AUC, precision, recall
         logic_acc = accuracy_score(quality_train_filtered, y_pred_cls_train)
         logic_auc = roc_auc_score(quality_train_filtered, y_pred_proba_train) if len(set(quality_train_filtered)) > 1 else 0.0
-        logic_loss = log_loss(quality_train_filtered, y_pred_proba_train) if len(set(quality_train_filtered)) > 1 else 0.0
         
         # 计算precision和recall
         try:
-            logic_precision = precision_score(quality_train_filtered, y_pred_cls_train, average='weighted', zero_division=0)
-            logic_recall = recall_score(quality_train_filtered, y_pred_cls_train, average='weighted', zero_division=0)
+            logic_precision = precision_score(quality_train_filtered, y_pred_cls_train, zero_division=0)
+            logic_recall = recall_score(quality_train_filtered, y_pred_cls_train, zero_division=0)
         except:
             logic_precision = 0.0
             logic_recall = 0.0
@@ -1747,18 +1618,17 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
         # 记录当前折的逻辑回归性能
         fold_performance = {
             'accuracy': logic_acc,
-            'auc': logic_auc,
+            'auc': logic_auc, 
             'precision': logic_precision,
-            'recall': logic_recall,
-            'log_loss': logic_loss
+            'recall': logic_recall
         }
         fold_logistic_performances.append(fold_performance)
         
-        print(f"第 {fold_idx + 1} 折逻辑回归性能:")
-        print(f"  准确率: {logic_acc:.4f}")
+        print(f"第 {fold_idx + 1}/4 折逻辑回归性能:")
+        print(f"  Accuracy: {logic_acc:.4f}")
         print(f"  AUC: {logic_auc:.4f}")
-        print(f"  精确率: {logic_precision:.4f}")
-        print(f"  召回率: {logic_recall:.4f}")
+        print(f"  Precision: {logic_precision:.4f}")
+        print(f"  Recall: {logic_recall:.4f}")
         
         # 清理内存
         del model, train_ds, val_ds
@@ -1843,142 +1713,21 @@ def run_cross_validation_with_image_augmentation(root_dir, score_dict, valid_emb
     print("交叉验证结果已保存至: /liaozizhuo/scripts/cv_results.json")
     print("分析图表已保存至: /liaozizhuo/scripts/cv_analysis.pdf")
 
-# 保持向后兼容的交叉验证函数（不使用图像增强）
+# 保持向后兼容的交叉验证函数（简化版本）
 def cross_validate_bilstm_model(X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=1):
-    """
-    传统的交叉验证函数（不使用图像增强），用于向后兼容
-    """
-    print(f"=== 开始传统交叉验证 {n_folds}折 (重复{n_repeats}次，不使用图像增强) ===")
-    
-    # 强制清理GPU内存
-    tf.keras.backend.clear_session()
-    gc.collect()
-    
-    # 验证并修正特征维度
-    expected_input_dim = 11 * feature_dim
-    if X.shape[2] != expected_input_dim:
-        print(f"特征维度不匹配，正在修正...")
-        print(f"期望: {expected_input_dim}, 实际: {X.shape[2]}")
-        if X.shape[2] == feature_dim:
-            X = X.reshape(X.shape[0], 33, 11, feature_dim).reshape(X.shape[0], 33, -1)
-        elif X.shape[2] == 11 * feature_dim:
-            pass
-        else:
-            raise ValueError(f"无法自动修正特征维度: {X.shape[2]}")
-    
-    print(f"修正后特征形状: {X.shape}")
-    
-    # 使用分层K折交叉验证（基于质量标签）
-    cv = RepeatedStratifiedKFold(n_splits=n_folds, n_repeats=n_repeats, random_state=42)
-    
-    # 存储每折的结果
-    fold_results = {
-        'train_mae': [], 'val_mae': [], 'test_mae': [],
-        'train_loss': [], 'val_loss': [], 'test_loss': [],
-        'logic_acc': [], 'logic_auc': [], 'logic_loss': [],
-        'best_epochs': []
-    }
-    
-    # 存储每折的预测结果（用于集成）
-    all_predictions = []
-    all_true_labels = []
-    
-    for fold_idx, (train_val_idx, test_idx) in enumerate(cv.split(X, quality_labels)):
-        print(f"\n--- 第 {fold_idx + 1} 折（不使用图像增强）---")
-        
-        # 强制清理GPU内存
-        tf.keras.backend.clear_session()
-        gc.collect()
-        
-        # 等待GPU内存释放
-        if tf.config.list_physical_devices('GPU'):
-            time.sleep(3)
-        
-        # 进一步拆分训练集和验证集
-        X_train_val, X_test = X[train_val_idx], X[test_idx]
-        y_train_val, y_test = y_bs[train_val_idx], y_bs[test_idx]
-        quality_train_val, quality_test = [quality_labels[i] for i in train_val_idx], [quality_labels[i] for i in test_idx]
-        ages_train_val, ages_test = [ages[i] for i in train_val_idx], [ages[i] for i in test_idx]
-        
-        # 基于索引对 train_val 做二次切分，保证对齐
-        idx_tv = np.arange(len(X_train_val))
-        idx_tr, idx_va = train_test_split(
-            idx_tv, test_size=0.2, random_state=42, stratify=np.array(quality_train_val)
-        )
-        X_train, X_val = X_train_val[idx_tr], X_train_val[idx_va]
-        y_train, y_val = y_train_val[idx_tr], y_train_val[idx_va]
-        quality_train = [quality_train_val[i] for i in idx_tr]
-        quality_val   = [quality_train_val[i] for i in idx_va]
-        ages_train    = [ages_train_val[i]    for i in idx_tr]
-        ages_val      = [ages_train_val[i]    for i in idx_va]
-        
-        # 对训练集做类别均衡（与主训练保持一致）
-        X_train, y_train, quality_train, ages_train = balance_train_subset(
-             X_train, y_train, quality_train, ages_train
-        )
-
-        print(f"训练集: {X_train.shape}, 验证集: {X_val.shape}, 测试集: {X_test.shape}")
-        
-        # 创建和训练模型
-        try:
-            strategy = tf.distribute.MirroredStrategy()
-            print("使用GPU训练")
-        except:
-            strategy = tf.distribute.OneDeviceStrategy("/cpu:0")
-            print("使用CPU训练")
-        
-        with strategy.scope():
-            model = create_model(feature_dim)
-            
-            print(f"第 {fold_idx + 1} 折训练（不使用图像增强）")
-            
-            config = get_unified_training_config()
-            
-            callbacks = [
-                EarlyStopping(monitor='val_loss', patience=config['early_stopping_patience'], restore_best_weights=True, verbose=0),
-                ReduceLROnPlateau(monitor='val_loss', factor=config['lr_factor'], patience=config['reduce_lr_patience'], min_lr=config['min_lr'], verbose=0)
-            ]
-            
-            cv_batch_size = config['batch_size'] * strategy.num_replicas_in_sync
-            
-            optimizer = tf.keras.optimizers.Adam(learning_rate=config['learning_rate'])
-            model.compile(
-                optimizer=optimizer,
-                loss='mse',
-                metrics=['mae']
-            )
-            
-            # 构建简单的数据集
-            train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-            train_ds = train_ds.shuffle(512).batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
-            
-            val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-            val_ds = val_ds.batch(cv_batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
-            
-            # 训练模型
-            history = model.fit(
-                train_ds, validation_data=val_ds, 
-                epochs=config['epochs'],
-                callbacks=callbacks, 
-                verbose=1
-            )
-        
-        # 简化的评估和逻辑回归（省略详细实现以节省空间）
-        # 这里可以添加完整的评估逻辑，但为了简洁起见暂时省略
-        print(f"第 {fold_idx + 1} 折完成")
-        
-        # 清理内存
-        del model, train_ds, val_ds
-        tf.keras.backend.clear_session()
-        gc.collect()
+    """传统的交叉验证函数（不使用图像增强），用于向后兼容"""
+    print(f"=== 传统交叉验证 {n_folds}折 (重复{n_repeats}次，不使用图像增强) ===")
+    print("注意：此函数为向后兼容，建议使用 cross_validate_bilstm_model_with_image_augmentation")
     
     # 返回模拟结果用于向后兼容
     cv_summary = {'test_mae_mean': 0.0, 'test_mae_std': 0.0, 'logic_auc_mean': 0.0, 'logic_auc_std': 0.0, 'logic_acc_mean': 0.0, 'logic_acc_std': 0.0}
-    return cv_summary, fold_results, all_predictions, all_true_labels
+    fold_results = {'train_mae': [], 'val_mae': [], 'test_mae': [], 'train_loss': [], 'val_loss': [], 'test_loss': [], 'logic_acc': [], 'logic_auc': [], 'logic_loss': [], 'best_epochs': []}
+    return cv_summary, fold_results, [], []
 
 def run_cross_validation(X, y_bs, quality_labels, ages, feature_dim):
     """运行传统交叉验证（向后兼容）"""
-    print("=== 交叉验证评估（不使用图像增强）===")
+    print("=== 传统交叉验证评估（不使用图像增强）===")
+    print("注意：此函数为向后兼容，建议使用 run_cross_validation_with_image_augmentation")
     
     cv_summary, fold_results, all_predictions, all_true_labels = cross_validate_bilstm_model(
         X, y_bs, quality_labels, ages, feature_dim, n_folds=5, n_repeats=1
@@ -2231,10 +1980,12 @@ def main():
         # 假设原始数据按顺序拆分，我们取前train_size个样本作为训练集
         train_indices_original = list(range(train_size))
         
-        print(f"使用图像增强训练主模型...")
-        model, history = train_main_model_with_image_augmentation(
-            root_dir, score_dict, valid_embryo_df, train_indices_original, 
-            X_val, y_val, feature_dim, save_model_path
+        print(f"使用统一训练函数（支持图像增强）...")
+        train_indices_original = list(range(len(X_train)))
+        model, history = train_model(
+            X_train, y_train, X_val, y_val, feature_dim, save_model_path,
+            use_augmentation=True, root_dir=root_dir, score_dict=score_dict,
+            valid_embryo_df=valid_embryo_df, train_indices=train_indices_original
         )
         
         # 5. 评估模型
@@ -2273,7 +2024,7 @@ def main():
 # 主流程
 if __name__ == "__main__":
     # 在所有操作之前配置GPU
-    configure_gpu_for_lstm()
+    configure_gpu()
     
     # 检查必需的路径
     check_required_paths()
