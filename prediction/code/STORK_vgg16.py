@@ -18,7 +18,7 @@ import tensorflow.keras.backend as K
 from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.layers import (
-    Input, GlobalAveragePooling2D, Dense, Dropout, Flatten
+    Input, Dense, Dropout
 )
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
@@ -29,44 +29,44 @@ from tensorflow.keras.applications import InceptionV3, EfficientNetB0, ResNet50
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix
 import absl.logging
-from preprocessing.data_loader import *
-from preprocessing.image_utils import copy_images_by_split
+from preprocessing.data_loader_vgg16 import load_data_with_stork_preprocessing
+# STORK图像处理函数通过 data_loader_vgg16 间接调用，无需直接导入
 from utils.data_utils import balance_classes, check_class_distribution
 import cv2
 
 # Build a pre-trained VGG16 model with custom top layers
 def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2, fine_tune_at=18, fine_tune=False):
-    # Load the VGG16 model without the top layers
-    base_model = VGG16(weights='imagenet', include_top=False, input_shape=input_shape)
-
+    # Load the VGG16 feature extractor with built-in pooling
+    feature_extractor = VGG16(
+        weights="imagenet",
+        include_top=False,
+        pooling="avg",  # 内置全局平均池化
+        input_shape=input_shape
+    )
+    
+    # Configure trainable layers for fine-tuning
     if fine_tune:
-        for layer in base_model.layers[fine_tune_at:]:
+        for layer in feature_extractor.layers[fine_tune_at:]:
             layer.trainable = True
-        # Freeze the base model layers up to the specified layer
-        # for layer in base_model.layers[fine_tune_at:]:
-        #     layer.trainable = True
     else:
-        base_model.trainable = False
+        feature_extractor.trainable = False
 
-    # Create the new model on top
+    # Build the complete model (预处理已在data_loader中完成)
     inputs = Input(shape=input_shape)
-    x = base_model(inputs, training=False)
-  
-    # Global average pooling
-    x = GlobalAveragePooling2D()(x)
-    x = Dense(1024, activation='relu', kernel_regularizer=l2(0.0002))(x)
-    x = Dropout(0.5)(x)
-    x = Dense(1024, activation='relu', kernel_regularizer=l2(0.0002))(x)
-    x = Dropout(0.5)(x)
-    outputs = Dense(num_classes, activation='softmax')(x)
+    
+    # Extract features (already includes global average pooling)
+    features = feature_extractor(inputs)
+    
+    # Classification head - 直接从VGG16特征到输出
+    x = Dropout(0.5)(features)
+    outputs = Dense(1, activation='sigmoid')(x)
 
     # Define the model
-    model = Model(inputs=inputs, outputs=outputs)
+    model = Model(inputs=inputs, outputs=outputs, name="embryo_classifier")
 
-    # Compile the model with a learning rate schedule
+    # Compile the model
     optimizer = Adam(learning_rate=1e-4, weight_decay=1e-5)
-    
-    model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
 
     return model
 
@@ -79,7 +79,10 @@ def check_gpu_availability():
         print(device)
 
 # Training the model with augmentation
-def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3, global_batch_size=None, img_size=224, resume_training=True, fine_tune=False, copy_images=False):
+def train_model_with_augmentation(train_images, train_labels, train_ages, train_qualities, 
+                                val_images, val_labels, val_ages, val_qualities,
+                                num_epochs=3, global_batch_size=None, img_size=224, 
+                                resume_training=True, fine_tune=False, copy_images=False):
     # Set strategy for distributed training
     strategy = tf.distribute.MirroredStrategy()
     
@@ -88,35 +91,13 @@ def train_model_with_augmentation(images, labels, ages, qualities, num_epochs=3,
     # Check GPU availability
     check_gpu_availability()
     
-    # 检查输入数据是否已经分割
-    if len(images.shape) == 4 and images.shape[1] == 224 and images.shape[2] == 224:
-        # 数据已经是预处理好的图像数组，直接使用
-        print("检测到已预处理的数据，跳过数据分割步骤")
-        X_train, y_train, age_train, quality_train = images, labels, ages, qualities
-        
-        # 创建虚拟的验证集（用于训练时的验证）
-        # 这里可以从训练集中分出一部分作为验证集
-        from sklearn.model_selection import train_test_split
-        X_train, X_val, y_train, y_val, age_train, age_val, quality_train, quality_val = train_test_split(
-            X_train, y_train, age_train, quality_train, test_size=0.2, random_state=42, stratify=y_train
-        )
-        
-        # 创建虚拟的测试集（保持与原来接口一致）
-        X_test, y_test, age_test, quality_test = X_val, y_val, age_val, quality_val
-        
-    else:
-        # 原来的逻辑：平衡类别并分割数据
-        print("使用原始数据分割逻辑")
-        # Balance classes
-        balanced_images, balanced_labels, balanced_ages, balanced_qualities = balance_classes(images, labels, ages, qualities)
-
-        # Split the dataset with stratification
-        X_train, X_temp, y_train, y_temp, age_train, age_temp, quality_train, quality_temp = train_test_split(
-            balanced_images, balanced_labels, balanced_ages, balanced_qualities, test_size=0.3, random_state=42, stratify=balanced_labels
-        )
-        X_val, X_test, y_val, y_test, age_val, age_test, quality_val, quality_test = train_test_split(
-            X_temp, y_temp, age_temp, quality_temp, test_size=0.5, random_state=42, stratify=y_temp
-        )
+    # 使用传入的训练集和验证集（已完成70%-15%-15%分割）
+    print("使用预分割的训练集和验证集")
+    X_train, y_train, age_train, quality_train = train_images, train_labels, train_ages, train_qualities
+    X_val, y_val, age_val, quality_val = val_images, val_labels, val_ages, val_qualities
+    
+    # 测试集占位符（实际测试在外部进行）
+    X_test, y_test, age_test, quality_test = X_val, y_val, age_val, quality_val
 
     # Output class distribution confirmation
     print(f"Train samples: {len(y_train)}, Validation: {len(y_val)}, Test: {len(y_test)}")
@@ -545,11 +526,11 @@ def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test"
     if len(np.unique(y_eval)) < 2:
         print(f"Only one class present in {dataset_name} set. ROC AUC score is not defined.")
     else:
-        auc_dl = roc_auc_score(y_eval, probabilities_dl[:, 1])
+        auc_dl = roc_auc_score(y_eval, probabilities_dl.flatten())
         print(f"Deep Learning Model {dataset_name} AUC: {auc_dl:.4f}")
         
         # Plot ROC curve
-        fpr, tpr, _ = roc_curve(y_eval, probabilities_dl[:, 1])
+        fpr, tpr, _ = roc_curve(y_eval, probabilities_dl.flatten())
         plt.figure(figsize=(8, 6))
         plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (AUC = {auc_dl:.2f})')
         plt.plot([0, 1], [0, 1], color='gray', linestyle='--')  # Diagonal reference line
@@ -623,23 +604,24 @@ if __name__ == "__main__":
     batch_size_per_replica = 64
     global_batch_size = batch_size_per_replica * max(1, num_gpus)
 
-    # 使用新的数据加载函数
-    print("=== 加载和分割数据 ===")
+    # 使用STORK胚胎图像预处理数据加载函数 (固定70%-15%-15%分割)
     (X_train, y_train, q_train,
      X_val, y_val, q_val,
-     X_test, y_test, q_test) = load_data_with_split(
-        data_dir, img_size=224, batch_size=global_batch_size, test_size=0.3, val_size=0.15
+     X_test, y_test, q_test) = load_data_with_stork_preprocessing(
+        data_dir, 
+        img_size=224, 
+        batch_size=global_batch_size
     )
     
     print(f"训练集: {len(y_train)} 样本")
     print(f"验证集: {len(y_val)} 样本") 
     print(f"测试集: {len(y_test)} 样本")
     
-    # 训练模型（传入已分割的数据）
+    # 训练模型（使用70%-15%-15%分割的数据）
     print("=== 开始训练 ===")
-    # 注意：这里需要修改train_model_with_augmentation函数，让它接收已分割的数据
     model, history = train_model_with_augmentation(
-        X_train, y_train, np.zeros(len(y_train)), q_train, 
+        X_train, y_train, np.zeros(len(y_train)), q_train,     # 训练集 (70%)
+        X_val, y_val, np.zeros(len(y_val)), q_val,             # 验证集 (15%)
         num_epochs=2000, 
         global_batch_size=global_batch_size, 
         img_size=224, 
