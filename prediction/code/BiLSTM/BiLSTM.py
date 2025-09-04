@@ -1,65 +1,47 @@
 import os
 import numpy as np
 import pandas as pd
-import cv2
 import random
-import time
-import json
 import gc
 import warnings
 from tqdm import tqdm
 
-# TensorFlow相关
 import tensorflow as tf
 from tensorflow.keras.applications import VGG16, ResNet152V2, DenseNet201
 from tensorflow.keras.applications.vgg16 import preprocess_input as preprocess_vgg16
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_resnet
 from tensorflow.keras.applications.densenet import preprocess_input as preprocess_densenet
-
-# EfficientNetV2处理
-try:
-    from tensorflow.keras.applications.efficientnet_v2 import EfficientNetV2M, preprocess_input as preprocess_efficientnet
-except ImportError:
-    from tensorflow.keras.applications.efficientnet import EfficientNetB3 as EfficientNetV2M
-    from tensorflow.keras.applications.efficientnet import preprocess_input as preprocess_efficientnet
+from tensorflow.keras.applications.efficientnet_v2 import EfficientNetV2M, preprocess_input as preprocess_efficientnet
 
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.keras.layers import Input, TimeDistributed, Bidirectional, LSTM, Dense
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
-# Scikit-learn相关  
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split, RepeatedKFold, RepeatedStratifiedKFold, KFold, StratifiedKFold
-from sklearn.metrics import (classification_report, roc_auc_score, roc_curve, log_loss, accuracy_score, 
-                           mean_squared_error, mean_absolute_error, precision_score, recall_score)
+from sklearn.model_selection import StratifiedKFold, train_test_split, RepeatedStratifiedKFold
+from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, classification_report, log_loss, roc_curve
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import resample
 
-# 可视化
 import matplotlib.pyplot as plt
+import time
 
 warnings.filterwarnings('ignore')
 
-# 安全初始化全局增强函数
-UNIFIED_AUGMENTATION_FN = None
-
-# 数据类型转换工具函数
 def ensure_float32(*arrays):
-    """统一转换数据类型为float32"""
+    """Convert data types to float32"""
     return [arr.astype(np.float32) if hasattr(arr, 'astype') else np.array(arr, dtype=np.float32) for arr in arrays]
 
 def configure_gpu():
-    """简化的GPU配置"""
+    """Configure GPU settings"""
     gpus = tf.config.list_physical_devices('GPU')
     num_gpus = len(gpus)
     
     if gpus:
         try:
-            # 基本GPU配置
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
             
-            # 设置环境变量
             os.environ.update({
                 'TF_GPU_ALLOCATOR': 'cuda_malloc_async',
                 'TF_FORCE_GPU_ALLOW_GROWTH': 'true',
@@ -69,65 +51,37 @@ def configure_gpu():
             
             if num_gpus > 1:
                 os.environ['NCCL_DEBUG'] = 'INFO'
-            
-            print(f"GPU配置完成，共{num_gpus}个GPU")
-        except RuntimeError as e:
-            print(f"GPU配置失败: {e}")
-    else:
-        print("未检测到GPU，将使用CPU")
+                
+        except RuntimeError:
+            pass
     
     return num_gpus
 
-# 配置GPU
 num_gpus = configure_gpu()
 
-# 1. 加载评分信息，计算BS_prime
 def load_score_dict(csv_path):
-    """加载评分信息并计算BS_prime"""
-    try:
-        df = pd.read_csv(csv_path)
-        print(f"成功加载评分文件: {csv_path}")
-        print(f"数据形状: {df.shape}")
-    except Exception as e:
-        print(f"加载评分文件失败: {e}")
-        raise
-
-    # 定义打分映射
+    """Load scoring information and calculate BS_prime"""
+    df = pd.read_csv(csv_path)
+    
     icm_map = {'A': 1, 'B': 2, 'C': 4}
     te_map = {'A': 1, 'B': 3, 'C': 4}
-
-    # 计算 BS_prime = ICM_score + TE_score
+    
     df["ICM_score"] = df["ICM"].map(icm_map)
     df["TE_score"] = df["TE"].map(te_map)
     df["BS_prime"] = df["ICM_score"] + df["TE_score"]
-
-    # 检查数据完整性
-    missing_icm = df["ICM_score"].isna().sum()
-    missing_te = df["TE_score"].isna().sum()
-    if missing_icm > 0 or missing_te > 0:
-        print(f"警告: 发现缺失值 - ICM: {missing_icm}, TE: {missing_te}")
-
-    # 首先构建已有的 EmbryoID: BS_prime
+    
     score_dict = dict(zip(df["EmbryoID"], df["BS_prime"]))
-    print(f"成功构建评分字典，包含 {len(score_dict)} 个胚胎")
-
-    # 为缺失 BS_prime 的 poor 胚胎赋伪分数
+    
     filtered_path = "/liaozizhuo/scripts/filtered_clean_embryos.csv"
     if os.path.exists(filtered_path):
         filtered_df = pd.read_csv(filtered_path)
         poor_embryos = filtered_df[filtered_df["EmbryoQuality"] == "poor"]
-        poor_count = 0
         for emb_id in poor_embryos["EmbryoID"].unique():
             if emb_id not in score_dict:
                 score_dict[emb_id] = 6.0 + random.uniform(0, 0.5)
-                poor_count += 1
-        print(f"为 {poor_count} 个poor胚胎添加了伪分数")
-    else:
-        print(f"警告: {filtered_path} not found, skip pseudo BS_prime for poor embryos.")
-
+    
     return score_dict
 
-# 2. 多模型特征提取器
 class MultiModelFeatureExtractor:
     def __init__(self):
         self.models = {}
@@ -135,99 +89,71 @@ class MultiModelFeatureExtractor:
         self._build_models()
         
     def _build_models(self):
-        """构建多个预训练模型，使用降维减少过拟合
+        """Build multi-model feature extractors with dimension reduction"""
         
-        选择512维的原因：
-        1. 平衡信息保留和计算效率
-        2. 减少过拟合风险
-        3. 保持足够的特征表达能力
-        4. 降低内存使用和训练时间
-        """
-        print("Building multi-model feature extractors with dimensionality reduction...")
-        
-        # 1. EfficientNetV2-M (降维到512)
         base_efficientnet = EfficientNetV2M(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         efficientnet_output = tf.keras.layers.GlobalAveragePooling2D()(base_efficientnet.output)
-        # 添加降维层
         efficientnet_output = Dense(512, activation='relu', name='efficientnet_reduction')(efficientnet_output)
         self.models['efficientnet'] = Model(inputs=base_efficientnet.input, outputs=efficientnet_output)
         self.models['efficientnet'].trainable = False
         self.feature_dims['efficientnet'] = 512
         
-        # 2. ResNet152V2 (降维到512)
         base_resnet = ResNet152V2(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         resnet_output = tf.keras.layers.GlobalAveragePooling2D()(base_resnet.output)
-        # 添加降维层
         resnet_output = Dense(512, activation='relu', name='resnet_reduction')(resnet_output)
         self.models['resnet'] = Model(inputs=base_resnet.input, outputs=resnet_output)
         self.models['resnet'].trainable = False
         self.feature_dims['resnet'] = 512
         
-        # 3. DenseNet201 (降维到512)
         base_densenet = DenseNet201(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         densenet_output = tf.keras.layers.GlobalAveragePooling2D()(base_densenet.output)
-        # 添加降维层
         densenet_output = Dense(512, activation='relu', name='densenet_reduction')(densenet_output)
         self.models['densenet'] = Model(inputs=base_densenet.input, outputs=densenet_output)
         self.models['densenet'].trainable = False
         self.feature_dims['densenet'] = 512
         
-        # 4. VGG16 (保持512，但添加正则化)
         base_vgg = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         vgg_output = tf.keras.layers.GlobalAveragePooling2D()(base_vgg.output)
-        # 添加正则化层
         vgg_output = Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(1e-4), name='vgg16_reduction')(vgg_output)
         self.models['vgg16'] = Model(inputs=base_vgg.input, outputs=vgg_output)
         self.models['vgg16'].trainable = False
         self.feature_dims['vgg16'] = 512
         
-        # 总特征维度 (4 * 512 = 2048)
         self.total_feature_dim = sum(self.feature_dims.values())
-        print(f"Total feature dimension: {self.total_feature_dim} (reduced from original ~5760)")
-        print(f"Individual dimensions: {self.feature_dims}")
-        print("使用降维策略减少过拟合风险")
         
     def extract_features(self, images):
-        """提取多模型特征并拼接 - 内存优化版本"""
+        """Extract multi-model features and concatenate"""
         features_list = []
         
-        # 确保图像是uint8格式
         if images.dtype != np.uint8:
             images = tf.cast(images, tf.uint8)
         
-        # 逐个处理模型，减少内存使用
         model_names = ['efficientnet', 'resnet', 'densenet', 'vgg16']
         preprocess_functions = [preprocess_efficientnet, preprocess_resnet, preprocess_densenet, preprocess_vgg16]
         
         for model_name, preprocess_func in zip(model_names, preprocess_functions):
-            # 只复制一次图像
             processed_imgs = preprocess_func(images.copy())
             features = self.models[model_name].predict(processed_imgs, verbose=0)
             features_list.append(features)
-            
-            # 清理内存
             del processed_imgs
         
-        # 拼接所有特征
         combined_features = np.concatenate(features_list, axis=1)
         return combined_features
 
-# 3. 构建训练数据（修改为支持图像级增强）
 def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor, valid_embryo_df, training=True, balance=False, use_augmentation=True):
     """
-    构建数据集，支持图像级别的数据增强
+    Build dataset with image-level augmentation support
     
     Args:
-        data_root: 图像根目录
-        score_dict: 评分字典
-        multi_extractor: 多模型特征提取器
-        valid_embryo_df: 有效胚胎DataFrame
-        training: 是否为训练模式
-        balance: 是否平衡采样
-        use_augmentation: 是否使用数据增强（仅在training=True时有效）
+        data_root: Image root directory
+        score_dict: Scoring dictionary
+        multi_extractor: Multi-model feature extractor
+        valid_embryo_df: Valid embryo DataFrame
+        training: Whether in training mode
+        balance: Whether to balance sampling
+        use_augmentation: Whether to use data augmentation (only effective when training=True)
     """
-    print(f"=== 构建数据集 (training={training}, augmentation={use_augmentation and training}) ===")
-
+    
     def map_half_hour(t):
         try:
             t = float(t)
@@ -236,8 +162,6 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
         idx = int(round((t - 96.0) / 0.5))
         return idx if 0 <= idx <= 32 else np.nan
 
-    # Step 1: 收集所有图像路径和元信息
-    print("Step 1: 收集图像信息...")
     focal_planes = ['F-75', 'F-60', 'F-45', 'F-30', 'F-15', 'F0', 'F15', 'F30', 'F45', 'F60', 'F75']
     time_points = [96 + 0.5*i for i in range(33)]
     feature_dim = multi_extractor.total_feature_dim
@@ -245,26 +169,22 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
     valid_embryos = set(valid_embryo_df["EmbryoID"])
     embryo_ids = [eid for eid in os.listdir(data_root) if eid in valid_embryos and eid in score_dict]
     
-    # 收集所有图像信息：[embryo_id, t_idx, f_idx, path]
     image_info_list = []
-    embryo_metadata = {}  # 存储每个胚胎的标签信息
+    embryo_metadata = {}
     
-    print(f"处理 {len(embryo_ids)} 个胚胎的图像信息...")
-    for embryo_id in tqdm(embryo_ids, desc="收集图像信息"):
+    for embryo_id in tqdm(embryo_ids, desc="Collecting image info"):
         try:
             embryo_df = valid_embryo_df[valid_embryo_df['EmbryoID'] == embryo_id].copy()
             embryo_df["t_idx"] = embryo_df["TargetHour"].apply(map_half_hour)
             f_map = {f: i for i, f in enumerate(focal_planes)}
             embryo_df["f_idx"] = embryo_df["FocalPlane"].map(f_map)
             
-            # 收集该胚胎的所有有效图像
             valid_images = []
             for _, row in embryo_df.iterrows():
                 if pd.notna(row.t_idx) and pd.notna(row.f_idx):
                     image_info_list.append((embryo_id, int(row.t_idx), int(row.f_idx), row.FullPath))
                     valid_images.append((int(row.t_idx), int(row.f_idx)))
             
-            # 存储胚胎元数据
             if len(valid_images) > 0:
                 embryo_row = valid_embryo_df[valid_embryo_df["EmbryoID"] == embryo_id].iloc[0]
                 embryo_metadata[embryo_id] = {
@@ -274,20 +194,14 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
                     'valid_positions': valid_images
                 }
         except Exception as e:
-            print(f"[SKIP] {embryo_id}: {e}")
+            continue
     
     total_images = len(image_info_list)
-    print(f"总共收集到 {total_images} 张图像")
     
-    # Step 2: 批量GPU特征提取（支持图像增强）
-    print("Step 2: 批量GPU特征提取...")
-    
-    # 创建图像增强函数实例
+    # 批量GPU特征提取（支持图像增强）
     if training and use_augmentation:
-        print("=== 启用图像级别数据增强 ===")
         image_augment_fn = create_image_augmentation_fn()
     else:
-        print("=== 不使用数据增强 ===")
         image_augment_fn = None
     
     # 创建数据处理pipeline
@@ -298,12 +212,14 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
         img = tf.io.read_file(path)
         img = tf.image.decode_jpeg(img, channels=3)
         img = tf.image.resize(img, [224, 224])
-        img = tf.cast(img, tf.uint8)
         
         # 如果是训练模式且启用增强，则应用图像增强
         if image_augment_fn is not None:
+            img = tf.cast(img, tf.uint8)  # 确保输入增强函数前为uint8
             img = image_augment_fn(img)
         
+        # 确保最终输出为uint8
+        img = tf.cast(img, tf.uint8)
         return img
     
     def load_and_preprocess_no_augmentation(path):
@@ -317,10 +233,8 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
     # 选择合适的预处理函数
     if training and use_augmentation:
         preprocess_fn = load_and_preprocess_with_augmentation
-        print("使用增强版图像预处理")
     else:
         preprocess_fn = load_and_preprocess_no_augmentation
-        print("使用标准图像预处理")
     
     # 构建高效的tf.data pipeline
     BATCH_SIZE = 64 if (training and use_augmentation) else 128  # 增强时减小批量大小
@@ -329,7 +243,6 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
     dataset = dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
     
     # 批量提取所有特征
-    print(f"开始批量特征提取 (批量大小: {BATCH_SIZE})...")
     all_features = []
     
     for batch_images in tqdm(dataset, desc="GPU批量特征提取"):
@@ -338,10 +251,8 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
     
     # 合并所有特征
     all_features = np.concatenate(all_features, axis=0)
-    print(f"提取完成！特征维度: {all_features.shape}")
     
-    # Step 3: 高效分配特征到胚胎张量
-    print("Step 3: 分配特征到胚胎张量...")
+    # 分配特征到胚胎张量
     
     X, y_bs, quality_labels, ages = [], [], [], []
     
@@ -363,10 +274,7 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
         quality_labels.append(metadata['quality'])
         ages.append(metadata['age'])
     
-    print(f"构建完成！共处理 {len(X)} 个胚胎")
-    
-    # Step 4: 标签分布与（可选）平衡采样
-    print("Step 4: 标签分布与（可选）平衡采样...")
+    # 标签分布与（可选）平衡采样
     from sklearn.utils import resample
 
     label_series = pd.Series(quality_labels)
@@ -1458,34 +1366,46 @@ def create_visualizations(logic_results, test_mae):
     plt.savefig("/liaozizhuo/scripts/feature_importance.pdf", dpi=300, bbox_inches='tight')
     plt.show()
 
-def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, y_train, quality_train, ages_train, feature_dim):
+def cross_validate_with_augmentation(root_dir, score_dict, valid_embryo_df, feature_dim):
     """
-    按照论文精确方法进行交叉验证：
-    1. 只在训练集上进行4折交叉验证 (论文策略)
+    使用4折交叉验证进行模型评估，保留图像增强策略：
+    1. 只使用训练集进行4折交叉验证
     2. 每折训练BiLSTM回归模型，留出数据监控验证损失
-    3. 用BiLSTM预测训练集BS分数+母体年龄训练逻辑回归
-    4. 每折都训练独立的逻辑回归模型
-    5. 对所有逻辑回归模型性能指标取平均
-    6. 使用accuracy, AUC, precision, recall评估
+    3. 训练集使用图像增强，验证集不使用增强
+    4. 用BiLSTM预测训练集BS分数+母体年龄训练逻辑回归
+    5. 每折都训练独立的逻辑回归模型
+    6. 对所有逻辑回归模型性能指标取平均
+    7. 使用accuracy, AUC, precision, recall评估
     """
-    print("=== 论文精确方法：训练集上4折交叉验证 ===")
+    print("=== 4折交叉验证+图像增强：训练集评估 ===")
     
     # 强制清理GPU内存
     tf.keras.backend.clear_session()
     gc.collect()
     
-    # 使用4折分层K折交叉验证（论文策略）
+    # 首先构建基础数据集（不增强）用于索引拆分
+    print("构建基础数据集用于交叉验证拆分...")
+    multi_extractor = MultiModelFeatureExtractor()
+    X_base, y_bs_base, quality_labels_base, ages_base = build_dataset_with_image_augmentation(
+        root_dir, score_dict, multi_extractor, valid_embryo_df, 
+        training=False, balance=False, use_augmentation=False
+    )
+    
+    print(f"基础数据集形状: {X_base.shape}")
+    
+    # 使用4折分层K折交叉验证
     cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=42)
     
-    # 存储每折的逻辑回归性能（论文关注指标）
+    # 存储每折的逻辑回归性能
     fold_logistic_performances = []
     fold_bilstm_performances = []
     
-    print(f"训练集形状: {X_train.shape}")
-    print(f"将按论文策略进行4折交叉验证...")
+    # 获取所有胚胎ID列表
+    all_embryo_ids = list(set(valid_embryo_df["EmbryoID"]) & set(score_dict.keys()))
+    all_embryo_ids.sort()  # 确保顺序一致
     
-    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_train, quality_train)):
-        print(f"\n--- 第 {fold_idx + 1}/4 折（论文策略）---")
+    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_base, quality_labels_base)):
+        print(f"\n--- 第 {fold_idx + 1}/4 折 ---")
         
         # 强制清理GPU内存
         tf.keras.backend.clear_session()
@@ -1495,20 +1415,35 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
         if tf.config.list_physical_devices('GPU'):
             time.sleep(3)
         
-        # 获取当前折的训练和验证数据（用于监控验证损失）
-        X_fold_train, X_fold_val = X_train[train_idx], X_train[val_idx]
-        y_fold_train, y_fold_val = y_train[train_idx], y_train[val_idx]
-        quality_fold_train = [quality_train[i] for i in train_idx]
-        quality_fold_val = [quality_train[i] for i in val_idx]
-        ages_fold_train = [ages_train[i] for i in train_idx]
-        ages_fold_val = [ages_train[i] for i in val_idx]
+        # 获取当前折对应的胚胎ID
+        fold_train_embryo_ids = [all_embryo_ids[i] for i in train_idx if i < len(all_embryo_ids)]
+        fold_val_embryo_ids = [all_embryo_ids[i] for i in val_idx if i < len(all_embryo_ids)]
         
-        print(f"折内训练集: {X_fold_train.shape}, 折内验证集: {X_fold_val.shape}")
+        print(f"训练胚胎数: {len(fold_train_embryo_ids)}, 验证胚胎数: {len(fold_val_embryo_ids)}")
         
-        # 对当前折的训练集进行类别平衡
-        X_fold_train, y_fold_train, quality_fold_train, ages_fold_train = balance_train_subset(
-            X_fold_train, y_fold_train, quality_fold_train, ages_fold_train
+        # === 为当前折构建增强训练数据和验证数据 ===
+        print(f"第 {fold_idx + 1} 折：构建增强训练集...")
+        fold_train_embryo_df = valid_embryo_df[valid_embryo_df["EmbryoID"].isin(fold_train_embryo_ids)]
+        
+        # 构建增强的训练集（使用图像增强）
+        X_fold_train_aug, y_fold_train_aug, quality_fold_train_aug, ages_fold_train_aug = build_dataset_with_image_augmentation(
+            root_dir, score_dict, multi_extractor, fold_train_embryo_df, 
+            training=True, balance=False, use_augmentation=True
         )
+        
+        print(f"第 {fold_idx + 1} 折：构建验证集...")
+        fold_val_embryo_df = valid_embryo_df[valid_embryo_df["EmbryoID"].isin(fold_val_embryo_ids)]
+        X_fold_val, y_fold_val, quality_fold_val, ages_fold_val = build_dataset_with_image_augmentation(
+            root_dir, score_dict, multi_extractor, fold_val_embryo_df, 
+            training=False, balance=False, use_augmentation=False
+        )
+        
+        # 对训练集做类别均衡
+        X_fold_train_aug, y_fold_train_aug, quality_fold_train_aug, ages_fold_train_aug = balance_train_subset(
+             X_fold_train_aug, y_fold_train_aug, quality_fold_train_aug, ages_fold_train_aug
+        )
+
+        print(f"增强训练集: {X_fold_train_aug.shape}, 验证集: {X_fold_val.shape}")
         
         # 创建和训练BiLSTM模型
         try:
@@ -1521,7 +1456,7 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
         with strategy.scope():
             model = create_model(feature_dim)
             
-            print(f"第 {fold_idx + 1} 折训练BiLSTM模型")
+            print(f"第 {fold_idx + 1} 折训练BiLSTM模型（训练集使用图像增强）")
             
             # 获取统一的训练配置
             config = get_unified_training_config()
@@ -1539,8 +1474,8 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
             optimizer = tf.keras.optimizers.Adam(learning_rate=config['learning_rate'])
             model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
             
-            # 构建数据集
-            train_ds = tf.data.Dataset.from_tensor_slices((X_fold_train, y_fold_train))
+            # 构建数据集（训练集使用增强数据，验证集不增强）
+            train_ds = tf.data.Dataset.from_tensor_slices((X_fold_train_aug, y_fold_train_aug))
             train_ds = train_ds.shuffle(512).batch(cv_batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
             
             val_ds = tf.data.Dataset.from_tensor_slices((X_fold_val, y_fold_val))
@@ -1563,43 +1498,48 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
                 'best_epoch': np.argmin(history.history['val_loss']) + 1
             })
         
-        # === 按照精确策略：逻辑回归训练与评估 ===
-        print(f"第 {fold_idx + 1}/4 折：训练逻辑回归")
+        # === 逻辑回归训练与评估 ===
+        print(f"第 {fold_idx + 1}/4 折：训练逻辑回归（基于增强训练集的BS预测）")
         
-        # 1) 使用BiLSTM预测整个训练集的blastocyst scores
-        print("使用BiLSTM预测训练集blastocyst scores...")
+        # 1) 使用BiLSTM预测整个增强训练集的blastocyst scores
+        print("使用BiLSTM预测增强训练集blastocyst scores...")
         y_bs_pred_train = []
-        for i in range(0, len(X_fold_train), 8):
-            j = min(i + 8, len(X_fold_train))
-            pred_batch = model.predict(X_fold_train[i:j], verbose=0)
-            y_bs_pred_train.extend(pred_batch.flatten())
+        for i in range(0, len(X_fold_train_aug), 8):
+            j = min(i + 8, len(X_fold_train_aug))
+            try:
+                pred_batch = model.predict(X_fold_train_aug[i:j], verbose=0)
+                y_bs_pred_train.extend(pred_batch.flatten())
+            except Exception as e:
+                print(f"预测批次 {i}-{j} 失败: {e}")
+                continue
         y_bs_pred_train = np.array(y_bs_pred_train)
         
         # 2) 构建逻辑回归特征：predicted blastocyst scores + maternal age
-        ages_fold_train_array = np.array(ages_fold_train)
+        ages_fold_train_array = np.array(ages_fold_train_aug[:len(y_bs_pred_train)])
+        quality_fold_train_trimmed = quality_fold_train_aug[:len(y_bs_pred_train)]
         
-        # 简化特征向量
+        # 特征组合：BS预测分数 + 母体年龄
         features_train = np.column_stack([
-            y_bs_pred_train,     # predicted blastocyst scores
-            ages_fold_train_array # maternal age
+            y_bs_pred_train,           # predicted blastocyst scores (BiLSTM输出)
+            ages_fold_train_array      # maternal age
         ])
         
         # 检查特征有效性
         valid_train = np.isfinite(features_train).all(axis=1)
         features_train = features_train[valid_train]
-        quality_train_filtered = [quality_fold_train[i] for i in range(len(quality_fold_train)) if valid_train[i]]
+        quality_train_filtered = [quality_fold_train_trimmed[i] for i in range(len(quality_fold_train_trimmed)) if valid_train[i]]
         
         if len(features_train) == 0:
             print(f"第 {fold_idx + 1} 折训练特征无效，跳过")
             continue
         
-        # 3) 训练独立的逻辑回归模型
+        # 3) 训练独立的逻辑回归模型（每折一个）
         scaler = StandardScaler().fit(features_train)
         clf = LogisticRegression(C=1.0, random_state=42, max_iter=1000)
         clf.fit(scaler.transform(features_train), quality_train_filtered)
         
-        # 4) 在训练集上评估逻辑回归
-        print("在训练集上评估逻辑回归性能")
+        # 4) 在当前训练集上评估逻辑回归性能
+        print("在当前训练集上评估逻辑回归性能")
         y_pred_proba_train = clf.predict_proba(scaler.transform(features_train))[:, 1]
         y_pred_cls_train = (y_pred_proba_train > 0.5).astype(int)
         
@@ -1639,11 +1579,11 @@ def cross_validate_paper_method(root_dir, score_dict, valid_embryo_df, X_train, 
         if tf.config.list_physical_devices('GPU'):
             time.sleep(5)
     
-    # 5) 计算5折的平均性能（论文方法的核心）
-    print(f"\n=== 论文方法：5折交叉验证平均性能 ===")
+    # 6) 计算4折的平均性能
+    print(f"\n=== 4折交叉验证平均性能（保留图像增强）===")
     
     avg_performance = {}
-    for metric in ['accuracy', 'auc', 'precision', 'recall', 'log_loss']:
+    for metric in ['accuracy', 'auc', 'precision', 'recall']:
         values = [p[metric] for p in fold_logistic_performances if metric in p]
         if values:
             avg_performance[f'{metric}_mean'] = np.mean(values)
@@ -1846,7 +1786,6 @@ def create_image_augmentation_fn():
         if tf.random.uniform([]) > 0.8:
             # 随机旋转角度 (-15到15度)
             angle = tf.random.uniform([], -0.26, 0.26)  # 弧度制 (约±15度)
-            image = tf.cast(image, tf.float32)
             # 使用tf.image进行旋转
             image_shape = tf.shape(image)
             # 由于tf没有直接的任意角度旋转，我们使用近似方法
@@ -1854,6 +1793,9 @@ def create_image_augmentation_fn():
             pass
         
         # === 传统图像增强技术 ===
+        
+        # 确保图像为float32类型以进行增强操作
+        image = tf.cast(image, tf.float32)
         
         # 5. 随机亮度调整 - 模拟不同的照明条件
         if tf.random.uniform([]) > 0.5:
@@ -1883,10 +1825,7 @@ def create_image_augmentation_fn():
         if tf.random.uniform([]) > 0.8:
             noise_factor = tf.random.uniform([], 0.01, 0.05)
             noise = tf.random.normal(tf.shape(image), mean=0.0, stddev=noise_factor)
-            image = tf.cast(image, tf.float32)
             image = image + noise
-            image = tf.clip_by_value(image, 0.0, 255.0)
-            image = tf.cast(image, tf.uint8)
         
         # 11. 随机裁剪和缩放 - 模拟不同的视野
         if tf.random.uniform([]) > 0.85:
@@ -1894,7 +1833,7 @@ def create_image_augmentation_fn():
             crop_fraction = tf.random.uniform([], 0.95, 1.0)
             image_shape = tf.shape(image)
             crop_size = tf.cast(tf.cast(image_shape[:2], tf.float32) * crop_fraction, tf.int32)
-            image = tf.image.random_crop(image, [crop_size[0], crop_size[1], 3])
+            image = tf.image.random_crop(image, [crop_size[0], crop_size[1], image_shape[2]])
             image = tf.image.resize(image, [image_shape[0], image_shape[1]])
         
         # 12. 随机平移 - 模拟位置偏移
@@ -1939,78 +1878,73 @@ def get_unified_training_config():
     }
 
 def main():
-    """主函数，包含异常处理"""
+    """
+    主函数，使用4折交叉验证策略并保留图像增强：
+    1. 只使用训练集进行4折交叉验证
+    2. 每折训练BiLSTM，使用预测的blastocyst scores + 母体年龄训练逻辑回归
+    3. 对所有折的逻辑回归性能指标取平均
+    4. 保留图像增强策略以提升模型性能
+    """
     try:
         # 检查CUDNN兼容性
         check_cudnn_compatibility()
         
-        # 配置参数
-        save_model_path = "/liaozizhuo/scripts/bilstm_quality_model.h5"
+        print("=== 4折交叉验证+图像增强：主流程开始 ===")
         
         # 1. 加载和准备数据
         print("=== 步骤1: 加载和准备数据 ===")
         root_dir, score_dict, valid_embryo_df = load_and_prepare_data()
         
-        # 2. 加载或构建特征
-        print("=== 步骤2: 加载或构建特征 ===")
-        X, y_bs, quality_labels, ages = load_or_build_features(root_dir, score_dict, valid_embryo_df)
+        # 2. 计算特征维度
+        print("=== 步骤2: 计算特征维度 ===")
+        multi_extractor = MultiModelFeatureExtractor()
+        feature_dim = multi_extractor.total_feature_dim
+        print(f"多模型特征维度: {feature_dim}")
         
-        # 3. 拆分数据集 - 修改这里
-        (X_train, X_val, X_test, y_train, y_val, y_test, 
-         quality_train, quality_val, quality_test,
-         ages_train, ages_val, ages_test) = split_dataset(X, y_bs, quality_labels, ages)
-        # 仅对训练集做类别均衡
-        X_train, y_train, quality_train, ages_train = balance_train_subset(X_train, y_train, quality_train, ages_train)
-        
-        # 打印平衡后的实际样本数
-        print(f"平衡后训练集大小: {X_train.shape}")
-        print(f"平衡后训练集样本数: {len(X_train)}")
-        
-        # 4. 训练主模型（使用图像增强）
-        feature_dim = X.shape[2] // 11
-        print(f"计算得到的特征维度: {feature_dim}")
-        
-        # 获取训练集的原始索引（用于重新构建增强数据）
-        all_indices = np.arange(len(X))
-        train_indices_original = []
-        
-        # 由于数据拆分可能改变了索引，我们需要重新获取原始训练集索引
-        # 这里使用一个简化的方法：基于训练集大小重新构建索引
-        train_size = len(X_train)
-        # 假设原始数据按顺序拆分，我们取前train_size个样本作为训练集
-        train_indices_original = list(range(train_size))
-        
-        print(f"使用统一训练函数（支持图像增强）...")
-        train_indices_original = list(range(len(X_train)))
-        model, history = train_model(
-            X_train, y_train, X_val, y_val, feature_dim, save_model_path,
-            use_augmentation=True, root_dir=root_dir, score_dict=score_dict,
-            valid_embryo_df=valid_embryo_df, train_indices=train_indices_original
+        # 3. 进行交叉验证（只使用训练集，保留图像增强）
+        print("=== 步骤3: 4折交叉验证（保留图像增强）===")
+        avg_performance, bilstm_avg, fold_performances = cross_validate_with_augmentation(
+            root_dir, score_dict, valid_embryo_df, feature_dim
         )
         
-        # 5. 评估模型
-        test_loss, test_mae = evaluate_model(model, X_test, y_test)
+        # 4. 保存结果
+        print("=== 步骤4: 保存结果 ===")
+        import json
+        results = {
+            'method': '4fold_cv_with_augmentation',
+            'description': '4折交叉验证，只使用训练集，保留图像增强',
+            'cv_folds': 4,
+            'augmentation': 'image_level_augmentation',
+            'logistic_regression_performance': avg_performance,
+            'bilstm_performance': bilstm_avg,
+            'fold_details': fold_performances
+        }
         
-        # 6. 逻辑回归分析 - 修改这里，传递测试集的年龄
-        X_trainval_concat = np.concatenate([X_train, X_val], axis=0)
-        ages_trainval = ages_train + ages_val
-        quality_trainval = quality_train + quality_val
-        logic_results = perform_logistic_regression(model, X_trainval_concat, ages_trainval, quality_trainval, X_test, ages_test, quality_test, test_mae)
-            
-        # 7. 创建可视化
-        create_visualizations(logic_results, test_mae)
+        with open("/liaozizhuo/scripts/cv_results.json", 'w') as f:
+            json.dump(results, f, indent=2, default=str)
         
-        # 8. 运行交叉验证（使用图像增强）
-        run_cross_validation_with_image_augmentation(root_dir, score_dict, valid_embryo_df, feature_dim)
+        # 5. 创建简化可视化
+        print("=== 步骤5: 创建可视化 ===")
+        create_cv_visualization(avg_performance, bilstm_avg, fold_performances)
         
-        # 9. 最终总结
-        print(f"\n=== 最终结果总结 ===")
-        print(f"多模型特征维度: {X.shape[2]} (每个胚胎: {feature_dim})")
-        print(f"BiLSTM测试MAE: {test_mae:.4f}")
-        print(f"逻辑回归准确率: {logic_results['logic_acc']:.4f}")
-        print(f"逻辑回归AUC: {logic_results['auc_score']:.4f}")
-        print("分析图表已保存至: /liaozizhuo/scripts/multi_model_analysis.pdf")
-        print("特征重要性图表已保存至: /liaozizhuo/scripts/feature_importance.pdf")
+        # 6. 最终总结
+        print(f"\n=== 最终结果总结（保留图像增强）===")
+        print(f"交叉验证方法: 4折分层交叉验证")
+        print(f"训练策略: 只使用训练集，保留图像增强")
+        print(f"特征组合: BiLSTM预测的BS分数 + 母体年龄")
+        print()
+        print("=== BiLSTM回归性能 ===")
+        print(f"验证MAE: {bilstm_avg['val_mae_mean']:.4f} ± {bilstm_avg['val_mae_std']:.4f}")
+        print(f"验证Loss: {bilstm_avg['val_loss_mean']:.4f} ± {bilstm_avg['val_loss_std']:.4f}")
+        print()
+        print("=== 逻辑回归分类性能 ===")
+        print(f"准确率 (Accuracy): {avg_performance['accuracy_mean']:.4f} ± {avg_performance['accuracy_std']:.4f}")
+        print(f"AUC: {avg_performance['auc_mean']:.4f} ± {avg_performance['auc_std']:.4f}")
+        print(f"精确率 (Precision): {avg_performance['precision_mean']:.4f} ± {avg_performance['precision_std']:.4f}")
+        print(f"召回率 (Recall): {avg_performance['recall_mean']:.4f} ± {avg_performance['recall_std']:.4f}")
+        print()
+        print("结果已保存至: /liaozizhuo/scripts/cv_results.json")
+        print("可视化图表已保存至: /liaozizhuo/scripts/cv_analysis.pdf")
         
         print("\n=== 程序执行完成 ===")
         
@@ -2020,6 +1954,91 @@ def main():
         import traceback
         traceback.print_exc()
         raise
+
+def create_cv_visualization(avg_performance, bilstm_avg, fold_performances):
+    """为交叉验证创建可视化"""
+    print("=== 创建交叉验证可视化图表 ===")
+    
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # 1. 逻辑回归性能指标
+    metrics = ['accuracy', 'auc', 'precision', 'recall']
+    means = [avg_performance[f'{m}_mean'] for m in metrics]
+    stds = [avg_performance[f'{m}_std'] for m in metrics]
+    
+    bars = axes[0, 0].bar(metrics, means, yerr=stds, capsize=5, alpha=0.7, color='skyblue')
+    axes[0, 0].set_title('逻辑回归平均性能指标 (4折CV)')
+    axes[0, 0].set_ylabel('分数')
+    axes[0, 0].set_ylim(0, 1.1)
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # 添加数值标签
+    for bar, mean, std in zip(bars, means, stds):
+        axes[0, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                       f'{mean:.3f}±{std:.3f}', ha='center', va='bottom', fontsize=9)
+    
+    # 2. BiLSTM性能指标
+    bilstm_metrics = ['val_mae', 'val_loss']
+    bilstm_means = [bilstm_avg[f'{m}_mean'] for m in bilstm_metrics]
+    bilstm_stds = [bilstm_avg[f'{m}_std'] for m in bilstm_metrics]
+    
+    bars = axes[0, 1].bar(bilstm_metrics, bilstm_means, yerr=bilstm_stds, capsize=5, alpha=0.7, color='lightcoral')
+    axes[0, 1].set_title('BiLSTM回归平均性能 (4折CV)')
+    axes[0, 1].set_ylabel('损失/误差')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # 添加数值标签
+    for bar, mean, std in zip(bars, bilstm_means, bilstm_stds):
+        axes[0, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(bilstm_means) * 0.02,
+                       f'{mean:.4f}±{std:.4f}', ha='center', va='bottom', fontsize=9)
+    
+    # 3. 各折性能趋势
+    fold_numbers = range(1, len(fold_performances) + 1)
+    fold_accs = [f['accuracy'] for f in fold_performances]
+    fold_aucs = [f['auc'] for f in fold_performances]
+    
+    axes[1, 0].plot(fold_numbers, fold_accs, 'o-', label='Accuracy', linewidth=2, markersize=6)
+    axes[1, 0].plot(fold_numbers, fold_aucs, 's-', label='AUC', linewidth=2, markersize=6)
+    axes[1, 0].set_xlabel('折数')
+    axes[1, 0].set_ylabel('性能分数')
+    axes[1, 0].set_title('各折逻辑回归性能趋势')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].set_ylim(0, 1.1)
+    
+    # 4. 方法总结
+    method_text = f"""
+4折交叉验证 + 图像增强
+
+策略:
+• 4折分层交叉验证
+• 只使用训练集进行CV
+• BiLSTM训练使用图像增强
+• 验证集不使用增强
+• 特征: BS预测分数 + 母体年龄
+
+关键结果:
+• 准确率: {avg_performance['accuracy_mean']:.3f}±{avg_performance['accuracy_std']:.3f}
+• AUC: {avg_performance['auc_mean']:.3f}±{avg_performance['auc_std']:.3f}
+• 精确率: {avg_performance['precision_mean']:.3f}±{avg_performance['precision_std']:.3f}
+• 召回率: {avg_performance['recall_mean']:.3f}±{avg_performance['recall_std']:.3f}
+
+BiLSTM性能:
+• 验证MAE: {bilstm_avg['val_mae_mean']:.4f}±{bilstm_avg['val_mae_std']:.4f}
+    """
+    axes[1, 1].text(0.05, 0.95, method_text, transform=axes[1, 1].transAxes, 
+                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))
+    axes[1, 1].set_title('方法总结')
+    axes[1, 1].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig("/liaozizhuo/scripts/cv_analysis.pdf", dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    print("交叉验证可视化图表已保存")
 
 # 主流程
 if __name__ == "__main__":
