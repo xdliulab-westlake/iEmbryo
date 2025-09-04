@@ -1,109 +1,128 @@
 import os
 import tensorflow as tf
 import numpy as np
+import cv2
 from tensorflow.keras.applications.vgg16 import preprocess_input
+from .stork_image_utils import *
 
-# VGG16兼容的预处理管道
-def preprocess_image_vgg16(image, img_size=224, is_training=True):
+# STORK + VGG16 预处理管道
+def preprocess_image_stork_vgg16(image, img_size=224, is_training=True):
     """
-    VGG16兼容的预处理函数
+    STORK胚胎图像预处理 + VGG16预处理管道
+    
+    Args:
+        image: 输入图像 (tensor或numpy array)
+        img_size: 目标图像尺寸
+        is_training: 是否为训练模式（影响数据增强）
+    
+    Returns:
+        预处理后的图像
     """
+    # 转换为numpy array以便STORK处理
+    if isinstance(image, tf.Tensor):
+        image = image.numpy()
+    
     # 确保图像在[0, 255]范围内
-    if image.dtype != tf.uint8:
-        # 如果是[0,1]范围的float，转换为[0,255]的uint8
-        if tf.reduce_max(image) <= 1.0:
-            image = tf.cast(image * 255.0, tf.uint8)
+    if image.dtype != np.uint8:
+        if np.max(image) <= 1.0:
+            image = (image * 255.0).astype(np.uint8)
         else:
-            image = tf.cast(image, tf.uint8)
+            image = image.astype(np.uint8)
+    
+    # 使用STORK预处理管道
+    image = preprocess_embryo_image(
+        image, 
+        img_size=img_size, 
+        apply_petri_crop=True,  # 启用培养皿检测
+        apply_center_crop=True  # 启用中心裁剪
+    )
     
     # 转换为float32以便后续处理
-    image = tf.cast(image, tf.float32)
+    image = image.astype(np.float32)
     
     if is_training:
-        # 训练时的数据增强
-        scale_size = tf.random.uniform([], minval=256, maxval=480, dtype=tf.int32)
-        shape = tf.shape(image)
-        height, width = shape[0], shape[1]
-        ratio = tf.cast(scale_size, tf.float32) / tf.cast(tf.minimum(height, width), tf.float32)
-        new_height = tf.cast(tf.round(tf.cast(height, tf.float32) * ratio), tf.int32) 
-        new_width = tf.cast(tf.round(tf.cast(width, tf.float32) * ratio), tf.int32)
+        # 训练时的轻量级数据增强 (在STORK预处理基础上)
+        image = tf.convert_to_tensor(image)
         
-        image = tf.image.resize(image, [new_height, new_width])
-        image = tf.image.random_crop(image, size=[img_size, img_size, 3])
-        
-        # 医学图像友好的增强（减少可能破坏诊断特征的变换）
-        image = tf.image.random_flip_left_right(image)
-        image = tf.image.random_brightness(image, max_delta=0.1)  # 减小变化范围
-        image = tf.image.random_contrast(image, lower=0.9, upper=1.1)  # 减小变化范围
-        # 移除色相和饱和度变化（可能影响细胞特征）
-    else:
-        # 推理时的预处理
-        shape = tf.shape(image)
-        height, width = shape[0], shape[1]
-        ratio = tf.cast(img_size + 32, tf.float32) / tf.cast(tf.minimum(height, width), tf.float32)
-        new_height = tf.cast(tf.round(tf.cast(height, tf.float32) * ratio), tf.int32)
-        new_width = tf.cast(tf.round(tf.cast(width, tf.float32) * ratio), tf.int32)
-        image = tf.image.resize(image, [new_height, new_width])
-        image = tf.image.resize_with_crop_or_pad(image, img_size, img_size)
-
+        # 轻量级增强，保护胚胎诊断特征
+        if tf.random.uniform([]) > 0.5:
+            image = tf.image.random_flip_left_right(image)
+        if tf.random.uniform([]) > 0.7:
+            image = tf.image.random_brightness(image, max_delta=0.1)
+        if tf.random.uniform([]) > 0.7:
+            image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
+            
+        image = image.numpy()
+    
     # 使用官方VGG16预处理
     image = preprocess_input(image)
     return image
 
-def load_data_with_split(data_dir, img_size=224, batch_size=32, test_size=0.3, val_size=0.15):
+
+def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
     """
-    一次性加载数据，然后分别处理训练集和验证/测试集
+    使用STORK预处理的数据加载函数
     
     Parameters:
     - data_dir: 数据目录路径
     - img_size: 图像尺寸，默认224x224
     - batch_size: 批处理大小（此函数中未使用，保持接口一致）
-    - test_size: 测试集比例，默认0.3（30%）
-    - val_size: 验证集比例，默认0.15（15%）
     
     Returns:
-    - X_train, train_labels, train_quals: 训练集数据、标签、质量
-    - X_val, val_labels, val_quals: 验证集数据、标签、质量  
-    - X_test, test_labels, test_quals: 测试集数据、标签、质量
+    - X_train, train_labels, train_quals: 训练集数据、标签、质量 (70%)
+    - X_val, val_labels, val_quals: 验证集数据、标签、质量 (15%)
+    - X_test, test_labels, test_quals: 测试集数据、标签、质量 (15%)
     
     Note:
-    - 训练集：应用数据增强 (is_training=True)
-    - 验证集：不应用数据增强 (is_training=False)
-    - 测试集：不应用数据增强 (is_training=False)
-    - 最终分配比例：训练集70%，验证集15%，测试集15%
+    - 固定数据分割：70%训练集 - 15%验证集 - 15%测试集
+    - 使用STORK预处理流程进行胚胎图像处理
+    - 包括培养皿检测、中心方形裁剪等专业胚胎学图像处理
+    - 训练集：应用数据增强 + STORK预处理
+    - 验证/测试集：仅应用STORK预处理，不做数据增强
     """
     image_paths = []
     labels = []
     qualities = []
     
-    # 收集图像路径和标签
-    for label, class_name in enumerate(['class_0', 'class_1']):
-        class_dir = os.path.join(data_dir, 'train', class_name)
-        if not os.path.exists(class_dir):
-            print(f"Warning: Directory {class_dir} does not exist.")
+    print("=== 使用STORK胚胎图像预处理加载数据 ===")
+    
+    # 收集所有图像路径和标签
+    for class_name in os.listdir(data_dir):
+        class_path = os.path.join(data_dir, class_name)
+        if not os.path.isdir(class_path):
             continue
             
-        for img_file in sorted(os.listdir(class_dir)):
-            if not img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-                continue
-                
-            img_path = os.path.join(class_dir, img_file)
-            image_paths.append(img_path)
-            labels.append(label)
-            qualities.append(1 if class_name == 'class_1' else 0)
+        if class_name.lower() in ['0', 'negative', 'no', 'non_viable']:
+            class_label = 0
+        elif class_name.lower() in ['1', 'positive', 'yes', 'viable']:
+            class_label = 1
+        else:
+            continue
+            
+        for img_name in os.listdir(class_path):
+            if img_name.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff')):
+                img_path = os.path.join(class_path, img_name)
+                image_paths.append(img_path)
+                labels.append(class_label)
+                qualities.append(1.0)  # 默认质量分数
+    
+    # 转换为numpy数组
+    image_paths = np.array(image_paths)
+    labels = np.array(labels)
+    qualities = np.array(qualities)
     
     print(f"找到 {len(image_paths)} 张图像")
-    print(f"Class 0: {labels.count(0)} 张，Class 1: {labels.count(1)} 张")
+    print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
     
-    # 先分割数据（基于路径，不处理图像）
+    # 数据分割：70%训练 - 15%验证 - 15%测试
     from sklearn.model_selection import train_test_split
     
-    # 第一次分割：训练集 vs 临时集 (70% vs 30%)
+    # 第一步：分离出训练集 (70%) 和临时集 (30%)
     train_paths, temp_paths, train_labels, temp_labels, train_quals, temp_quals = train_test_split(
         image_paths, labels, qualities, test_size=0.3, random_state=42, stratify=labels
     )
     
-    # 第二次分割：验证集 vs 测试集 (从30%中分出15%和15%)
+    # 第二步：从临时集 (30%) 中均分为验证集 (15%) 和测试集 (15%)
     val_paths, test_paths, val_labels, test_labels, val_quals, test_quals = train_test_split(
         temp_paths, temp_labels, temp_quals, test_size=0.5, random_state=42, stratify=temp_labels
     )
@@ -121,24 +140,52 @@ def load_data_with_split(data_dir, img_size=224, batch_size=32, test_size=0.3, v
     print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%)")
     
     # 分别处理三个数据集
-    def preprocess_images(paths, is_training):
-        """预处理图像列表"""
+    def preprocess_images_stork(paths, is_training):
+        """使用STORK预处理图像列表"""
         processed_images = []
-        for path in paths:
-            img = tf.io.read_file(path)
-            img = tf.image.decode_image(img, expand_animations=False)
-            img = preprocess_image_vgg16(img, img_size, is_training)
-            processed_images.append(img.numpy())
+        for i, path in enumerate(paths):
+            if i % 1000 == 0:
+                print(f"处理进度: {i+1}/{len(paths)}")
+            
+            try:
+                # 使用OpenCV读取图像（更稳定）
+                img = cv2.imread(path)
+                if img is None:
+                    print(f"无法读取图像: {path}")
+                    # 创建黑色图像作为后备
+                    img = np.zeros((img_size, img_size, 3), dtype=np.uint8)
+                else:
+                    # OpenCV默认BGR，转换为RGB
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                # 使用STORK整合的预处理
+                img_processed = preprocess_image_stork_vgg16(
+                    img, img_size=img_size, is_training=is_training
+                )
+                processed_images.append(img_processed)
+                
+            except Exception as e:
+                print(f"处理图像 {path} 时出错: {e}")
+                # 创建黑色图像作为后备
+                fallback_img = np.zeros((img_size, img_size, 3), dtype=np.float32)
+                fallback_img = preprocess_input(fallback_img)
+                processed_images.append(fallback_img)
+        
         return np.array(processed_images)
     
-    print("=== 预处理训练集（启用增强）===")
-    X_train = preprocess_images(train_paths, is_training=True)
+    print("=== 预处理训练集（STORK + 数据增强）===")
+    X_train = preprocess_images_stork(train_paths, is_training=True)
     
-    print("=== 预处理验证集（不增强）===")
-    X_val = preprocess_images(val_paths, is_training=False)
+    print("=== 预处理验证集（仅STORK预处理）===")
+    X_val = preprocess_images_stork(val_paths, is_training=False)
     
-    print("=== 预处理测试集（不增强）===")
-    X_test = preprocess_images(test_paths, is_training=False)
+    print("=== 预处理测试集（仅STORK预处理）===")
+    X_test = preprocess_images_stork(test_paths, is_training=False)
+    
+    print("=== STORK数据预处理完成 ===")
+    print(f"训练集形状: {X_train.shape}")
+    print(f"验证集形状: {X_val.shape}")
+    print(f"测试集形状: {X_test.shape}")
     
     return (X_train, train_labels, train_quals,
             X_val, val_labels, val_quals,
