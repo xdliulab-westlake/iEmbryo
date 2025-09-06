@@ -223,6 +223,369 @@ stability_report = assess_model_stability(cv_summary)
 print(f"模型稳定性: {stability_report['overall']['stability_grade']}")
 ```
 
+## ⚙️ 参数配置
+
+### 📋 配置文件管理
+
+BiLSTM系统支持通过JSON配置文件灵活管理所有参数：
+
+```bash
+# 创建默认配置文件
+python main.py --create-config
+
+# 这将生成 bilstm_config.json 文件，包含所有默认参数
+```
+
+### 🎛️ 核心参数说明
+
+#### 📁 数据路径参数
+```json
+{
+  "data_root": "/path/to/your/data",           // 数据根目录
+  "image_folder": "image",                    // 图像文件夹名称
+  "score_dict_path": "score_dict.json",       // 分数字典文件路径
+  "cache_dir": "bilstm_feature_cache"         // 特征缓存目录
+}
+```
+
+#### 🧠 模型架构参数
+```json
+{
+  "feature_dim": 1536,        // 特征维度 (3个模型×512维)
+  "lstm_units": 128,          // LSTM单元数量
+  "dropout_rate": 0.3,        // Dropout比率 (0.0-1.0)
+  "learning_rate": 0.001      // 学习率
+}
+```
+
+#### 🏋️ 训练超参数
+```json
+{
+  "epochs": 100,              // 最大训练轮数
+  "batch_size": 32,           // 批量大小
+  "patience": 15,             // 早停耐心值
+  "validation_split": 0.3     // 验证集比例
+}
+```
+
+#### ✅ 交叉验证参数
+```json
+{
+  "n_folds": 4,               // 交叉验证折数
+  "test_ratio": 0.3,          // 测试集比例
+  "random_state": 42          // 随机种子
+}
+```
+
+#### 🖼️ 图像预处理参数
+```json
+{
+  "img_size": 224,            // 图像尺寸
+  "apply_petri_crop": true,   // 是否启用Hough圆检测裁剪
+  "apply_center_crop": true,  // 是否启用中心方形裁剪
+  "use_augmentation": true    // 是否使用数据增强
+}
+```
+
+#### 💾 缓存和输出参数
+```json
+{
+  "use_cache": true,                    // 是否使用特征缓存
+  "force_recompute": false,             // 是否强制重新计算特征
+  "model_save_path": "bilstm_model.h5", // 模型保存路径
+  "results_save_dir": "bilstm_results", // 结果保存目录
+  "verbose": 1                          // 详细输出级别 (0-2)
+}
+```
+
+### 🔧 参数调优建议
+
+#### 🚀 性能优化
+- **GPU内存不足**: 减小 `batch_size` (32→16→8)
+- **训练太慢**: 增大 `batch_size`，减少 `epochs`
+- **过拟合**: 增大 `dropout_rate` (0.3→0.5)，减少 `lstm_units`
+- **欠拟合**: 减小 `dropout_rate`，增大 `lstm_units`
+
+#### 🎯 精度提升
+- **数据不平衡**: 启用 `use_augmentation=true`
+- **泛化性能差**: 增加 `n_folds` (4→5→10)
+- **收敛慢**: 调整 `learning_rate` (0.001→0.01 或 0.0001)
+- **早停过早**: 增大 `patience` (15→25→50)
+
+## 🚀 训练指南
+
+### 📋 环境准备
+
+#### 1. 依赖安装
+```bash
+# 创建conda环境
+conda create -n bilstm python=3.8
+conda activate bilstm
+
+# 安装核心依赖
+pip install tensorflow>=2.8.0
+pip install opencv-python>=4.0.0
+pip install scikit-learn>=1.0.0
+pip install pandas>=1.3.0
+pip install numpy>=1.21.0
+pip install matplotlib>=3.5.0
+pip install tqdm
+```
+
+#### 2. 数据目录结构
+```
+your_data_root/
+├── image/                    # 胚胎图像文件夹
+│   ├── embryo_001.jpg
+│   ├── embryo_002.jpg
+│   └── ...
+├── score_dict.json           # 胚胎评分数据
+└── bilstm_feature_cache/     # 特征缓存目录 (自动创建)
+```
+
+#### 3. 数据格式要求
+**score_dict.json** 格式示例：
+```json
+{
+  "embryo_001.jpg": {
+    "bs_score": 4.2,      // 囊胚评分 (回归目标)
+    "age": 32,            // 母体年龄
+    "quality": 1          // 胚胎质量分类 (0或1)
+  },
+  "embryo_002.jpg": {
+    "bs_score": 3.8,
+    "age": 28, 
+    "quality": 0
+  }
+}
+```
+
+### 🏃‍♂️ 快速开始训练
+
+#### 方式1: 使用默认配置
+```bash
+# 进入BiLSTM目录
+cd /path/to/BiLSTM
+
+# 开始训练 (使用内置默认参数)
+python main.py --mode train
+```
+
+#### 方式2: 使用自定义配置
+```bash
+# 1. 创建配置文件模板
+python main.py --create-config
+
+# 2. 编辑 bilstm_config.json，修改数据路径和参数
+vim bilstm_config.json
+
+# 3. 使用配置文件训练
+python main.py --mode train --config bilstm_config.json
+```
+
+#### 方式3: 命令行参数覆盖
+```bash
+# 使用命令行参数快速调整关键参数
+python main.py --mode train \
+  --config bilstm_config.json \
+  --epochs 50 \
+  --batch-size 16 \
+  --learning-rate 0.0001
+```
+
+### 📊 训练过程监控
+
+#### 实时输出示例
+```
+=== BiLSTM 配置参数 ===
+数据路径:
+  data_root: /your/data/path
+  image_folder: image
+  score_dict_path: score_dict.json
+  cache_dir: bilstm_feature_cache
+
+🚀 开始 BiLSTM 胚胎分类系统训练
+==========================================
+
+--- 配置GPU环境 ---
+✅ GPU配置完成: NVIDIA GeForce RTX 3080
+
+--- 路径验证 ---
+✅ 数据根目录: /your/data/path
+✅ 图像文件夹: /your/data/path/image
+✅ 分数字典: /your/data/path/score_dict.json
+
+--- 初始化特征缓存系统 ---
+📁 特征缓存目录: bilstm_feature_cache
+🔍 发现 1250 个图像文件
+💾 缓存命中率: 95.2% (1191/1250)
+
+--- 开始交叉验证训练 ---
+
+=== 第 1 折交叉验证 ===
+📊 训练集: 875 样本, 验证集: 250 样本, 测试集: 125 样本
+
+🧠 创建BiLSTM模型...
+特征维度: 1536, LSTM单元: 128, Dropout: 0.3
+
+🏋️ 开始训练...
+Epoch 1/100: loss=0.8234, val_loss=0.7156, mae=0.6123, val_mae=0.5892
+Epoch 2/100: loss=0.7456, val_loss=0.6789, mae=0.5834, val_mae=0.5623
+...
+Epoch 23/100: 早停触发, 最佳验证MAE: 0.4123
+
+📊 第1折逻辑回归分析
+训练准确率: 0.8571, AUC: 0.9234
+验证准确率: 0.8400, AUC: 0.9156
+测试准确率: 0.8480, AUC: 0.9189
+
+=== 第 2 折交叉验证 ===
+...
+```
+
+### 🎯 训练完成后的输出
+
+#### 最终结果显示
+```
+🎉 训练完成！最终结果:
+==========================================
+逻辑回归平均准确率: 0.8425 ± 0.0156
+逻辑回归平均AUC: 0.9167 ± 0.0098
+BiLSTM平均MAE: 0.4234 ± 0.0234
+
+✅ 结果已保存到: bilstm_results/cv_results.json
+✅ 可视化图表已生成:
+   📈 bilstm_results/training_curves.png
+   📊 bilstm_results/confusion_matrices.png
+   🎯 bilstm_results/roc_curves.png
+```
+
+#### 生成的文件结构
+```
+bilstm_results/
+├── cv_results.json           # 详细的交叉验证结果
+├── training_curves.png       # 训练过程曲线图
+├── confusion_matrices.png    # 混淆矩阵热力图
+├── roc_curves.png           # ROC曲线对比
+├── fold_1_model.h5          # 第1折最佳模型
+├── fold_2_model.h5          # 第2折最佳模型
+├── fold_3_model.h5          # 第3折最佳模型
+└── fold_4_model.h5          # 第4折最佳模型
+```
+
+### 🔮 推理模式使用
+
+#### 单个模型推理
+```bash
+# 使用训练好的模型进行预测
+python main.py --mode inference \
+  --model bilstm_results/fold_1_model.h5 \
+  --images image/embryo_001.jpg image/embryo_002.jpg
+
+# 输出示例:
+=== 预测结果 ===
+1. embryo_001.jpg: BS分数 = 4.23
+2. embryo_002.jpg: BS分数 = 3.78
+```
+
+#### 批量预测脚本
+```python
+# batch_predict.py
+from BiLSTM import load_trained_model, BiLSTMFeatureCache, batch_predict_bs_scores
+import glob
+
+# 加载模型
+model = load_trained_model('bilstm_results/fold_1_model.h5')
+
+# 获取所有图像
+image_paths = glob.glob('/path/to/new/images/*.jpg')
+
+# 初始化缓存
+cache = BiLSTMFeatureCache(
+    data_root='/path/to/data',
+    cache_dir='bilstm_feature_cache'
+)
+
+# 提取特征并预测
+features = cache.get_or_compute_features(
+    image_paths=image_paths,
+    use_cache=True,
+    training=False
+)
+
+predictions = batch_predict_bs_scores(model, features)
+
+# 保存结果
+results = dict(zip(image_paths, predictions))
+with open('batch_predictions.json', 'w') as f:
+    json.dump(results, f, indent=2)
+```
+
+### 🐛 训练问题排查
+
+#### 常见错误及解决方案
+
+**1. GPU内存不足**
+```
+ResourceExhaustedError: OOM when allocating tensor
+```
+解决方案:
+```bash
+# 减小批量大小
+python main.py --mode train --batch-size 16
+
+# 或修改配置文件
+{
+  "batch_size": 8,
+  "lstm_units": 64  // 同时减少模型复杂度
+}
+```
+
+**2. 数据路径错误**
+```
+❌ 图像文件夹: /path/to/image (不存在)
+```
+解决方案:
+```bash
+# 检查并修正配置文件中的路径
+{
+  "data_root": "/correct/path/to/your/data",
+  "image_folder": "image"
+}
+```
+
+**3. 特征缓存冲突**
+```
+缓存版本不匹配，正在清理缓存...
+```
+解决方案:
+```bash
+# 清理缓存重新开始
+rm -rf bilstm_feature_cache/
+
+# 或使用强制重计算
+python main.py --mode train --config config.json
+# 在config.json中设置 "force_recompute": true
+```
+
+**4. 训练不收敛**
+```
+验证MAE一直在 0.8 左右震荡
+```
+解决方案:
+```bash
+# 调整学习率和早停耐心
+python main.py --mode train --learning-rate 0.0001 \
+  --config modified_config.json
+
+# modified_config.json:
+{
+  "learning_rate": 0.0001,
+  "patience": 30,
+  "epochs": 200
+}
+```
+
 ## 📊 性能基准
 
 ### 🎯 分类性能
