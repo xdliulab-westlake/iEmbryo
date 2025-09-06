@@ -2,6 +2,7 @@ import cv2
 import pandas as pd
 import numpy as np
 import copy
+import os
 
 def crop_center_square(frame):
     """
@@ -152,8 +153,16 @@ def preprocess_embryo_image(image, img_size=224, apply_petri_crop=True, apply_ce
     """
     # Load image if path is provided
     if isinstance(image, str):
-        image = cv2.imread(image)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # 检查文件是否存在
+        if not os.path.exists(image):
+            raise FileNotFoundError(f"图像文件不存在: {image}")
+        
+        # 尝试读取图像
+        loaded_image = cv2.imread(image)
+        if loaded_image is None:
+            raise ValueError(f"无法读取图像文件: {image}。请检查文件是否损坏或格式是否支持。")
+        
+        image = cv2.cvtColor(loaded_image, cv2.COLOR_BGR2RGB)
     
     # Apply Petri dish cropping if enabled
     if apply_petri_crop:

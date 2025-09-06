@@ -147,6 +147,13 @@ class BiLSTMFeatureCache:
             """包装STORK预处理以在tf.py_function中使用"""
             try:
                 path_str = path_bytes.numpy().decode('utf-8')
+                
+                # 检查文件是否存在
+                if not os.path.exists(path_str):
+                    print(f"❌ 图像文件不存在: {path_str}")
+                    print(f"   跳过此文件，使用默认黑色图像")
+                    return np.zeros((224, 224, 3), dtype=np.uint8)
+                
                 # 使用STORK预处理管道：Hough圆检测 + 中心裁剪
                 processed_img = preprocess_embryo_image(
                     path_str, 
@@ -155,15 +162,25 @@ class BiLSTMFeatureCache:
                     apply_center_crop=True  # 启用中心方形裁剪
                 )
                 return processed_img.astype(np.uint8)
+            except FileNotFoundError as e:
+                print(f"❌ 文件不存在错误 {path_str}: {e}")
+                print(f"   跳过此文件，使用默认黑色图像")
+                return np.zeros((224, 224, 3), dtype=np.uint8)
             except Exception as e:
-                print(f"STORK预处理失败 {path_str}: {e}")
+                print(f"⚠️ STORK预处理失败 {path_str}: {e}")
+                print(f"   尝试简单预处理...")
                 # 回退到简单预处理
-                img = cv2.imread(path_str)
-                if img is not None:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    img = cv2.resize(img, (224, 224))
-                    return img.astype(np.uint8)
-                else:
+                try:
+                    img = cv2.imread(path_str)
+                    if img is not None:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        img = cv2.resize(img, (224, 224))
+                        return img.astype(np.uint8)
+                    else:
+                        print(f"❌ 无法读取图像文件: {path_str}")
+                        return np.zeros((224, 224, 3), dtype=np.uint8)
+                except Exception as e2:
+                    print(f"❌ 简单预处理也失败 {path_str}: {e2}")
                     # 创建黑色图像作为最后的回退
                     return np.zeros((224, 224, 3), dtype=np.uint8)
         

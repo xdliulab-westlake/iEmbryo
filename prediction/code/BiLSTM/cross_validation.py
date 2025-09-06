@@ -591,9 +591,13 @@ def stratified_cross_validation_with_cache(
             valid_images = []
             for _, row in embryo_images.iterrows():
                 full_path = row['FullPath']
-                if pd.notna(full_path) and os.path.exists(full_path):
-                    image_info_list.append((embryo_id, full_path))
-                    valid_images.append(full_path)
+                if pd.notna(full_path):
+                    if os.path.exists(full_path):
+                        image_info_list.append((embryo_id, full_path))
+                        valid_images.append(full_path)
+                    else:
+                        print(f"⚠️ 图像文件不存在: {full_path} (胚胎ID: {embryo_id})")
+                        print(f"   建议检查路径是否正确或文件是否已移动")
             
             if len(valid_images) > 0:
                 # 获取胚胎的其他信息

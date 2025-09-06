@@ -98,9 +98,9 @@ def load_score_dict(csv_path):
         else:
             raise ValueError("CSV文件必须包含 ICM/TE 列或 BlastocystScore 列")
         
-        # 处理低质量胚胎数据（如果存在）
-        filtered_path = "/liaozizhuo/scripts/filtered_clean_embryos.csv"
-        if os.path.exists(filtered_path):
+        # 处理低质量胚胎数据（如果提供）
+        if filtered_path and os.path.exists(filtered_path):
+            print(f"📂 读取低质量胚胎文件: {filtered_path}")
             filtered_df = pd.read_csv(filtered_path)
             poor_embryos = filtered_df[filtered_df["EmbryoQuality"] == "poor"]
             for emb_id in poor_embryos["EmbryoID"].unique():
@@ -130,14 +130,8 @@ def check_required_paths(data_root=None, image_folder="image", score_dict_path="
     
     # 默认路径（向后兼容）
     if data_root is None:
-        required_paths = [
-            "/liaozizhuo/image",
-            "/liaozizhuo/scripts"
-        ]
-        required_files = [
-            "/liaozizhuo/scripts/MainDB.csv",
-            "/liaozizhuo/scripts/filtered_clean_embryos.csv"
-        ]
+        print("⚠️ 警告：未提供data_root参数，请在配置中指定正确的数据根目录")
+        return False
     else:
         # 使用配置的路径
         required_paths = [os.path.join(data_root, image_folder)]
