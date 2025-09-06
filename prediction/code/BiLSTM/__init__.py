@@ -6,7 +6,8 @@ BiLSTM 胚胎分类包
 2. 逻辑回归进行最终质量分类
 
 模块结构:
-- BiLSTM: 主模型和缓存系统
+- feature_cache: 智能特征缓存系统
+- feature_extractor: 多模型特征提取器
 - preprocessing: 图像预处理和数据加载
 - model: BiLSTM模型构建和训练
 - logistic: 逻辑回归分类器
@@ -15,12 +16,11 @@ BiLSTM 胚胎分类包
 - utils: 通用工具函数
 """
 
-# 主模块
-from .BiLSTM import (
-    BiLSTMFeatureCache,
-    MultiModelFeatureExtractor,
-    main
-)
+# 特征缓存模块
+from .feature_cache import BiLSTMFeatureCache
+
+# 特征提取模块
+from .feature_extractor import MultiModelFeatureExtractor
 
 # 预处理模块
 from .preprocessing import (
@@ -71,18 +71,25 @@ from .utils import (
     load_score_dict,
     check_required_paths,
     create_image_augmentation_fn,
-    cleanup_memory
+    cleanup_memory,
+    check_cudnn_compatibility,
+    get_unified_training_config,
+    create_callbacks,
+    print_system_info,
+    validate_data_shapes,
+    safe_divide
 )
 
 __version__ = "2.0.0"
 __author__ = "IVF AI Team"
-__description__ = "BiLSTM-based embryo classification system with Hough circle detection"
+__description__ = "BiLSTM-based embryo classification system with Hough circle detection (modular version)"
 
 __all__ = [
-    # 主模块
+    # 特征缓存
     'BiLSTMFeatureCache',
-    'MultiModelFeatureExtractor', 
-    'main',
+    
+    # 特征提取
+    'MultiModelFeatureExtractor',
     
     # 预处理
     'preprocess_embryo_image',
@@ -122,5 +129,11 @@ __all__ = [
     'load_score_dict',
     'check_required_paths',
     'create_image_augmentation_fn',
-    'cleanup_memory'
+    'cleanup_memory',
+    'check_cudnn_compatibility',
+    'get_unified_training_config',
+    'create_callbacks',
+    'print_system_info',
+    'validate_data_shapes',
+    'safe_divide'
 ]

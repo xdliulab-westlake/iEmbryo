@@ -12,8 +12,10 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-# 添加当前路径到系统路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# 添加父目录到系统路径，这样可以找到BiLSTM包
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
 
 from BiLSTM import (
     configure_gpu, 
@@ -40,7 +42,8 @@ class BiLSTMConfig:
             "cache_dir": "bilstm_feature_cache",
             
             # 模型参数
-            "feature_dim": 1536,  # EfficientNetV2M(512) + ResNet152V2(512) + DenseNet201(512)
+            "model_name": "all",        # 特征提取模型: all, efficientnet, resnet, densenet, vgg16
+            "feature_dim": 5760,        # 自动根据model_name调整
             "lstm_units": 128,
             "dropout_rate": 0.3,
             "learning_rate": 0.001,
@@ -75,6 +78,9 @@ class BiLSTMConfig:
         # 如果提供了配置文件，则加载
         if config_file and os.path.exists(config_file):
             self.load_config(config_file)
+            
+        # 自动调整特征维度
+        self._update_feature_dim()
     
     def load_config(self, config_file):
         """从JSON文件加载配置"""
@@ -103,6 +109,32 @@ class BiLSTMConfig:
     def set(self, key, value):
         """设置配置值"""
         self.config[key] = value
+        # 如果改变了模型选择，自动调整特征维度
+        if key == "model_name":
+            self._update_feature_dim()
+            
+    def _update_feature_dim(self):
+        """根据模型选择自动更新特征维度"""
+        model_name = self.config.get("model_name", "all")
+        
+        # 特征维度映射（使用原始维度，不再压缩）
+        feature_dims = {
+            "all": 5760,          # 1280 + 2048 + 1920 + 512 = 5760维
+            "efficientnet": 1280, # EfficientNetV2M原始维度
+            "resnet": 2048,       # ResNet152V2原始维度
+            "densenet": 1920,     # DenseNet201原始维度
+            "vgg16": 512          # VGG16原始维度
+        }
+        
+        if model_name in feature_dims:
+            old_dim = self.config.get("feature_dim", 5760)
+            new_dim = feature_dims[model_name]
+            self.config["feature_dim"] = new_dim
+            
+            if old_dim != new_dim:
+                print(f"🔄 特征维度已调整: {old_dim} -> {new_dim} (模型: {model_name})")
+        else:
+            print(f"⚠️ 未知的模型名称: {model_name}，使用默认配置")
     
     def print_config(self):
         """打印当前配置"""
@@ -112,7 +144,7 @@ class BiLSTMConfig:
             if section == "数据路径":
                 keys = ["data_root", "image_folder", "score_dict_path", "cache_dir"]
             elif section == "模型参数":
-                keys = ["feature_dim", "lstm_units", "dropout_rate", "learning_rate"]
+                keys = ["model_name", "feature_dim", "lstm_units", "dropout_rate", "learning_rate"]
             elif section == "训练参数":
                 keys = ["epochs", "batch_size", "patience", "validation_split"]
             elif section == "交叉验证参数":
@@ -122,7 +154,12 @@ class BiLSTMConfig:
             
             for key in keys:
                 if key in self.config:
-                    print(f"  {key}: {self.config[key]}")
+                    value = self.config[key]
+                    if key == "model_name":
+                        available = "[all, efficientnet, resnet, densenet, vgg16]"
+                        print(f"  {key}: {value} {available}")
+                    else:
+                        print(f"  {key}: {value}")
 
 def setup_directories(config):
     """创建必要的目录"""
@@ -181,6 +218,13 @@ def run_training(config):
             data_root=config.get("data_root"),
             cache_dir=config.get("cache_dir")
         )
+        
+        # 根据配置初始化特征提取器
+        model_name = config.get("model_name", "all")
+        print(f"\n--- 初始化特征提取器 (模型: {model_name}) ---")
+        from BiLSTM import MultiModelFeatureExtractor
+        extractor = MultiModelFeatureExtractor(model_name=model_name)
+        cache.set_extractor(extractor)
         
         # 执行交叉验证训练
         print("\n--- 开始交叉验证训练 ---")
@@ -319,6 +363,12 @@ def main():
   
   # 推理模式
   python main.py --mode inference --model model.h5 --images img1.jpg img2.jpg
+  
+  # 使用单个模型训练
+  python main.py --mode train --feature-model efficientnet
+  
+  # 使用ResNet训练
+  python main.py --mode train --feature-model resnet --epochs 50
         """
     )
     
@@ -338,6 +388,8 @@ def main():
                        help='批量大小 (覆盖配置文件)')
     parser.add_argument('--learning-rate', type=float,
                        help='学习率 (覆盖配置文件)')
+    parser.add_argument('--feature-model', type=str, dest='model_name_arg', 
+                       help='特征提取模型选择: all, efficientnet, resnet, densenet, vgg16')
     
     args = parser.parse_args()
     
@@ -356,6 +408,8 @@ def main():
         config.set('batch_size', args.batch_size)
     if args.learning_rate:
         config.set('learning_rate', args.learning_rate)
+    if args.model_name_arg:
+        config.set('model_name', args.model_name_arg)
     
     # 显示配置
     config.print_config()

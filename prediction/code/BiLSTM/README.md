@@ -29,11 +29,13 @@ BiLSTM/
 
 ## 🚀 核心特性
 
-### 🎯 多模型特征融合
-- **EfficientNetV2M**: 高效特征提取 (512维)
-- **ResNet152V2**: 深度残差网络特征 (512维)  
-- **DenseNet201**: 密集连接网络特征 (512维)
-- **总特征维度**: 1536维融合特征
+### 🎯 模型选择策略
+- **灵活模型选择**: 支持单模型或多模型融合
+- **EfficientNetV2M**: 高效特征提取 (1280维原始特征)
+- **ResNet152V2**: 深度残差网络特征 (2048维原始特征)  
+- **DenseNet201**: 密集连接网络特征 (1920维原始特征)
+- **VGG16**: 经典卷积网络特征 (512维原始特征)
+- **多模型融合**: 4个模型融合 (5760维 = 1280+2048+1920+512)
 
 ### 🔍 STORK预处理管道
 - **Hough圆检测**: 96.2%成功率的培养皿边界自动检测
@@ -251,10 +253,22 @@ python main.py --create-config
 #### 🧠 模型架构参数
 ```json
 {
-  "feature_dim": 1536,        // 特征维度 (3个模型×512维)
+  "model_name": "all",        // 模型选择: all, efficientnet, resnet, densenet, vgg16
+  "feature_dim": 5760,        // 特征维度 (自动根据model_name调整)
   "lstm_units": 128,          // LSTM单元数量
   "dropout_rate": 0.3,        // Dropout比率 (0.0-1.0)
   "learning_rate": 0.001      // 学习率
+}
+```
+
+**🔧 模型选择与特征维度对应关系**：
+```json
+{
+  "all": 5760,          // 多模型融合: 1280+2048+1920+512
+  "efficientnet": 1280, // EfficientNetV2M原始特征维度
+  "resnet": 2048,       // ResNet152V2原始特征维度
+  "densenet": 1920,     // DenseNet201原始特征维度
+  "vgg16": 512          // VGG16原始特征维度
 }
 ```
 
@@ -296,6 +310,205 @@ python main.py --create-config
   "results_save_dir": "bilstm_results", // 结果保存目录
   "verbose": 1                          // 详细输出级别 (0-2)
 }
+```
+
+### 📝 JSON配置文件详细指南
+
+#### 🛠️ 创建配置文件
+
+**方式1: 使用命令行生成默认配置**
+```bash
+cd /path/to/BiLSTM
+python main.py --create-config
+```
+这将创建 `bilstm_config.json` 文件包含所有默认参数。
+
+**方式2: 手动创建配置文件**
+```bash
+# 创建自定义配置文件
+vim my_bilstm_config.json
+```
+
+#### 📋 完整配置文件模板
+```json
+{
+  "data_root": "/Users/your_username/data/embryo_project",
+  "image_folder": "image",
+  "score_dict_path": "score_dict.json",
+  "cache_dir": "bilstm_feature_cache",
+  
+  "model_name": "all",
+  "feature_dim": 5760,
+  "lstm_units": 128,
+  "dropout_rate": 0.3,
+  "learning_rate": 0.001,
+  
+  "epochs": 100,
+  "batch_size": 32,
+  "patience": 15,
+  "validation_split": 0.3,
+  
+  "n_folds": 4,
+  "test_ratio": 0.3,
+  "random_state": 42,
+  
+  "img_size": 224,
+  "apply_petri_crop": true,
+  "apply_center_crop": true,
+  "use_augmentation": true,
+  
+  "use_cache": true,
+  "force_recompute": false,
+  "model_save_path": "bilstm_model.h5",
+  "results_save_dir": "bilstm_results",
+  "verbose": 1
+}
+```
+
+#### 🎯 关键配置项说明
+
+**💡 模型选择配置**
+```json
+// 🔥 重要：模型选择会自动调整特征维度
+{
+  "model_name": "efficientnet",  // 单模型选择
+  "feature_dim": 1280           // 系统自动设置，无需手动修改
+}
+
+// 或者
+{
+  "model_name": "all",     // 多模型融合
+  "feature_dim": 5760     // 系统自动设置
+}
+```
+
+**📁 数据路径配置**
+```json
+{
+  "data_root": "/absolute/path/to/your/data",  // 必须是绝对路径
+  "image_folder": "image",                     // 相对于data_root的图像目录
+  "score_dict_path": "score_dict.json"        // 相对于data_root的评分文件
+}
+```
+
+**⚡ 性能调优配置**
+```json
+// GPU内存不足时
+{
+  "batch_size": 16,      // 减小批量大小
+  "lstm_units": 64       // 减少LSTM单元数
+}
+
+// 训练速度优化
+{
+  "batch_size": 64,      // 增大批量大小
+  "epochs": 50,          // 减少训练轮数
+  "use_cache": true      // 启用特征缓存
+}
+```
+
+#### 🔧 不同场景的配置示例
+
+**🚀 快速测试配置** (`quick_test_config.json`)
+```json
+{
+  "data_root": "/your/data/path",
+  "model_name": "vgg16",      // 使用最轻量的模型
+  "epochs": 20,               // 快速训练
+  "batch_size": 64,           // 大批量
+  "n_folds": 2,              // 少量折数
+  "patience": 5,             // 快速早停
+  "use_cache": true,         // 启用缓存
+  "verbose": 2               // 详细输出
+}
+```
+
+**🎯 高精度训练配置** (`high_accuracy_config.json`)
+```json
+{
+  "data_root": "/your/data/path",
+  "model_name": "all",        // 使用全部模型
+  "epochs": 200,              // 充分训练
+  "batch_size": 16,           // 小批量提高稳定性
+  "n_folds": 5,              // 更多交叉验证折数
+  "patience": 30,            // 更大的早停耐心
+  "learning_rate": 0.0001,   // 更小的学习率
+  "dropout_rate": 0.4,       // 更强的正则化
+  "use_augmentation": true   // 启用数据增强
+}
+```
+
+**💻 低内存配置** (`low_memory_config.json`)
+```json
+{
+  "data_root": "/your/data/path",
+  "model_name": "vgg16",      // 单个小模型
+  "batch_size": 8,            // 小批量
+  "lstm_units": 64,           // 减少LSTM单元
+  "epochs": 100,
+  "use_cache": true,          // 启用缓存避免重复计算
+  "force_recompute": false
+}
+```
+
+**🔬 实验对比配置**
+```json
+// EfficientNet实验
+{
+  "data_root": "/your/data/path",
+  "model_name": "efficientnet",
+  "results_save_dir": "results_efficientnet",
+  "model_save_path": "model_efficientnet.h5"
+}
+
+// ResNet实验  
+{
+  "data_root": "/your/data/path",
+  "model_name": "resnet",
+  "results_save_dir": "results_resnet",
+  "model_save_path": "model_resnet.h5"
+}
+```
+
+#### 🚨 配置注意事项
+
+**❌ 常见错误**
+```json
+// 错误：使用相对路径
+{
+  "data_root": "./data"  // ❌ 应该使用绝对路径
+}
+
+// 错误：手动设置特征维度
+{
+  "model_name": "efficientnet",
+  "feature_dim": 1536  // ❌ 不匹配，系统会自动调整为1280
+}
+
+// 错误：JSON语法错误
+{
+  "epochs": 100,  // ❌ 最后一行不应有逗号
+}
+```
+
+**✅ 正确配置**
+```json
+{
+  "data_root": "/Users/username/project/data",  // ✅ 绝对路径
+  "model_name": "efficientnet",                 // ✅ 让系统自动调整feature_dim
+  "epochs": 100                                 // ✅ 最后一行无逗号
+}
+```
+
+#### 🔧 配置验证
+
+**使用配置前验证**
+```bash
+# 验证JSON格式
+python -c "import json; json.load(open('your_config.json'))"
+
+# 验证配置完整性
+python main.py --config your_config.json --mode train --help
 ```
 
 ### 🔧 参数调优建议
@@ -390,7 +603,14 @@ python main.py --mode train \
   --config bilstm_config.json \
   --epochs 50 \
   --batch-size 16 \
-  --learning-rate 0.0001
+  --learning-rate 0.0001 \
+  --feature-model efficientnet
+
+# 快速切换模型对比实验
+python main.py --mode train --feature-model efficientnet --epochs 50
+python main.py --mode train --feature-model resnet --epochs 50  
+python main.py --mode train --feature-model densenet --epochs 50
+python main.py --mode train --feature-model all --epochs 50
 ```
 
 ### 📊 训练过程监控
@@ -426,7 +646,13 @@ python main.py --mode train \
 📊 训练集: 875 样本, 验证集: 250 样本, 测试集: 125 样本
 
 🧠 创建BiLSTM模型...
-特征维度: 1536, LSTM单元: 128, Dropout: 0.3
+特征维度: 5760, LSTM单元: 128, Dropout: 0.3
+✅ 特征提取器初始化完成 (模式: all)
+   - EfficientNetV2M: 1280维
+   - ResNet152V2: 2048维
+   - DenseNet201: 1920维
+   - VGG16: 512维
+   - 总特征维度: 5760维
 
 🏋️ 开始训练...
 Epoch 1/100: loss=0.8234, val_loss=0.7156, mae=0.6123, val_mae=0.5892
@@ -609,7 +835,19 @@ python main.py --mode train --learning-rate 0.0001 \
 
 ### 🧠 BiLSTM架构
 ```python
-Input(shape=(None, 1536))
+# 多模型融合版本 (model_name="all")
+Input(shape=(None, 5760))  # 1280+2048+1920+512
+    ↓
+Bidirectional(LSTM(128, dropout=0.3))
+    ↓
+TimeDistributed(Dense(64, activation='relu'))
+    ↓  
+TimeDistributed(Dropout(0.3))
+    ↓
+TimeDistributed(Dense(1, activation='linear'))  # 回归输出
+
+# 单模型版本示例 (model_name="efficientnet")
+Input(shape=(None, 1280))  # EfficientNetV2M原始特征
     ↓
 Bidirectional(LSTM(128, dropout=0.3))
     ↓
