@@ -5,6 +5,7 @@
 !**/*.R
 !**/*.Rmd
 !**/*.py
+!**/*.md
 !**/*.ipynb
 !api/code/*.js
 .Rproj.user
