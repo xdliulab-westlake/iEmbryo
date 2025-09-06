@@ -52,6 +52,7 @@ from .cross_validation import (
     assess_model_stability,
     ensemble_predictions,
     stratified_cross_validation,
+    stratified_cross_validation_with_cache,
     validate_cv_setup
 )
 
@@ -77,7 +78,8 @@ from .utils import (
     create_callbacks,
     print_system_info,
     validate_data_shapes,
-    safe_divide
+    safe_divide,
+    generate_score_dict_from_csv
 )
 
 __version__ = "2.0.0"
@@ -114,6 +116,7 @@ __all__ = [
     'assess_model_stability',
     'ensemble_predictions',
     'stratified_cross_validation',
+    'stratified_cross_validation_with_cache',
     'validate_cv_setup',
     
     # 可视化
@@ -135,5 +138,6 @@ __all__ = [
     'create_callbacks',
     'print_system_info',
     'validate_data_shapes',
-    'safe_divide'
+    'safe_divide',
+    'generate_score_dict_from_csv'
 ]

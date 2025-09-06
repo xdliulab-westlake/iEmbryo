@@ -24,9 +24,10 @@ from BiLSTM import (
     create_model,
     train_model,
     perform_logistic_regression,
-    stratified_cross_validation,
+    stratified_cross_validation_with_cache,
     create_cv_visualization,
-    cleanup_memory
+    cleanup_memory,
+    generate_score_dict_from_csv
 )
 
 class BiLSTMConfig:
@@ -40,6 +41,10 @@ class BiLSTMConfig:
             "image_folder": "image",
             "score_dict_path": "score_dict.json",
             "cache_dir": "bilstm_feature_cache",
+            
+            # 评分字典生成路径
+            "maindb_csv_path": "",  # MainDB.csv 文件路径
+            "filtered_csv_path": "",  # filtered_clean_embryos.csv 文件路径（可选）
             
             # 模型参数
             "model_name": "all",        # 特征提取模型: all, efficientnet, resnet, densenet, vgg16
@@ -228,7 +233,7 @@ def run_training(config):
         
         # 执行交叉验证训练
         print("\n--- 开始交叉验证训练 ---")
-        cv_results = stratified_cross_validation(
+        cv_results = stratified_cross_validation_with_cache(
             cache=cache,
             n_folds=config.get("n_folds"),
             test_ratio=config.get("test_ratio"),
@@ -369,6 +374,15 @@ def main():
   
   # 使用ResNet训练
   python main.py --mode train --feature-model resnet --epochs 50
+  
+  # 生成评分字典 - 使用命令行参数
+  python main.py --generate-score-dict --maindb MainDB.csv --filtered filtered.csv
+  
+  # 生成评分字典 - 使用配置文件
+  python main.py --generate-score-dict --config my_config.json
+  
+  # 只使用主数据库生成评分字典
+  python main.py --generate-score-dict --maindb MainDB.csv --output-score-dict my_scores.json
         """
     )
     
@@ -391,11 +405,57 @@ def main():
     parser.add_argument('--feature-model', type=str, dest='model_name_arg', 
                        help='特征提取模型选择: all, efficientnet, resnet, densenet, vgg16')
     
+    # 评分字典生成选项
+    parser.add_argument('--generate-score-dict', action='store_true',
+                       help='生成评分字典模式')
+    parser.add_argument('--maindb', type=str,
+                       help='主数据库CSV文件路径 (MainDB.csv)')
+    parser.add_argument('--filtered', type=str,
+                       help='低质量胚胎CSV文件路径 (filtered_clean_embryos.csv, 可选)')
+    parser.add_argument('--output-score-dict', type=str, default='score_dict.json',
+                       help='输出评分字典文件路径 (默认: score_dict.json)')
+    
     args = parser.parse_args()
     
     # 创建配置文件
     if args.create_config:
         create_default_config_file()
+        return
+    
+    # 生成评分字典模式
+    if args.generate_score_dict:
+        # 先加载配置以获取可能的默认路径
+        config = BiLSTMConfig(args.config)
+        
+        # 确定使用的路径（命令行参数优先级高于配置文件）
+        maindb_path = args.maindb or config.get("maindb_csv_path")
+        filtered_path = args.filtered or config.get("filtered_csv_path") or None
+        output_path = args.output_score_dict
+        
+        # 检查是否有有效的maindb路径
+        if not maindb_path:
+            print("❌ 错误: 需要提供MainDB.csv文件路径")
+            print("方法1: 使用命令行参数")
+            print("  python main.py --generate-score-dict --maindb /path/to/MainDB.csv")
+            print("方法2: 在配置文件中设置 'maindb_csv_path'")
+            print("  python main.py --generate-score-dict --config my_config.json")
+            return
+        
+        try:
+            print(f"📂 使用MainDB文件: {maindb_path}")
+            if filtered_path:
+                print(f"📂 使用过滤文件: {filtered_path}")
+            else:
+                print("📂 未提供过滤文件，只使用MainDB")
+                
+            generate_score_dict_from_csv(
+                maindb_path=maindb_path,
+                filtered_path=filtered_path,
+                output_path=output_path
+            )
+            print(f"✅ 评分字典生成完成: {output_path}")
+        except Exception as e:
+            print(f"❌ 生成评分字典失败: {e}")
         return
     
     # 加载配置
