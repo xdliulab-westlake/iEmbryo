@@ -12,19 +12,24 @@ BiLSTM胚胎分类系统是一个基于深度学习的双层机器学习管道�
 ```
 BiLSTM/
 ├── __init__.py                    # 📦 包初始化和统一导入接口
-├── BiLSTM.py                     # 🎯 主模型和缓存系统（原核心文件）
+├── main.py                       # 🚀 主训练程序和配置管理
 ├── README.md                     # 📖 项目文档
+├── bilstm_config.json            # ⚙️ 配置文件
+│
+├── feature_extractor.py          # 🔍 多模型特征提取器
+├── feature_cache.py              # 💾 智能特征缓存系统
+├── model.py                      # 🧠 BiLSTM模型构建和训练
+├── logistic.py                   # 📊 逻辑回归分类器
+├── cross_validation.py           # ✅ 交叉验证和模型评估
+├── visualization.py              # 📈 结果可视化和图表生成
+├── utils.py                      # 🔧 通用工具函数
 │
 ├── preprocessing/                # 🖼️ 图像预处理模块
 │   ├── __init__.py
 │   ├── bilstm_image_utils.py     # Hough圆检测和图像预处理
 │   └── data_loader_bilstm.py     # 多模型数据加载管道
 │
-├── utils.py                      # 🔧 通用工具函数
-├── model.py                      # 🧠 BiLSTM模型构建和训练
-├── logistic.py                   # 📊 逻辑回归分类器
-├── cross_validation.py           # ✅ 交叉验证和模型评估
-└── visualization.py              # 📈 结果可视化和图表生成
+└── BiLSTM_backup_final.py        # 📁 历史版本备份（已弃用）
 ```
 
 ## 🚀 核心特性
@@ -77,28 +82,37 @@ tqdm  # 进度条显示
 
 ### 🎯 快速开始
 
-```python
-# 方式1: 使用原有主函数（推荐用于完整训练）
-from BiLSTM.BiLSTM import main
-main()
+```bash
+# 方式1: 使用main.py主程序（推荐用于完整训练）
+cd /path/to/BiLSTM
+python main.py --mode train
+
+# 方式2: 使用配置文件训练
+python main.py --mode train --config bilstm_config.json
+
+# 方式3: 使用命令行参数快速调整
+python main.py --mode train --feature-model efficientnet --epochs 50
 ```
 
-### 🔧 模块化使用
+### 🔧 模块化编程使用
 
 ```python
-# 方式2: 从包级别直接导入（推荐）
+# 从包级别直接导入（推荐）
 from BiLSTM import (
     create_model, 
     preprocess_embryo_image, 
     configure_gpu,
-    BiLSTMFeatureCache
+    BiLSTMFeatureCache,
+    MultiModelFeatureExtractor
 )
 
-# 方式3: 模块级精确导入
+# 模块级精确导入
 from BiLSTM.model import create_model, train_model, evaluate_model
 from BiLSTM.logistic import perform_logistic_regression
 from BiLSTM.visualization import plot_training_history, plot_roc_curve
 from BiLSTM.utils import configure_gpu, cleanup_memory
+from BiLSTM.feature_extractor import MultiModelFeatureExtractor
+from BiLSTM.feature_cache import BiLSTMFeatureCache
 ```
 
 ### 🖼️ 图像预处理示例
@@ -118,24 +132,28 @@ processed_img = preprocess_embryo_image(
 ### 🧠 模型构建和训练
 
 ```python
-from BiLSTM import create_model, train_model, configure_gpu
+from BiLSTM import create_model, train_model, configure_gpu, MultiModelFeatureExtractor
 
 # 配置GPU
 configure_gpu()
 
+# 初始化特征提取器
+extractor = MultiModelFeatureExtractor(model_name='all')  # 或 'efficientnet', 'resnet' 等
+feature_dim = extractor.total_feature_dim  # 自动获取特征维度
+
 # 创建BiLSTM模型
 model = create_model(
-    feature_dim=1536,      # 多模型融合特征维度
-    lstm_units=128,        # LSTM单元数
-    dropout_rate=0.3,      # Dropout比率
-    learning_rate=0.001    # 学习率
+    feature_dim=feature_dim,   # 根据选择的模型自动设置 (5760 for 'all', 1280 for 'efficientnet' 等)
+    lstm_units=128,            # LSTM单元数
+    dropout_rate=0.3,          # Dropout比率
+    learning_rate=0.001        # 学习率
 )
 
 # 训练模型
 trained_model, history = train_model(
     X_train, y_train,
     X_val, y_val, 
-    feature_dim=1536,
+    feature_dim=feature_dim,
     save_path="/path/to/save/model.h5",
     epochs=100,
     patience=15
@@ -145,13 +163,19 @@ trained_model, history = train_model(
 ### 💾 智能缓存使用
 
 ```python
-from BiLSTM import BiLSTMFeatureCache
+from BiLSTM import BiLSTMFeatureCache, MultiModelFeatureExtractor
+
+# 初始化特征提取器
+extractor = MultiModelFeatureExtractor(model_name='all')  # 选择模型
 
 # 初始化缓存系统
 cache = BiLSTMFeatureCache(
     data_root="/path/to/embryo/images",
     cache_dir="bilstm_feature_cache"
 )
+
+# 设置特征提取器到缓存系统
+cache.set_extractor(extractor)
 
 # 获取或计算特征（自动缓存管理）
 features = cache.get_or_compute_features(
