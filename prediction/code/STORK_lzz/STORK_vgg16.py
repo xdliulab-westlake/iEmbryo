@@ -29,45 +29,118 @@ from tensorflow.keras.applications import InceptionV3, EfficientNetB0, ResNet50
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix
 import absl.logging
+import argparse
+import sys
 from preprocessing.data_loader_vgg16 import load_data_with_stork_preprocessing
 # STORK图像处理函数通过 data_loader_vgg16 间接调用，无需直接导入
 from utils.data_utils import balance_classes, check_class_distribution
 import cv2
 
-# Build a pre-trained VGG16 model with custom top layers
-def build_vgg16_model(input_shape=(224, 224, 3), num_classes=2, fine_tune_at=18, fine_tune=False):
-    # Load the VGG16 feature extractor with built-in pooling
-    feature_extractor = VGG16(
+# Build a pre-trained model with custom top layers (supports multiple architectures)
+def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_classes=2, fine_tune_at=18, fine_tune=False):
+    """
+    构建预训练模型用于胚胎分类
+    
+    Parameters:
+    - model_name: 模型名称 ('vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0')
+    - input_shape: 输入图像形状
+    - num_classes: 分类数量
+    - fine_tune_at: 从哪一层开始微调
+    - fine_tune: 是否启用微调
+    
+    Returns:
+    - 编译好的Keras模型
+    """
+    
+    model_name = model_name.lower()
+    
+    # 模型配置映射
+    model_configs = {
+        'vgg16': {
+            'model_class': VGG16,
+            'default_fine_tune_at': 18,
+            'learning_rate': 1e-4,
+            'description': 'VGG16: 经典深层网络，适合胚胎图像特征提取'
+        },
+        'resnet50': {
+            'model_class': ResNet50,
+            'default_fine_tune_at': 155,  # ResNet50的特征层更多
+            'learning_rate': 1e-4,
+            'description': 'ResNet50: 残差网络，解决深层网络梯度消失问题'
+        },
+        'inceptionv3': {
+            'model_class': InceptionV3,
+            'default_fine_tune_at': 249,  # InceptionV3层数更多
+            'learning_rate': 8e-5,  # 稍微小一点的学习率
+            'description': 'InceptionV3: 多尺度特征提取，适合复杂图像模式'
+        },
+        'efficientnetb0': {
+            'model_class': EfficientNetB0,
+            'default_fine_tune_at': 213,
+            'learning_rate': 1e-4,
+            'description': 'EfficientNetB0: 高效网络，平衡准确率和计算效率'
+        }
+    }
+    
+    if model_name not in model_configs:
+        available_models = ', '.join(model_configs.keys())
+        raise ValueError(f"不支持的模型: {model_name}. 可用模型: {available_models}")
+    
+    config = model_configs[model_name]
+    print(f"🏗️  构建模型: {model_name.upper()}")
+    print(f"📝 描述: {config['description']}")
+    
+    # 使用默认微调层数如果没有指定
+    if fine_tune_at == 18 and model_name != 'vgg16':
+        fine_tune_at = config['default_fine_tune_at']
+        print(f"🔧 使用 {model_name.upper()} 的推荐微调层数: {fine_tune_at}")
+    
+    # 加载预训练模型
+    feature_extractor = config['model_class'](
         weights="imagenet",
         include_top=False,
-        pooling="avg",  # 内置全局平均池化
+        pooling="avg",  # 全局平均池化
         input_shape=input_shape
     )
     
-    # Configure trainable layers for fine-tuning
+    # 配置可训练层
     if fine_tune:
-        for layer in feature_extractor.layers[fine_tune_at:]:
+        print(f"🔓 启用微调: 从第 {fine_tune_at} 层开始解冻")
+        for i, layer in enumerate(feature_extractor.layers[:fine_tune_at]):
+            layer.trainable = False
+        for i, layer in enumerate(feature_extractor.layers[fine_tune_at:]):
             layer.trainable = True
+            
+        trainable_count = sum(1 for layer in feature_extractor.layers if layer.trainable)
+        print(f"   可训练层数: {trainable_count}/{len(feature_extractor.layers)}")
     else:
+        print("🔒 冻结所有预训练层")
         feature_extractor.trainable = False
 
-    # Build the complete model (预处理已在data_loader中完成)
+    # 构建完整模型
     inputs = Input(shape=input_shape)
     
-    # Extract features (already includes global average pooling)
+    # 特征提取 (已包含全局平均池化)
     features = feature_extractor(inputs)
     
-    # Classification head - 直接从VGG16特征到输出
-    x = Dropout(0.5)(features)
-    outputs = Dense(1, activation='sigmoid')(x)
+    # 分类头 - 根据模型调整Dropout
+    dropout_rate = 0.5 if model_name == 'vgg16' else 0.3  # VGG16需要更强的正则化
+    x = Dropout(dropout_rate)(features)
+    outputs = Dense(1, activation='sigmoid', name='embryo_prediction')(x)
 
-    # Define the model
-    model = Model(inputs=inputs, outputs=outputs, name="embryo_classifier")
+    # 定义模型
+    model = Model(inputs=inputs, outputs=outputs, name=f"embryo_classifier_{model_name}")
 
-    # Compile the model
-    optimizer = Adam(learning_rate=1e-4, weight_decay=1e-5)
+    # 编译模型 - 使用模型特定的学习率
+    optimizer = Adam(learning_rate=config['learning_rate'], weight_decay=1e-5)
     model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
 
+    print(f"✅ {model_name.upper()} 模型构建完成!")
+    print(f"   总参数数: {model.count_params():,}")
+    print(f"   输入形状: {input_shape}")
+    print(f"   学习率: {config['learning_rate']}")
+    print(f"   Dropout率: {dropout_rate}")
+    
     return model
 
 # check gpu availability
@@ -82,7 +155,8 @@ def check_gpu_availability():
 def train_model_with_augmentation(train_images, train_labels, train_ages, train_qualities, 
                                 val_images, val_labels, val_ages, val_qualities,
                                 num_epochs=3, global_batch_size=None, img_size=224, 
-                                resume_training=True, fine_tune=False, copy_images=False):
+                                resume_training=True, fine_tune=False, copy_images=False,
+                                model_name='vgg16'):
     # Set strategy for distributed training
     strategy = tf.distribute.MirroredStrategy()
     
@@ -110,8 +184,8 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
         X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
         y_val = tf.convert_to_tensor(y_val, dtype=tf.int64)
 
-    # Define the model path and callbacks
-    model_path = 'vgg16_best_model.h5'  # Save only the best model based on validation loss
+    # Define the model path and callbacks (使用模型名称)
+    model_path = f'{model_name}_best_model.h5'  # Save only the best model based on validation loss
     initial_epoch = 0
     csv_logger = CSVLogger('training.log', append=True)
     
@@ -146,7 +220,7 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
     val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
 
     with strategy.scope():
-        model = build_vgg16_model((img_size, img_size, 3), num_classes=2)
+        model = build_pretrained_model(model_name, (img_size, img_size, 3), num_classes=2, fine_tune=fine_tune)
 
         if resume_training and os.path.exists(model_path):
             print("Loading existing model from", model_path)
@@ -207,7 +281,7 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
         except Exception as e:
             print(f"Training was interrupted due to an error: {e}")
             # Optionally save the model in case of interruption (though not needed if only saving the best model)
-            model.save('vgg16_model_at_interruption.h5')
+            model.save(f'{model_name}_model_at_interruption.h5')
             print("Model saved at interruption point.")
 
     return model, history
@@ -582,10 +656,159 @@ def show_samples(images, labels, num_samples=25):
         axes[i].axis('off')
     plt.show()
 
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description='🧬 STORK胚胎分类训练系统',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例用法:
+  python STORK_vgg16.py --model vgg16 --epochs 100 --cache
+  python STORK_vgg16.py --model resnet50 --epochs 50 --no-cache --batch-size 32
+  python STORK_vgg16.py --model efficientnetb0 --fine-tune --gradcam-samples 5
+  python STORK_vgg16.py --list-models
+
+支持的模型:
+  - vgg16: VGG16经典深层网络，适合胚胎图像特征提取
+  - resnet50: ResNet50残差网络，解决深层网络梯度消失问题  
+  - inceptionv3: InceptionV3多尺度特征提取，适合复杂图像模式
+  - efficientnetb0: EfficientNetB0高效网络，平衡准确率和计算效率
+        '''
+    )
+    
+    # 基本参数
+    parser.add_argument('--model', '-m', type=str, default='vgg16',
+                       choices=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'],
+                       help='选择预训练模型 (默认: vgg16)')
+    
+    parser.add_argument('--data-dir', type=str, default='/liaozizhuo/selected_images/train/',
+                       help='训练数据目录路径 (默认: /liaozizhuo/selected_images/train/)')
+    
+    # 训练参数
+    parser.add_argument('--epochs', '-e', type=int, default=2000,
+                       help='训练轮数 (默认: 2000)')
+    
+    parser.add_argument('--batch-size', '-b', type=int, default=64,
+                       help='每个GPU的批处理大小 (默认: 64)')
+    
+    parser.add_argument('--img-size', type=int, default=224,
+                       help='输入图像尺寸 (默认: 224)')
+    
+    parser.add_argument('--fine-tune', action='store_true',
+                       help='启用模型微调')
+    
+    parser.add_argument('--no-fine-tune', dest='fine_tune', action='store_false',
+                       help='禁用模型微调 (默认)')
+    
+    parser.set_defaults(fine_tune=True)
+    
+    # 缓存和性能参数
+    parser.add_argument('--cache', action='store_true', default=True,
+                       help='启用预处理数据缓存 (默认)')
+    
+    parser.add_argument('--no-cache', dest='cache', action='store_false',
+                       help='禁用预处理数据缓存')
+    
+    parser.add_argument('--resume', action='store_true', default=False,
+                       help='从检查点恢复训练')
+    
+    parser.add_argument('--no-resume', dest='resume', action='store_false',
+                       help='不从检查点恢复，重新开始训练 (默认)')
+    
+    # 评估和可视化参数
+    parser.add_argument('--gradcam-samples', type=int, default=10,
+                       help='Grad-CAM可视化样本数量 (默认: 10)')
+    
+    parser.add_argument('--no-gradcam', action='store_true',
+                       help='跳过Grad-CAM可视化')
+    
+    # 实用功能
+    parser.add_argument('--list-models', action='store_true',
+                       help='列出所有支持的模型并退出')
+    
+    parser.add_argument('--check-data', action='store_true',
+                       help='仅检查数据目录结构，不进行训练')
+    
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='减少输出信息')
+    
+    return parser.parse_args()
+
+def list_supported_models():
+    """列出所有支持的模型"""
+    models = {
+        'vgg16': 'VGG16: 经典深层网络，适合胚胎图像特征提取',
+        'resnet50': 'ResNet50: 残差网络，解决深层网络梯度消失问题',
+        'inceptionv3': 'InceptionV3: 多尺度特征提取，适合复杂图像模式',
+        'efficientnetb0': 'EfficientNetB0: 高效网络，平衡准确率和计算效率'
+    }
+    
+    print("🧬 支持的预训练模型:")
+    print("=" * 60)
+    for model, desc in models.items():
+        print(f"  {model:<15} - {desc}")
+    print("=" * 60)
+    print("\n📝 使用示例:")
+    print("  python STORK_vgg16.py --model resnet50 --epochs 100")
+    print("  python STORK_vgg16.py --model efficientnetb0 --fine-tune")
+
+def check_data_directory(data_dir):
+    """检查数据目录结构"""
+    print(f"🔍 检查数据目录: {data_dir}")
+    
+    if not os.path.exists(data_dir):
+        print(f"❌ 数据目录不存在: {data_dir}")
+        return False
+    
+    class_dirs = ['class_0', 'class_1']
+    total_images = 0
+    
+    for class_dir in class_dirs:
+        class_path = os.path.join(data_dir, class_dir)
+        if os.path.exists(class_path):
+            image_count = len([f for f in os.listdir(class_path) 
+                             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff'))])
+            print(f"✅ {class_dir}: {image_count} 张图像")
+            total_images += image_count
+        else:
+            print(f"❌ 缺少目录: {class_path}")
+            return False
+    
+    print(f"📊 总计: {total_images} 张图像")
+    return total_images > 0
+
 # Main function
 if __name__ == "__main__":
+    # 解析命令行参数
+    args = parse_arguments()
+    
+    # 处理特殊命令
+    if args.list_models:
+        list_supported_models()
+        sys.exit(0)
+    
+    if args.check_data:
+        success = check_data_directory(args.data_dir)
+        sys.exit(0 if success else 1)
+    
+    # 设置工作目录
     os.chdir("/liaozizhuo/scripts")
-    data_dir = '/liaozizhuo/selected_images/'
+    
+    # 显示配置信息
+    if not args.quiet:
+        print("=" * 70)
+        print("🧬 STORK胚胎分类训练系统")
+        print("=" * 70)
+        print(f"📊 使用模型: {args.model.upper()}")
+        print(f"💾 缓存模式: {'启用' if args.cache else '禁用'}")
+        print(f"📁 数据目录: {args.data_dir}")
+        print(f"🔄 训练轮数: {args.epochs}")
+        print(f"📦 批处理大小: {args.batch_size} (每GPU)")
+        print(f"🖼️  图像尺寸: {args.img_size}x{args.img_size}")
+        print(f"⚙️  微调模式: {'启用' if args.fine_tune else '禁用'}")
+        print(f"🔄 恢复训练: {'是' if args.resume else '否'}")
+        print(f"📊 Grad-CAM样本: {args.gradcam_samples if not args.no_gradcam else '跳过'}")
+        print("=" * 70)
 
     # Get all available GPUs
     gpus = tf.config.list_physical_devices('GPU')
@@ -601,16 +824,18 @@ if __name__ == "__main__":
 
     # Define the strategy for multi-GPU training
     num_gpus = len(tf.config.list_physical_devices('GPU'))
-    batch_size_per_replica = 64
+    batch_size_per_replica = args.batch_size
     global_batch_size = batch_size_per_replica * max(1, num_gpus)
 
     # 使用STORK胚胎图像预处理数据加载函数 (固定70%-15%-15%分割)
     (X_train, y_train, q_train,
      X_val, y_val, q_val,
      X_test, y_test, q_test) = load_data_with_stork_preprocessing(
-        data_dir, 
-        img_size=224, 
-        batch_size=global_batch_size
+        args.data_dir, 
+        img_size=args.img_size, 
+        batch_size=global_batch_size,
+        use_cache=args.cache,
+        model_name=args.model
     )
     
     print(f"训练集: {len(y_train)} 样本")
@@ -622,22 +847,38 @@ if __name__ == "__main__":
     model, history = train_model_with_augmentation(
         X_train, y_train, np.zeros(len(y_train)), q_train,     # 训练集 (70%)
         X_val, y_val, np.zeros(len(y_val)), q_val,             # 验证集 (15%)
-        num_epochs=2000, 
+        num_epochs=args.epochs, 
         global_batch_size=global_batch_size, 
-        img_size=224, 
-        resume_training=False,
-        fine_tune=True,
-        copy_images=False
+        img_size=args.img_size, 
+        resume_training=args.resume,
+        fine_tune=args.fine_tune,
+        copy_images=False,
+        model_name=args.model
     )
     
     # 评估模型（使用已分割的测试数据）
     print("=== 评估模型 ===")
-    latest_model_path = 'vgg16_best_model.h5'
+    latest_model_path = f'{args.model}_best_model.h5'
     if os.path.exists(latest_model_path):
         print(f"Evaluating model: {latest_model_path}")
-        evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
-                                   save_path="test_auc.pdf",
-                                   generate_gradcam_viz=True, 
-                                   num_gradcam_samples=10)  # 减少到3个样本
+        if not args.no_gradcam:
+            evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
+                                       save_path=f"{args.model}_test_auc.pdf",
+                                       generate_gradcam_viz=True, 
+                                       num_gradcam_samples=args.gradcam_samples)
+        else:
+            evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
+                                       save_path=f"{args.model}_test_auc.pdf",
+                                       generate_gradcam_viz=False, 
+                                       num_gradcam_samples=0)
     else:
         print("No model found at the specified path.")
+    
+    if not args.quiet:
+        print("\n" + "=" * 70)
+        print("🎉 训练和评估完成!")
+        print(f"📊 模型文件: {latest_model_path}")
+        print(f"📈 AUC图表: {args.model}_test_auc.pdf")
+        if not args.no_gradcam:
+            print(f"🔍 Grad-CAM结果: gradcam_test/ 目录")
+        print("=" * 70)

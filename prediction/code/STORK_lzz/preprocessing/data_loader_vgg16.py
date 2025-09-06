@@ -2,18 +2,24 @@ import os
 import tensorflow as tf
 import numpy as np
 import cv2
-from tensorflow.keras.applications.vgg16 import preprocess_input
+import pickle
+import hashlib
+from tensorflow.keras.applications.vgg16 import preprocess_input as vgg16_preprocess
+from tensorflow.keras.applications.resnet50 import preprocess_input as resnet50_preprocess  
+from tensorflow.keras.applications.inception_v3 import preprocess_input as inception_preprocess
+from tensorflow.keras.applications.efficientnet import preprocess_input as efficientnet_preprocess
 from .stork_image_utils import *
 
-# STORK + VGG16 预处理管道
-def preprocess_image_stork_vgg16(image, img_size=224, is_training=True):
+# STORK + 多种预训练模型预处理管道
+def preprocess_image_stork_universal(image, img_size=224, is_training=True, model_name='vgg16'):
     """
-    STORK胚胎图像预处理 + VGG16预处理管道
+    STORK胚胎图像预处理 + 通用预训练模型预处理管道
     
     Args:
         image: 输入图像 (tensor或numpy array)
         img_size: 目标图像尺寸
         is_training: 是否为训练模式（影响数据增强）
+        model_name: 预训练模型名称 ('vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0')
     
     Returns:
         预处理后的图像
@@ -54,19 +60,36 @@ def preprocess_image_stork_vgg16(image, img_size=224, is_training=True):
             
         image = image.numpy()
     
-    # 使用官方VGG16预处理
-    image = preprocess_input(image)
+    # 根据模型选择相应的预处理函数
+    model_name = model_name.lower()
+    
+    preprocess_functions = {
+        'vgg16': vgg16_preprocess,
+        'resnet50': resnet50_preprocess,
+        'inceptionv3': inception_preprocess,
+        'efficientnetb0': efficientnet_preprocess
+    }
+    
+    if model_name in preprocess_functions:
+        image = preprocess_functions[model_name](image)
+    else:
+        # 默认使用VGG16预处理
+        print(f"警告：未知模型 {model_name}，使用VGG16预处理")
+        image = vgg16_preprocess(image)
+        
     return image
 
 
-def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
+def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, use_cache=True, model_name='vgg16'):
     """
-    使用STORK预处理的数据加载函数
+    使用STORK预处理的数据加载函数（支持缓存）
     
     Parameters:
     - data_dir: 数据目录路径
     - img_size: 图像尺寸，默认224x224
     - batch_size: 批处理大小（此函数中未使用，保持接口一致）
+    - use_cache: 是否使用缓存，默认True
+    - model_name: 预训练模型名称，影响预处理方式
     
     Returns:
     - X_train, train_labels, train_quals: 训练集数据、标签、质量 (70%)
@@ -79,6 +102,7 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
     - 包括培养皿检测、中心方形裁剪等专业胚胎学图像处理
     - 训练集：应用数据增强 + STORK预处理
     - 验证/测试集：仅应用STORK预处理，不做数据增强
+    - 支持预处理数据缓存，大幅提升重复运行速度
     """
     image_paths = []
     labels = []
@@ -92,9 +116,9 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
         if not os.path.isdir(class_path):
             continue
             
-        if class_name.lower() in ['0', 'negative', 'no', 'non_viable']:
+        if class_name.lower() in ['0', 'negative', 'no', 'non_viable', 'class_0']:
             class_label = 0
-        elif class_name.lower() in ['1', 'positive', 'yes', 'viable']:
+        elif class_name.lower() in ['1', 'positive', 'yes', 'viable', 'class_1']:
             class_label = 1
         else:
             continue
@@ -139,9 +163,40 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
     print(f"  验证集: {val_samples} ({val_samples/total_samples*100:.1f}%)")
     print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%)")
     
+    # 缓存机制：生成缓存文件名
+    if use_cache:
+        # 基于数据目录路径、图像大小和模型名称生成唯一的缓存标识
+        cache_key = f"{data_dir}_{img_size}_{len(image_paths)}_{model_name}"
+        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
+        cache_dir = "cache_preprocessed_data"
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, f"stork_preprocessed_{cache_hash}.pkl")
+        
+        # 检查缓存是否存在
+        if os.path.exists(cache_file):
+            print(f"🚀 找到缓存文件，直接加载: {cache_file}")
+            try:
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                
+                print("✅ 缓存加载成功！跳过图像预处理步骤")
+                print(f"训练集形状: {cached_data['X_train'].shape}")
+                print(f"验证集形状: {cached_data['X_val'].shape}")
+                print(f"测试集形状: {cached_data['X_test'].shape}")
+                
+                return (cached_data['X_train'], cached_data['train_labels'], cached_data['train_quals'],
+                        cached_data['X_val'], cached_data['val_labels'], cached_data['val_quals'],
+                        cached_data['X_test'], cached_data['test_labels'], cached_data['test_quals'])
+                        
+            except Exception as e:
+                print(f"❌ 缓存加载失败: {e}")
+                print("将重新进行图像预处理...")
+        else:
+            print(f"📝 缓存文件不存在，将在预处理完成后保存: {cache_file}")
+    
     # 分别处理三个数据集
     def preprocess_images_stork(paths, is_training):
-        """使用STORK预处理图像列表"""
+        """使用STORK预处理图像列表（支持多种预训练模型）"""
         processed_images = []
         for i, path in enumerate(paths):
             if i % 1000 == 0:
@@ -159,8 +214,8 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
                     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 
                 # 使用STORK整合的预处理
-                img_processed = preprocess_image_stork_vgg16(
-                    img, img_size=img_size, is_training=is_training
+                img_processed = preprocess_image_stork_universal(
+                    img, img_size=img_size, is_training=is_training, model_name=model_name
                 )
                 processed_images.append(img_processed)
                 
@@ -168,7 +223,15 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
                 print(f"处理图像 {path} 时出错: {e}")
                 # 创建黑色图像作为后备
                 fallback_img = np.zeros((img_size, img_size, 3), dtype=np.float32)
-                fallback_img = preprocess_input(fallback_img)
+                # 应用对应模型的预处理
+                model_preprocess = {
+                    'vgg16': vgg16_preprocess,
+                    'resnet50': resnet50_preprocess,
+                    'inceptionv3': inception_preprocess,
+                    'efficientnetb0': efficientnet_preprocess
+                }
+                preprocess_func = model_preprocess.get(model_name.lower(), vgg16_preprocess)
+                fallback_img = preprocess_func(fallback_img)
                 processed_images.append(fallback_img)
         
         return np.array(processed_images)
@@ -186,6 +249,29 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32):
     print(f"训练集形状: {X_train.shape}")
     print(f"验证集形状: {X_val.shape}")
     print(f"测试集形状: {X_test.shape}")
+    
+    # 保存缓存
+    if use_cache:
+        print(f"💾 保存预处理数据缓存: {cache_file}")
+        try:
+            cache_data = {
+                'X_train': X_train, 'train_labels': train_labels, 'train_quals': train_quals,
+                'X_val': X_val, 'val_labels': val_labels, 'val_quals': val_quals,
+                'X_test': X_test, 'test_labels': test_labels, 'test_quals': test_quals,
+                'img_size': img_size,
+                'data_dir': data_dir,
+                'total_samples': len(image_paths)
+            }
+            
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            print(f"✅ 缓存保存成功! 下次运行将直接加载预处理数据")
+            print(f"缓存文件大小: {os.path.getsize(cache_file) / (1024*1024):.1f} MB")
+            
+        except Exception as e:
+            print(f"❌ 缓存保存失败: {e}")
+            print("不影响训练过程，继续执行...")
     
     return (X_train, train_labels, train_quals,
             X_val, val_labels, val_quals,
