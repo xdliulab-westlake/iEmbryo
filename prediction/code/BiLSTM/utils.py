@@ -7,6 +7,7 @@ import os
 import gc
 import time
 import random
+import json
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -369,6 +370,86 @@ def safe_divide(a, b, default=0.0):
         Result of a/b or default if b is zero
     """
     return default if b == 0 else a / b
+
+def generate_embryo_info_from_score_dict(score_dict_path, output_path, data_root, image_folder="image", default_age=30):
+    """
+    从评分字典生成胚胎信息CSV文件
+    
+    Args:
+        score_dict_path (str): score_dict.json 文件路径
+        output_path (str): 输出的 embryo_info.csv 文件路径
+        data_root (str): 数据根目录路径
+        image_folder (str): 图像文件夹名称
+        default_age (int): 默认年龄
+        
+    Returns:
+        str: 生成的文件路径
+    """
+    print("=== 开始生成胚胎信息文件 ===")
+    
+    # 检查评分字典文件
+    if not os.path.exists(score_dict_path):
+        raise FileNotFoundError(f"评分字典文件不存在: {score_dict_path}")
+    
+    print(f"📂 读取评分字典: {score_dict_path}")
+    with open(score_dict_path, 'r', encoding='utf-8') as f:
+        score_dict = json.load(f)
+    print(f"✅ 成功读取 {len(score_dict)} 个胚胎评分")
+    
+    # ICM/TE映射用于质量分类
+    icm_map = {'A': 1, 'B': 2, 'C': 4}
+    te_map = {'A': 1, 'B': 3, 'C': 4}
+    
+    # BS分数到质量的映射
+    def bs_score_to_quality(bs_score):
+        """将BS分数转换为质量等级"""
+        if bs_score <= 2:
+            return "Excellent"
+        elif bs_score <= 4:
+            return "Good" 
+        elif bs_score <= 6:
+            return "Fair"
+        else:
+            return "Poor"
+    
+    # 创建胚胎信息列表
+    embryo_info_list = []
+    
+    for embryo_id, info in score_dict.items():
+        # 获取基本信息
+        bs_score = info.get("bs_score", 5.0)
+        age = info.get("age", default_age)
+        
+        # 生成质量等级
+        quality = bs_score_to_quality(bs_score)
+        
+        # 生成完整的图像路径
+        full_path = os.path.join(data_root, image_folder, embryo_id)
+        
+        embryo_info_list.append({
+            "EmbryoID": embryo_id,
+            "FullPath": full_path,
+            "EmbryoQuality": quality,
+            "Age": int(age)
+        })
+    
+    # 转换为DataFrame并保存
+    df = pd.DataFrame(embryo_info_list)
+    
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # 保存到CSV
+    df.to_csv(output_path, index=False, encoding='utf-8')
+    
+    print(f"✅ 胚胎信息文件已生成: {output_path}")
+    print(f"📊 包含 {len(df)} 条记录")
+    print("📋 质量等级分布:")
+    quality_counts = df['EmbryoQuality'].value_counts()
+    for quality, count in quality_counts.items():
+        print(f"   {quality}: {count} 个")
+    
+    return output_path
 
 def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="score_dict.json"):
     """

@@ -355,6 +355,73 @@ def create_default_config_file(config_path="bilstm_config.json"):
     print(f"✅ 默认配置文件已创建: {config_path}")
     return config_path
 
+def auto_generate_embryo_info_if_needed(config):
+    """
+    自动检查并生成胚胎信息文件（如果需要）
+    
+    Args:
+        config: BiLSTMConfig 配置对象
+    """
+    from BiLSTM.utils import generate_embryo_info_from_score_dict
+    
+    data_root = config.get("data_root")
+    score_dict_path = os.path.join(data_root, config.get("score_dict_path"))
+    embryo_info_path = config.get("embryo_info_path")
+    
+    # 如果没有配置 embryo_info_path，跳过自动生成
+    if not embryo_info_path or not embryo_info_path.strip():
+        print("📋 未配置 embryo_info_path，跳过自动生成胚胎信息文件")
+        return
+    
+    # 转换为绝对路径
+    if not os.path.isabs(embryo_info_path):
+        embryo_info_path = os.path.join(data_root, embryo_info_path)
+    
+    # 检查评分字典是否存在
+    if not os.path.exists(score_dict_path):
+        print(f"⚠️ 评分字典文件不存在: {score_dict_path}")
+        print("   请先确保评分字典已生成")
+        return
+    
+    # 检查是否需要生成胚胎信息文件
+    need_generate = False
+    
+    if not os.path.exists(embryo_info_path):
+        print(f"📝 胚胎信息文件不存在: {embryo_info_path}")
+        need_generate = True
+    else:
+        # 检查文件修改时间，如果评分字典更新，重新生成
+        score_dict_mtime = os.path.getmtime(score_dict_path)
+        embryo_info_mtime = os.path.getmtime(embryo_info_path)
+        
+        if score_dict_mtime > embryo_info_mtime:
+            print(f"📝 评分字典已更新，需要重新生成胚胎信息文件")
+            need_generate = True
+        else:
+            print(f"✅ 胚胎信息文件已存在且是最新的: {embryo_info_path}")
+    
+    # 如果需要生成，自动生成胚胎信息文件
+    if need_generate:
+        print(f"\n🔄 自动生成胚胎信息文件...")
+        print(f"📂 评分字典文件: {score_dict_path}")
+        print(f"📂 目标文件: {embryo_info_path}")
+        
+        try:
+            generate_embryo_info_from_score_dict(
+                score_dict_path=score_dict_path,
+                output_path=embryo_info_path,
+                data_root=data_root,
+                image_folder=config.get("image_folder")
+            )
+            print(f"✅ 自动生成胚胎信息文件完成: {embryo_info_path}")
+            
+        except Exception as e:
+            print(f"❌ 自动生成胚胎信息文件失败: {e}")
+            print("   请检查评分字典文件格式是否正确")
+            return
+    
+    print()  # 添加空行分隔
+
 def auto_generate_score_dict_if_needed(config):
     """
     自动检查并生成评分字典（如果需要）
@@ -544,6 +611,9 @@ def main():
     
     # 自动检查并生成评分字典（如果需要）
     auto_generate_score_dict_if_needed(config)
+    
+    # 自动检查并生成胚胎信息文件（如果需要）
+    auto_generate_embryo_info_if_needed(config)
     
     # 根据模式执行
     if args.mode == 'train':

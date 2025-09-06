@@ -345,22 +345,95 @@ python main.py --create-config
 # 这将生成 bilstm_config.json 文件，包含所有默认参数
 ```
 
+### 🚀 配置文件快速设置指南
+
+#### 1️⃣ 创建配置文件
+```bash
+# 方式1：使用系统自动创建
+cd /path/to/BiLSTM
+python main.py --create-config
+
+# 方式2：手动创建
+touch bilstm_config.json
+```
+
+#### 2️⃣ 基础配置示例
+```json
+{
+  "data_root": "/Users/your_username/data/embryo_project",
+  "image_folder": "image",
+  "score_dict_path": "score_dict.json",
+  "embryo_info_path": "BiLSTM/embryo_info.csv",
+  
+  "model_name": "efficientnet",
+  "epochs": 50,
+  "batch_size": 32,
+  
+  "use_cache": true,
+  "verbose": 1
+}
+```
+
+#### 3️⃣ 验证配置文件
+```bash
+# 检查JSON格式是否正确
+python -c "import json; print('✅ 配置文件格式正确' if json.load(open('bilstm_config.json')) else '❌ 配置文件格式错误')"
+
+# 验证路径是否存在
+python main.py --config bilstm_config.json --mode train --help
+```
+
+#### 4️⃣ 使用配置文件训练
+```bash
+# 使用自定义配置训练
+python main.py --mode train --config bilstm_config.json
+
+# 配置文件 + 命令行参数覆盖
+python main.py --mode train --config bilstm_config.json --epochs 100 --batch-size 16
+```
+
 ### 🎛️ 核心参数说明
 
 #### 📁 数据路径参数
+
+**🔑 关键配置项**：
 ```json
 {
-  "data_root": "/path/to/your/data",           // 数据根目录
+  "data_root": "/path/to/your/data",           // 数据根目录（必须是绝对路径）
   "image_folder": "image",                    // 图像文件夹名称
   "score_dict_path": "score_dict.json",       // 分数字典文件路径
   "cache_dir": "bilstm_feature_cache",        // 特征缓存目录
   
-  // 🆕 备份文件风格数据结构支持
-  "embryo_info_path": "/path/to/embryo_info.csv",    // 胚胎图像信息文件路径 (包含EmbryoID, FullPath等列)
+  // 🆕 备份文件风格数据结构支持（推荐）
+  "embryo_info_path": "BiLSTM/embryo_info.csv",    // 胚胎图像信息文件路径 (自动生成)
   
-  // 🔄 自动评分字典生成功能（传统方式）
-  "maindb_csv_path": "/path/to/MainDB.csv",           // 主数据库CSV文件路径
-  "filtered_csv_path": "/path/to/filtered_embryos.csv" // 低质量胚胎CSV文件路径（可选）
+  // 🔄 自动评分字典生成功能（传统方式，可选）
+  "maindb_csv_path": "",                           // 主数据库CSV文件路径
+  "filtered_csv_path": ""                          // 低质量胚胎CSV文件路径（可选）
+}
+```
+
+**⚠️ 重要说明**：
+- `data_root`: 必须使用绝对路径（如：`/Users/username/project/data`）
+- `embryo_info_path`: 系统会根据`score_dict.json`自动生成此文件
+- `maindb_csv_path`: 如果为空，跳过自动生成评分字典功能
+- 路径中包含空格时请使用双引号包围
+
+**📝 路径设置示例**：
+```json
+// ✅ 正确的路径配置
+{
+  "data_root": "/Users/lzz/Documents/GitHub/IVF_AI/prediction/code",
+  "image_folder": "image",
+  "score_dict_path": "score_dict.json",
+  "embryo_info_path": "BiLSTM/embryo_info.csv"
+}
+
+// ❌ 错误的路径配置  
+{
+  "data_root": "./data",           // ❌ 不要使用相对路径
+  "image_folder": "../images",     // ❌ 不要使用相对路径
+  "score_dict_path": ""            // ❌ 不能为空
 }
 ```
 
@@ -540,7 +613,11 @@ vim my_bilstm_config.json
 **🚀 快速测试配置** (`quick_test_config.json`)
 ```json
 {
-  "data_root": "/your/data/path",
+  "data_root": "/Users/lzz/Documents/GitHub/IVF_AI/prediction/code",
+  "image_folder": "image",
+  "score_dict_path": "score_dict.json", 
+  "embryo_info_path": "BiLSTM/embryo_info.csv",
+  
   "model_name": "vgg16",      // 使用最轻量的模型
   "epochs": 20,               // 快速训练
   "batch_size": 64,           // 大批量
@@ -548,6 +625,47 @@ vim my_bilstm_config.json
   "patience": 5,             // 快速早停
   "use_cache": true,         // 启用缓存
   "verbose": 2               // 详细输出
+}
+```
+
+**💡 配置文件使用技巧**：
+
+1. **快速开始**：
+```bash
+# 第一次使用，创建默认配置
+python main.py --create-config
+
+# 编辑配置文件，只需修改关键路径
+vim bilstm_config.json  # 修改 data_root 即可
+```
+
+2. **路径配置检查**：
+```bash
+# 使用配置前先验证路径
+python -c "
+import json, os
+config = json.load(open('bilstm_config.json'))
+data_root = config['data_root']
+image_path = os.path.join(data_root, config['image_folder'])
+score_path = os.path.join(data_root, config['score_dict_path'])
+print(f'✅ 数据根目录: {data_root}' if os.path.exists(data_root) else f'❌ 数据根目录不存在: {data_root}')
+print(f'✅ 图像目录: {image_path}' if os.path.exists(image_path) else f'❌ 图像目录不存在: {image_path}')  
+print(f'✅ 评分文件: {score_path}' if os.path.exists(score_path) else f'❌ 评分文件不存在: {score_path}')
+"
+```
+
+3. **模型选择建议**：
+```json
+// 💻 内存有限时使用单模型
+{
+  "model_name": "efficientnet",  // 推荐：平衡性能和效率
+  "batch_size": 16
+}
+
+// 🚀 性能优先时使用多模型
+{
+  "model_name": "all",           // 最佳精度
+  "batch_size": 32
 }
 ```
 
@@ -598,75 +716,6 @@ vim my_bilstm_config.json
 }
 ```
 
-**🆕 备份文件风格配置示例**
-```json
-// 使用备份文件风格数据结构的完整配置
-{
-  "data_root": "/your/data/path",
-  "image_folder": "image",
-  "score_dict_path": "score_dict.json",
-  "cache_dir": "bilstm_feature_cache",
-  
-  // 🔑 核心：备份文件风格配置
-  "embryo_info_path": "/your/data/path/embryo_info.csv",
-  
-  "model_name": "efficientnet",        // 推荐使用单模型进行测试
-  "feature_dim": 1280,
-  "lstm_units": 128,
-  "dropout_rate": 0.3,
-  "learning_rate": 0.001,
-  
-  "epochs": 50,                        // 较少轮数用于快速测试
-  "batch_size": 32,
-  "patience": 15,
-  "validation_split": 0.3,
-  
-  "n_folds": 2,                        // 较少折数用于小数据集
-  "test_ratio": 0.3,
-  "random_state": 42,
-  
-  "img_size": 224,
-  "apply_petri_crop": true,
-  "apply_center_crop": true,
-  "use_augmentation": true,
-  
-  "use_cache": true,
-  "force_recompute": false,
-  "model_save_path": "bilstm_backup_style_model.h5",
-  "results_save_dir": "bilstm_backup_style_results",
-  "verbose": 1
-}
-```
-
-#### 🚨 配置注意事项
-
-**❌ 常见错误**
-```json
-// 错误：使用相对路径
-{
-  "data_root": "./data"  // ❌ 应该使用绝对路径
-}
-
-// 错误：手动设置特征维度
-{
-  "model_name": "efficientnet",
-  "feature_dim": 1536  // ❌ 不匹配，系统会自动调整为1280
-}
-
-// 错误：JSON语法错误
-{
-  "epochs": 100,  // ❌ 最后一行不应有逗号
-}
-```
-
-**✅ 正确配置**
-```json
-{
-  "data_root": "/Users/username/project/data",  // ✅ 绝对路径
-  "model_name": "efficientnet",                 // ✅ 让系统自动调整feature_dim
-  "epochs": 100                                 // ✅ 最后一行无逗号
-}
-```
 
 #### 🔧 配置验证
 
@@ -679,19 +728,6 @@ python -c "import json; json.load(open('your_config.json'))"
 python main.py --config your_config.json --mode train --help
 ```
 
-### 🔧 参数调优建议
-
-#### 🚀 性能优化
-- **GPU内存不足**: 减小 `batch_size` (32→16→8)
-- **训练太慢**: 增大 `batch_size`，减少 `epochs`
-- **过拟合**: 增大 `dropout_rate` (0.3→0.5)，减少 `lstm_units`
-- **欠拟合**: 减小 `dropout_rate`，增大 `lstm_units`
-
-#### 🎯 精度提升
-- **数据不平衡**: 启用 `use_augmentation=true`
-- **泛化性能差**: 增加 `n_folds` (4→5→10)
-- **收敛慢**: 调整 `learning_rate` (0.001→0.01 或 0.0001)
-- **早停过早**: 增大 `patience` (15→25→50)
 
 ## 🚀 训练指南
 
@@ -713,86 +749,6 @@ pip install matplotlib>=3.5.0
 pip install tqdm
 ```
 
-#### 2. 数据目录结构
-```
-your_data_root/
-├── image/                    # 胚胎图像文件夹
-│   ├── embryo_001.jpg
-│   ├── embryo_002.jpg
-│   └── ...
-├── score_dict.json           # 胚胎评分数据
-└── bilstm_feature_cache/     # 特征缓存目录 (自动创建)
-```
-
-#### 3. 数据格式要求
-
-**🆕 备份文件风格数据结构（推荐）：**
-
-BiLSTM系统现在支持结构化的备份文件风格数据组织方式，提供更灵活和规范的数据管理：
-
-**embryo_info.csv** - 胚胎图像信息文件：
-```csv
-EmbryoID,FullPath,EmbryoQuality,Age
-embryo_001.jpg,/path/to/image/embryo_001.jpg,Good,32
-embryo_002.jpg,/path/to/image/embryo_002.jpg,Excellent,28
-embryo_003.jpg,/path/to/image/embryo_003.jpg,Fair,35
-```
-
-**score_dict.json** - 胚胎评分数据：
-```json
-{
-  "embryo_001.jpg": {
-    "bs_score": 4.2
-  },
-  "embryo_002.jpg": {
-    "bs_score": 3.8
-  },
-  "embryo_003.jpg": {
-    "bs_score": 5.1
-  }
-}
-```
-
-**配置要求**：
-```json
-{
-  "embryo_info_path": "/path/to/embryo_info.csv",  // 🆕 胚胎信息文件路径
-  "score_dict_path": "score_dict.json"
-}
-```
-
-**🔄 自动生成模式 - CSV格式要求（传统方式）：**
-
-**MainDB.csv** 格式示例：
-```csv
-EmbryoID,Age,ICM,TE
-embryo_001,32,A,A
-embryo_002,28,B,C
-embryo_003,35,C,B
-```
-
-**filtered_embryos.csv** 格式示例（可选）：
-```csv
-EmbryoID,Age,EmbryoQuality
-embryo_004,30,poor
-embryo_005,33,poor
-```
-
-**传统 score_dict.json** 格式示例：
-```json
-{
-  "embryo_001.jpg": {
-    "bs_score": 4.2,      // 囊胚评分 (回归目标)
-    "age": 32,            // 母体年龄
-    "quality": 1          // 胚胎质量分类 (0或1)
-  },
-  "embryo_002.jpg": {
-    "bs_score": 3.8,
-    "age": 28, 
-    "quality": 0
-  }
-}
-```
 
 ### 🏃‍♂️ 快速开始训练
 
@@ -834,78 +790,6 @@ python main.py --mode train --feature-model densenet --epochs 50
 python main.py --mode train --feature-model all --epochs 50
 ```
 
-### 📊 训练过程监控
-
-#### 实时输出示例
-```
-=== BiLSTM 配置参数 ===
-数据路径:
-  data_root: /your/data/path
-  image_folder: image
-  score_dict_path: score_dict.json
-  cache_dir: bilstm_feature_cache
-
-🚀 开始 BiLSTM 胚胎分类系统训练
-==========================================
-
---- 配置GPU环境 ---
-✅ GPU配置完成: NVIDIA GeForce RTX 3080
-
---- 路径验证 ---
-✅ 数据根目录: /your/data/path
-✅ 图像文件夹: /your/data/path/image
-✅ 分数字典: /your/data/path/score_dict.json
-
---- 初始化特征缓存系统 ---
-📁 特征缓存目录: bilstm_feature_cache
-🔍 发现 1250 个图像文件
-💾 缓存命中率: 95.2% (1191/1250)
-
---- 开始交叉验证训练 ---
-
-=== 第 1 折交叉验证 ===
-📊 训练集: 875 样本, 验证集: 250 样本, 测试集: 125 样本
-
-🧠 创建BiLSTM模型...
-特征维度: 5760, LSTM单元: 128, Dropout: 0.3
-✅ 特征提取器初始化完成 (模式: all)
-   - EfficientNetV2M: 1280维
-   - ResNet152V2: 2048维
-   - DenseNet201: 1920维
-   - VGG16: 512维
-   - 总特征维度: 5760维
-
-🏋️ 开始训练...
-Epoch 1/100: loss=0.8234, val_loss=0.7156, mae=0.6123, val_mae=0.5892
-Epoch 2/100: loss=0.7456, val_loss=0.6789, mae=0.5834, val_mae=0.5623
-...
-Epoch 23/100: 早停触发, 最佳验证MAE: 0.4123
-
-📊 第1折逻辑回归分析
-训练准确率: 0.8571, AUC: 0.9234
-验证准确率: 0.8400, AUC: 0.9156
-测试准确率: 0.8480, AUC: 0.9189
-
-=== 第 2 折交叉验证 ===
-...
-```
-
-### 🎯 训练完成后的输出
-
-#### 最终结果显示
-```
-🎉 训练完成！最终结果:
-==========================================
-逻辑回归平均准确率: 0.8425 ± 0.0156
-逻辑回归平均AUC: 0.9167 ± 0.0098
-BiLSTM平均MAE: 0.4234 ± 0.0234
-
-✅ 结果已保存到: bilstm_results/cv_results.json
-✅ 可视化图表已生成:
-   📈 bilstm_results/training_curves.png
-   📊 bilstm_results/confusion_matrices.png
-   🎯 bilstm_results/roc_curves.png
-```
 
 #### 生成的文件结构
 ```
@@ -920,137 +804,6 @@ bilstm_results/
 └── fold_4_model.h5          # 第4折最佳模型
 ```
 
-### 🔮 推理模式使用
-
-#### 单个模型推理
-```bash
-# 使用训练好的模型进行预测
-python main.py --mode inference \
-  --model bilstm_results/fold_1_model.h5 \
-  --images image/embryo_001.jpg image/embryo_002.jpg
-
-# 输出示例:
-=== 预测结果 ===
-1. embryo_001.jpg: BS分数 = 4.23
-2. embryo_002.jpg: BS分数 = 3.78
-```
-
-#### 批量预测脚本
-```python
-# batch_predict.py
-from BiLSTM import load_trained_model, BiLSTMFeatureCache, batch_predict_bs_scores
-import glob
-
-# 加载模型
-model = load_trained_model('bilstm_results/fold_1_model.h5')
-
-# 获取所有图像
-image_paths = glob.glob('/path/to/new/images/*.jpg')
-
-# 初始化缓存
-cache = BiLSTMFeatureCache(
-    data_root='/path/to/data',
-    cache_dir='bilstm_feature_cache'
-)
-
-# 提取特征并预测
-features = cache.get_or_compute_features(
-    image_paths=image_paths,
-    use_cache=True,
-    training=False
-)
-
-predictions = batch_predict_bs_scores(model, features)
-
-# 保存结果
-results = dict(zip(image_paths, predictions))
-with open('batch_predictions.json', 'w') as f:
-    json.dump(results, f, indent=2)
-```
-
-### 🐛 训练问题排查
-
-#### 常见错误及解决方案
-
-**1. GPU内存不足**
-```
-ResourceExhaustedError: OOM when allocating tensor
-```
-解决方案:
-```bash
-# 减小批量大小
-python main.py --mode train --batch-size 16
-
-# 或修改配置文件
-{
-  "batch_size": 8,
-  "lstm_units": 64  // 同时减少模型复杂度
-}
-```
-
-**2. 数据路径错误**
-```
-❌ 图像文件夹: /path/to/image (不存在)
-```
-解决方案:
-```bash
-# 检查并修正配置文件中的路径
-{
-  "data_root": "/correct/path/to/your/data",
-  "image_folder": "image"
-}
-```
-
-**3. 特征缓存冲突**
-```
-缓存版本不匹配，正在清理缓存...
-```
-解决方案:
-```bash
-# 清理缓存重新开始
-rm -rf bilstm_feature_cache/
-
-# 或使用强制重计算
-python main.py --mode train --config config.json
-# 在config.json中设置 "force_recompute": true
-```
-
-**4. 训练不收敛**
-```
-验证MAE一直在 0.8 左右震荡
-```
-解决方案:
-```bash
-# 调整学习率和早停耐心
-python main.py --mode train --learning-rate 0.0001 \
-  --config modified_config.json
-
-# modified_config.json:
-{
-  "learning_rate": 0.0001,
-  "patience": 30,
-  "epochs": 200
-}
-```
-
-## 📊 性能基准
-
-### 🎯 分类性能
-- **准确率**: > 85%
-- **AUC**: > 0.90
-- **精确率**: > 82%
-- **召回率**: > 88%
-
-### ⚡ 计算效率
-- **Hough圆检测成功率**: 96.2%
-- **特征缓存加速**: 9倍性能提升
-- **GPU训练支持**: CUDA + CUDNN优化
-- **内存管理**: 自动垃圾回收和GPU清理
-
-### 📈 模型稳定性
-- **4折交叉验证变异系数**: < 0.10
-- **稳定性等级**: 良好-优秀
-- **重现性**: 固定随机种子确保结果可重现
 
 ## 🔬 技术细节
 
@@ -1145,7 +898,20 @@ def _build_models(self):
 
 ## 📝 更新日志
 
-### v2.2.0 (当前版本) 
+### v2.3.0 (当前版本)
+- ✅ 🆕 **自动胚胎信息文件生成系统**
+  - 🔄 自动从 `score_dict.json` 生成 `embryo_info.csv`
+  - 📊 BS分数到质量等级的智能映射 (Excellent/Good/Fair/Poor)
+  - 🕒 基于文件时间戳的自动更新检测
+  - 🎯 完全集成到训练流程的自动化生成
+  - 🛠️ 新增 `generate_embryo_info_from_score_dict()` 工具函数
+- ✅ 🆕 **配置文件详细指南**
+  - 📋 新增配置文件快速设置指南
+  - 🔧 详细的路径配置说明和验证方法
+  - 💡 不同场景的配置示例和使用技巧
+  - ⚠️ 常见配置错误和解决方案
+
+### v2.2.0 (历史版本) 
 - ✅ 🆕 **备份文件风格数据结构支持**
   - 🔄 基于 EmbryoID 和 FullPath 的结构化数据匹配
   - 📊 CSV 格式的胚胎信息管理 (embryo_info.csv)
