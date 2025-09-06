@@ -46,6 +46,9 @@ class BiLSTMConfig:
             "maindb_csv_path": "",  # MainDB.csv 文件路径
             "filtered_csv_path": "",  # filtered_clean_embryos.csv 文件路径（可选）
             
+            # 🆕 备份文件风格的数据结构支持
+            "embryo_info_path": "",  # 胚胎图像信息文件路径 (包含EmbryoID, FullPath等列)
+            
             # 模型参数
             "model_name": "all",        # 特征提取模型: all, efficientnet, resnet, densenet, vgg16
             "feature_dim": 5760,        # 自动根据model_name调整
@@ -147,7 +150,7 @@ class BiLSTMConfig:
         for section in ["数据路径", "模型参数", "训练参数", "交叉验证参数", "预处理参数"]:
             print(f"\n{section}:")
             if section == "数据路径":
-                keys = ["data_root", "image_folder", "score_dict_path", "cache_dir"]
+                keys = ["data_root", "image_folder", "score_dict_path", "cache_dir", "embryo_info_path"]
             elif section == "模型参数":
                 keys = ["model_name", "feature_dim", "lstm_units", "dropout_rate", "learning_rate"]
             elif section == "训练参数":
@@ -248,7 +251,8 @@ def run_training(config):
             use_augmentation=config.get("use_augmentation"),
             verbose=config.get("verbose"),
             random_state=config.get("random_state"),
-            score_dict_path=config.get("score_dict_path")  # 🆕 传递评分字典路径
+            score_dict_path=config.get("score_dict_path"),  # 🆕 传递评分字典路径
+            embryo_info_path=config.get("embryo_info_path")  # 🆕 传递胚胎信息文件路径
         )
         
         # 创建可视化结果
@@ -536,6 +540,7 @@ def main():
     
     # 显示配置
     config.print_config()
+    
     
     # 自动检查并生成评分字典（如果需要）
     auto_generate_score_dict_if_needed(config)

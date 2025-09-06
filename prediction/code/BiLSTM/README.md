@@ -34,6 +34,53 @@ BiLSTM/
 
 ## 🚀 核心特性
 
+### 🆕 备份文件风格数据结构
+- **结构化数据管理**: 基于EmbryoID和FullPath的标准化数据组织
+- **CSV格式胚胎信息**: 支持胚胎质量、年龄等元数据的结构化存储
+- **完整路径定位**: 支持任意路径的图像文件精确定位
+- **向后兼容**: 完全兼容传统评分字典格式，平滑迁移
+
+#### 🔄 系统架构对比
+
+**传统文件名匹配方式（已弃用）**：
+```python
+# 基于文件名的简单匹配
+image_files = os.listdir(image_folder)
+for img_file in image_files:
+    if img_file in score_dict:
+        # 处理图像和评分
+```
+
+**备份文件风格系统（当前推荐）**：
+```python
+# 基于结构化数据的匹配方式
+embryo_df = pd.read_csv(embryo_info_path)
+valid_embryos = set(embryo_df["EmbryoID"])
+available_embryo_ids = [eid for eid in valid_embryos if eid in score_data]
+
+embryo_metadata = {}
+for _, row in embryo_df.iterrows():
+    embryo_id = row["EmbryoID"]
+    if embryo_id in available_embryo_ids:
+        embryo_metadata[embryo_id] = {
+            'full_path': row["FullPath"],
+            'quality': row["EmbryoQuality"],
+            'age': row["Age"],
+            'bs_score': score_data[embryo_id]['bs_score']
+        }
+```
+
+**系统优势对比**：
+
+| 特性 | 传统方式 | 备份文件风格 |
+|------|----------|--------------|
+| 数据匹配成功率 | 依赖文件名 | 基于结构化ID ✅ |
+| 图像路径支持 | 限制单一目录 | 支持任意路径 ✅ |
+| 元数据集成 | JSON内嵌 | CSV结构化存储 ✅ |
+| 可维护性 | 中等 | 高 ✅ |
+| 扩展性 | 有限 | 灵活 ✅ |
+| 版本控制 | 困难 | 友好 ✅ |
+
 ### 🎯 模型选择策略
 - **灵活模型选择**: 支持单模型或多模型融合
 - **EfficientNetV2M**: 高效特征提取 (1280维原始特征)
@@ -99,7 +146,11 @@ python main.py --mode train --config bilstm_config.json
 # 方式3: 使用命令行参数快速调整
 python main.py --mode train --feature-model efficientnet --epochs 50
 
-# 方式4: 自动生成评分字典并训练（新功能）
+# 方式4: 🆕 备份文件风格数据结构训练（推荐）
+# 配置 embryo_info_path 后使用结构化数据训练
+python main.py --mode train --config backup_style_config.json
+
+# 方式5: 自动生成评分字典并训练（传统功能）
 # 在配置文件中设置CSV路径后，系统会自动生成score_dict.json
 python main.py --mode train --config my_config.json
 ```
@@ -304,7 +355,10 @@ python main.py --create-config
   "score_dict_path": "score_dict.json",       // 分数字典文件路径
   "cache_dir": "bilstm_feature_cache",        // 特征缓存目录
   
-  // 🆕 自动评分字典生成功能
+  // 🆕 备份文件风格数据结构支持
+  "embryo_info_path": "/path/to/embryo_info.csv",    // 胚胎图像信息文件路径 (包含EmbryoID, FullPath等列)
+  
+  // 🔄 自动评分字典生成功能（传统方式）
   "maindb_csv_path": "/path/to/MainDB.csv",           // 主数据库CSV文件路径
   "filtered_csv_path": "/path/to/filtered_embryos.csv" // 低质量胚胎CSV文件路径（可选）
 }
@@ -397,7 +451,10 @@ vim my_bilstm_config.json
   "score_dict_path": "score_dict.json",
   "cache_dir": "bilstm_feature_cache",
   
-  // 🆕 自动评分字典生成配置
+  // 🆕 备份文件风格数据结构配置（推荐）
+  "embryo_info_path": "/Users/your_username/data/embryo_info.csv",
+  
+  // 🔄 自动评分字典生成配置（传统方式）
   "maindb_csv_path": "/Users/your_username/data/MainDB.csv",
   "filtered_csv_path": "/Users/your_username/data/filtered_clean_embryos.csv",
   
@@ -453,7 +510,10 @@ vim my_bilstm_config.json
   "image_folder": "image",                     // 相对于data_root的图像目录
   "score_dict_path": "score_dict.json",       // 相对于data_root的评分文件
   
-  // 🆕 自动生成评分字典的源CSV路径
+  // 🆕 备份文件风格数据结构配置（推荐）
+  "embryo_info_path": "/absolute/path/to/embryo_info.csv",  // 胚胎信息文件路径
+  
+  // 🔄 自动生成评分字典的源CSV路径（传统方式）
   "maindb_csv_path": "/absolute/path/to/MainDB.csv",        // 主数据库文件
   "filtered_csv_path": "/absolute/path/to/filtered.csv"     // 可选的过滤数据文件
 }
@@ -535,6 +595,46 @@ vim my_bilstm_config.json
   "model_name": "resnet",
   "results_save_dir": "results_resnet",
   "model_save_path": "model_resnet.h5"
+}
+```
+
+**🆕 备份文件风格配置示例**
+```json
+// 使用备份文件风格数据结构的完整配置
+{
+  "data_root": "/your/data/path",
+  "image_folder": "image",
+  "score_dict_path": "score_dict.json",
+  "cache_dir": "bilstm_feature_cache",
+  
+  // 🔑 核心：备份文件风格配置
+  "embryo_info_path": "/your/data/path/embryo_info.csv",
+  
+  "model_name": "efficientnet",        // 推荐使用单模型进行测试
+  "feature_dim": 1280,
+  "lstm_units": 128,
+  "dropout_rate": 0.3,
+  "learning_rate": 0.001,
+  
+  "epochs": 50,                        // 较少轮数用于快速测试
+  "batch_size": 32,
+  "patience": 15,
+  "validation_split": 0.3,
+  
+  "n_folds": 2,                        // 较少折数用于小数据集
+  "test_ratio": 0.3,
+  "random_state": 42,
+  
+  "img_size": 224,
+  "apply_petri_crop": true,
+  "apply_center_crop": true,
+  "use_augmentation": true,
+  
+  "use_cache": true,
+  "force_recompute": false,
+  "model_save_path": "bilstm_backup_style_model.h5",
+  "results_save_dir": "bilstm_backup_style_results",
+  "verbose": 1
 }
 ```
 
@@ -626,7 +726,42 @@ your_data_root/
 
 #### 3. 数据格式要求
 
-**🆕 自动生成模式 - CSV格式要求：**
+**🆕 备份文件风格数据结构（推荐）：**
+
+BiLSTM系统现在支持结构化的备份文件风格数据组织方式，提供更灵活和规范的数据管理：
+
+**embryo_info.csv** - 胚胎图像信息文件：
+```csv
+EmbryoID,FullPath,EmbryoQuality,Age
+embryo_001.jpg,/path/to/image/embryo_001.jpg,Good,32
+embryo_002.jpg,/path/to/image/embryo_002.jpg,Excellent,28
+embryo_003.jpg,/path/to/image/embryo_003.jpg,Fair,35
+```
+
+**score_dict.json** - 胚胎评分数据：
+```json
+{
+  "embryo_001.jpg": {
+    "bs_score": 4.2
+  },
+  "embryo_002.jpg": {
+    "bs_score": 3.8
+  },
+  "embryo_003.jpg": {
+    "bs_score": 5.1
+  }
+}
+```
+
+**配置要求**：
+```json
+{
+  "embryo_info_path": "/path/to/embryo_info.csv",  // 🆕 胚胎信息文件路径
+  "score_dict_path": "score_dict.json"
+}
+```
+
+**🔄 自动生成模式 - CSV格式要求（传统方式）：**
 
 **MainDB.csv** 格式示例：
 ```csv
@@ -643,7 +778,7 @@ embryo_004,30,poor
 embryo_005,33,poor
 ```
 
-**或传统 score_dict.json** 格式示例：
+**传统 score_dict.json** 格式示例：
 ```json
 {
   "embryo_001.jpg": {
@@ -1010,7 +1145,18 @@ def _build_models(self):
 
 ## 📝 更新日志
 
-### v2.1.0 (当前版本)
+### v2.2.0 (当前版本) 
+- ✅ 🆕 **备份文件风格数据结构支持**
+  - 🔄 基于 EmbryoID 和 FullPath 的结构化数据匹配
+  - 📊 CSV 格式的胚胎信息管理 (embryo_info.csv)
+  - 🎯 与备份系统完全一致的数据加载逻辑
+  - 🔗 支持完整路径的图像定位和元数据集成
+- ✅ 🆕 配置参数扩展
+  - 新增 `embryo_info_path` 配置选项
+  - 向后兼容传统评分字典格式
+  - 灵活的数据结构选择支持
+
+### v2.1.0 (历史版本)
 - ✅ 🆕 自动评分字典生成系统
 - ✅ 🆕 智能CSV解析和ICM/TE评分计算
 - ✅ 🆕 文件时间检测和自动重新生成

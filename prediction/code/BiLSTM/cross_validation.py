@@ -496,7 +496,7 @@ def stratified_cross_validation_with_cache(
     cache, n_folds=4, test_ratio=0.3, feature_dim=512, lstm_units=128, 
     dropout_rate=0.3, learning_rate=0.001, epochs=100, batch_size=32, 
     patience=15, use_cache=True, use_augmentation=True, verbose=1, random_state=42,
-    score_dict_path=None
+    score_dict_path=None, embryo_info_path=None
 ):
     """
     执行完整的分层交叉验证训练流程，使用特征缓存系统
@@ -529,6 +529,7 @@ def stratified_cross_validation_with_cache(
         from .logistic import perform_logistic_regression
         import os
         import json
+        import pandas as pd
         
         # 加载评分数据
         if score_dict_path is None:
@@ -545,21 +546,107 @@ def stratified_cross_validation_with_cache(
         
         print(f"✅ 加载评分数据: {len(score_data)} 个胚胎")
         
-        # 获取图像路径列表
-        image_folder = os.path.join(cache.data_root, "image")
-        if not os.path.exists(image_folder):
-            raise FileNotFoundError(f"图像文件夹不存在: {image_folder}")
-            
-        image_files = [f for f in os.listdir(image_folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        available_images = [f for f in image_files if f in score_data]
+        # 🆕 使用备份文件风格的数据加载方式（必须提供 embryo_info_path）
+        if not embryo_info_path or not embryo_info_path.strip():
+            raise ValueError("必须提供 embryo_info_path 参数（胚胎图像信息文件路径）")
         
-        if not available_images:
-            raise ValueError("没有找到匹配的图像和评分数据")
-            
-        print(f"✅ 找到匹配的图像: {len(available_images)} 个")
+        if not os.path.exists(embryo_info_path):
+            raise FileNotFoundError(f"胚胎信息文件不存在: {embryo_info_path}")
         
-        # 构建完整路径
-        image_paths = [os.path.join(image_folder, img) for img in available_images]
+        print(f"🔄 使用备份文件风格的数据加载方式")
+        print(f"📂 胚胎信息文件: {embryo_info_path}")
+        
+        # 加载胚胎图像信息
+        embryo_df = pd.read_csv(embryo_info_path)
+        print(f"✅ 加载胚胎信息: {embryo_df.shape}")
+        
+        # 检查必要的列
+        required_columns = ['EmbryoID', 'FullPath']
+        missing_columns = [col for col in required_columns if col not in embryo_df.columns]
+        if missing_columns:
+            raise ValueError(f"胚胎信息文件缺少必要的列: {missing_columns}")
+        
+        print(f"📋 胚胎信息文件包含列: {list(embryo_df.columns)}")
+        
+        # 获取所有有效的胚胎ID（必须在评分数据中存在）
+        valid_embryos = set(embryo_df["EmbryoID"])
+        available_embryo_ids = [eid for eid in valid_embryos if eid in score_data]
+        
+        if not available_embryo_ids:
+            print("🔍 调试信息:")
+            print(f"   胚胎信息文件中的EmbryoID示例: {list(embryo_df['EmbryoID'].head())}")
+            print(f"   评分数据键示例: {list(score_data.keys())[:5]}")
+            raise ValueError("没有找到匹配的胚胎ID在评分数据中")
+        
+        print(f"✅ 找到有效胚胎: {len(available_embryo_ids)} 个")
+        
+        # 收集所有图像路径和对应的信息
+        image_info_list = []
+        embryo_metadata = {}
+        
+        for embryo_id in available_embryo_ids:
+            # 获取该胚胎的所有图像
+            embryo_images = embryo_df[embryo_df['EmbryoID'] == embryo_id].copy()
+            
+            valid_images = []
+            for _, row in embryo_images.iterrows():
+                full_path = row['FullPath']
+                if pd.notna(full_path) and os.path.exists(full_path):
+                    image_info_list.append((embryo_id, full_path))
+                    valid_images.append(full_path)
+            
+            if len(valid_images) > 0:
+                # 获取胚胎的其他信息
+                embryo_row = embryo_images.iloc[0]
+                
+                # 获取质量标签
+                if 'EmbryoQuality' in embryo_row:
+                    quality = 1 if embryo_row['EmbryoQuality'] == "good" else 0
+                elif 'Quality' in embryo_row:
+                    quality_val = embryo_row['Quality']
+                    if isinstance(quality_val, str):
+                        quality_map = {'good': 1, 'high': 1, 'excellent': 1,
+                                     'fair': 0, 'poor': 0, 'bad': 0, 'low': 0}
+                        quality = quality_map.get(quality_val.lower(), 0)
+                    else:
+                        quality = int(quality_val)
+                else:
+                    # 根据BS分数推断质量
+                    bs_score = score_data[embryo_id]['bs_score'] if isinstance(score_data[embryo_id], dict) else score_data[embryo_id]
+                    quality = 1 if bs_score <= 4 else 0
+                
+                # 获取年龄
+                age = embryo_row.get('Age', 30.0)
+                if pd.isna(age):
+                    age = 30.0
+                
+                embryo_metadata[embryo_id] = {
+                    'bs_score': score_data[embryo_id]['bs_score'] if isinstance(score_data[embryo_id], dict) else score_data[embryo_id],
+                    'quality': quality,
+                    'age': float(age),
+                    'valid_images': valid_images
+                }
+        
+        if not image_info_list:
+            raise ValueError("没有找到有效的图像文件")
+        
+        # 准备图像路径和映射
+        available_images = [os.path.basename(img_path) for _, img_path in image_info_list]
+        image_paths = [img_path for _, img_path in image_info_list]
+        embryo_id_map = {os.path.basename(img_path): embryo_id for embryo_id, img_path in image_info_list}
+        
+        print(f"✅ 找到匹配的图像: {len(image_info_list)} 个")
+        if len(image_info_list) <= 10:
+            for embryo_id, img_path in image_info_list[:10]:
+                print(f"   {os.path.basename(img_path)} -> {embryo_id}")
+        
+        # 创建映射函数
+        def get_embryo_data(img_filename):
+            """根据图像文件名获取对应的胚胎数据"""
+            embryo_id = embryo_id_map.get(img_filename)
+            if embryo_id:
+                return embryo_metadata.get(embryo_id)
+            return None
         
         # 提取特征
         print(f"🔄 开始特征提取...")
@@ -576,16 +663,16 @@ def stratified_cross_validation_with_cache(
         ages = []
         qualities = []
         
-        for img_file in available_images:
-            img_path = os.path.join(image_folder, img_file)
+        for i, img_file in enumerate(available_images):
+            img_path = image_paths[i]  # 使用实际的完整路径
             
-            if img_path in features_dict and img_file in score_data:
+            embryo_data = get_embryo_data(img_file)
+            if img_path in features_dict and embryo_data is not None:
                 features_list.append(features_dict[img_path])
                 
-                data = score_data[img_file]
-                bs_scores.append(data['bs_score'])
-                ages.append(data['age'])
-                qualities.append(data['quality'])
+                bs_scores.append(embryo_data['bs_score'])
+                ages.append(embryo_data['age'])
+                qualities.append(embryo_data['quality'])
         
         # 转换为numpy数组
         X = np.array(features_list)
