@@ -350,6 +350,68 @@ def create_default_config_file(config_path="bilstm_config.json"):
     print(f"✅ 默认配置文件已创建: {config_path}")
     return config_path
 
+def auto_generate_score_dict_if_needed(config):
+    """
+    自动检查并生成评分字典（如果需要）
+    
+    Args:
+        config: BiLSTMConfig 配置对象
+    """
+    maindb_path = config.get("maindb_csv_path")
+    filtered_path = config.get("filtered_csv_path")
+    score_dict_path = config.get("score_dict_path")
+    
+    # 如果没有配置 maindb_csv_path，跳过自动生成
+    if not maindb_path or not maindb_path.strip():
+        print("📋 未配置 maindb_csv_path，跳过自动生成评分字典")
+        return
+    
+    # 检查主数据文件是否存在
+    if not os.path.exists(maindb_path):
+        print(f"⚠️ 主数据文件不存在: {maindb_path}")
+        print("   请检查配置文件中的 maindb_csv_path 路径是否正确")
+        return
+    
+    # 检查是否需要生成评分字典
+    need_generate = False
+    
+    if not os.path.exists(score_dict_path):
+        print(f"📝 评分字典文件不存在: {score_dict_path}")
+        need_generate = True
+    else:
+        # 检查文件修改时间，如果主数据文件更新，重新生成
+        maindb_mtime = os.path.getmtime(maindb_path)
+        score_dict_mtime = os.path.getmtime(score_dict_path)
+        
+        if maindb_mtime > score_dict_mtime:
+            print(f"📝 主数据文件已更新，需要重新生成评分字典")
+            need_generate = True
+        else:
+            print(f"✅ 评分字典文件已存在且是最新的: {score_dict_path}")
+    
+    # 如果需要生成，自动生成评分字典
+    if need_generate:
+        print(f"\n🔄 自动生成评分字典...")
+        print(f"📂 主数据文件: {maindb_path}")
+        if filtered_path and filtered_path.strip():
+            print(f"📂 过滤文件: {filtered_path}")
+        
+        try:
+            generate_score_dict_from_csv(
+                maindb_path=maindb_path,
+                filtered_path=filtered_path if filtered_path and filtered_path.strip() else None,
+                output_path=score_dict_path
+            )
+            print(f"✅ 自动生成评分字典完成: {score_dict_path}")
+            
+        except Exception as e:
+            print(f"❌ 自动生成评分字典失败: {e}")
+            print("   请检查数据文件格式是否正确，或手动运行:")
+            print(f"   python main.py --generate-score-dict --maindb {maindb_path}")
+            sys.exit(1)
+    
+    print()  # 添加空行分隔
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(
@@ -473,6 +535,9 @@ def main():
     
     # 显示配置
     config.print_config()
+    
+    # 自动检查并生成评分字典（如果需要）
+    auto_generate_score_dict_if_needed(config)
     
     # 根据模式执行
     if args.mode == 'train':

@@ -54,6 +54,12 @@ BiLSTM/
 - **自动失效检测**: 基于文件修改时间的智能缓存更新
 - **性能提升**: 从9次重复特征提取优化为1次缓存复用
 
+### 🆕 自动评分字典生成
+- **智能CSV解析**: 支持MainDB.csv和filtered_embryos.csv格式
+- **ICM/TE评分计算**: 自动转换ICM/TE等级为BS_prime分数
+- **文件时间检测**: 自动检测数据更新并重新生成评分字典
+- **无缝集成**: 配置CSV路径后完全自动化，无需手动干预
+
 ### 📊 严格交叉验证
 - **4折分层K折**: 确保训练验证中的类别平衡
 - **70/30数据分割**: 训练测试数据严格分离
@@ -92,6 +98,10 @@ python main.py --mode train --config bilstm_config.json
 
 # 方式3: 使用命令行参数快速调整
 python main.py --mode train --feature-model efficientnet --epochs 50
+
+# 方式4: 自动生成评分字典并训练（新功能）
+# 在配置文件中设置CSV路径后，系统会自动生成score_dict.json
+python main.py --mode train --config my_config.json
 ```
 
 ### 🔧 模块化编程使用
@@ -103,7 +113,8 @@ from BiLSTM import (
     preprocess_embryo_image, 
     configure_gpu,
     BiLSTMFeatureCache,
-    MultiModelFeatureExtractor
+    MultiModelFeatureExtractor,
+    generate_score_dict_from_csv  # 🆕 评分字典生成功能
 )
 
 # 模块级精确导入
@@ -205,6 +216,27 @@ print(f"测试集准确率: {results['test_metrics']['accuracy']:.4f}")
 print(f"测试集AUC: {results['test_metrics']['auc']:.4f}")
 ```
 
+### 🆕 自动评分字典生成
+
+```python
+from BiLSTM import generate_score_dict_from_csv
+
+# 手动生成评分字典
+generate_score_dict_from_csv(
+    maindb_path="/path/to/MainDB.csv",
+    filtered_path="/path/to/filtered_embryos.csv",  # 可选
+    output_path="score_dict.json"
+)
+
+# 或在配置文件中设置路径，系统会自动生成
+config = {
+    "maindb_csv_path": "/path/to/MainDB.csv",
+    "filtered_csv_path": "/path/to/filtered_embryos.csv",
+    "score_dict_path": "score_dict.json"
+}
+# 运行训练时会自动检测并生成评分字典
+```
+
 ### 📈 结果可视化
 
 ```python
@@ -270,7 +302,11 @@ python main.py --create-config
   "data_root": "/path/to/your/data",           // 数据根目录
   "image_folder": "image",                    // 图像文件夹名称
   "score_dict_path": "score_dict.json",       // 分数字典文件路径
-  "cache_dir": "bilstm_feature_cache"         // 特征缓存目录
+  "cache_dir": "bilstm_feature_cache",        // 特征缓存目录
+  
+  // 🆕 自动评分字典生成功能
+  "maindb_csv_path": "/path/to/MainDB.csv",           // 主数据库CSV文件路径
+  "filtered_csv_path": "/path/to/filtered_embryos.csv" // 低质量胚胎CSV文件路径（可选）
 }
 ```
 
@@ -361,6 +397,10 @@ vim my_bilstm_config.json
   "score_dict_path": "score_dict.json",
   "cache_dir": "bilstm_feature_cache",
   
+  // 🆕 自动评分字典生成配置
+  "maindb_csv_path": "/Users/your_username/data/MainDB.csv",
+  "filtered_csv_path": "/Users/your_username/data/filtered_clean_embryos.csv",
+  
   "model_name": "all",
   "feature_dim": 5760,
   "lstm_units": 128,
@@ -411,7 +451,11 @@ vim my_bilstm_config.json
 {
   "data_root": "/absolute/path/to/your/data",  // 必须是绝对路径
   "image_folder": "image",                     // 相对于data_root的图像目录
-  "score_dict_path": "score_dict.json"        // 相对于data_root的评分文件
+  "score_dict_path": "score_dict.json",       // 相对于data_root的评分文件
+  
+  // 🆕 自动生成评分字典的源CSV路径
+  "maindb_csv_path": "/absolute/path/to/MainDB.csv",        // 主数据库文件
+  "filtered_csv_path": "/absolute/path/to/filtered.csv"     // 可选的过滤数据文件
 }
 ```
 
@@ -581,7 +625,25 @@ your_data_root/
 ```
 
 #### 3. 数据格式要求
-**score_dict.json** 格式示例：
+
+**🆕 自动生成模式 - CSV格式要求：**
+
+**MainDB.csv** 格式示例：
+```csv
+EmbryoID,Age,ICM,TE
+embryo_001,32,A,A
+embryo_002,28,B,C
+embryo_003,35,C,B
+```
+
+**filtered_embryos.csv** 格式示例（可选）：
+```csv
+EmbryoID,Age,EmbryoQuality
+embryo_004,30,poor
+embryo_005,33,poor
+```
+
+**或传统 score_dict.json** 格式示例：
 ```json
 {
   "embryo_001.jpg": {
@@ -948,13 +1010,23 @@ def _build_models(self):
 
 ## 📝 更新日志
 
-### v2.0.0 (当前版本)
+### v2.1.0 (当前版本)
+- ✅ 🆕 自动评分字典生成系统
+- ✅ 🆕 智能CSV解析和ICM/TE评分计算
+- ✅ 🆕 文件时间检测和自动重新生成
+- ✅ 🆕 配置驱动的无缝自动化流程
 - ✅ 完全模块化重构
 - ✅ 集成Hough圆检测预处理
 - ✅ 智能特征缓存系统
 - ✅ 多模型特征融合
 - ✅ 综合可视化系统
 - ✅ 严格交叉验证框架
+
+### v2.0.0 (历史版本)
+- 完全模块化重构
+- 集成Hough圆检测预处理
+- 智能特征缓存系统
+- 多模型特征融合
 
 ### v1.0.0 (历史版本)
 - 基础BiLSTM模型实现
