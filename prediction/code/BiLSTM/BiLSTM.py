@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import pickle
+import hashlib
 
 # TensorFlow and Keras imports
 import tensorflow as tf
@@ -30,6 +32,10 @@ from sklearn.model_selection import StratifiedKFold, train_test_split, RepeatedS
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import resample
 
+# BiLSTM preprocessing modules  
+import cv2
+from .preprocessing.bilstm_image_utils import preprocess_embryo_image
+
 # Configure warnings
 warnings.filterwarnings('ignore')
 
@@ -48,6 +54,7 @@ def ensure_float32(*arrays):
         List of arrays converted to float32
     """
     return [arr.astype(np.float32) if hasattr(arr, 'astype') else np.array(arr, dtype=np.float32) for arr in arrays]
+
 
 
 def configure_gpu():
@@ -103,6 +110,214 @@ def load_score_dict(csv_path):
                 score_dict[emb_id] = 6.0 + random.uniform(0, 0.5)
     
     return score_dict
+
+class BiLSTMFeatureCache:
+    """BiLSTM专用的特征缓存管理器"""
+    
+    def __init__(self, data_root, cache_dir="bilstm_feature_cache"):
+        self.data_root = data_root
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self.multi_extractor = None
+        
+    def set_extractor(self, multi_extractor):
+        """设置特征提取器"""
+        self.multi_extractor = multi_extractor
+        
+    def _generate_config_hash(self, image_paths):
+        """生成配置哈希值"""
+        # 获取所有图像文件的修改时间
+        file_times = []
+        for path in image_paths[:100]:  # 只检查前100个文件以提高速度
+            if os.path.exists(path):
+                file_times.append(str(os.path.getmtime(path)))
+        
+        config_info = {
+            'data_root': self.data_root,
+            'model_names': ['efficientnet', 'resnet', 'densenet', 'vgg16'],
+            'file_count': len(image_paths),
+            'sample_file_times': file_times[:10]  # 只用前10个文件时间作为代表
+        }
+        config_str = str(sorted(config_info.items()))
+        return hashlib.md5(config_str.encode()).hexdigest()[:8]
+        
+    def get_cache_path(self, image_paths, cache_type="base_features"):
+        """生成缓存文件路径"""
+        config_hash = self._generate_config_hash(image_paths)
+        return os.path.join(self.cache_dir, f"{cache_type}_{config_hash}.pkl")
+        
+    def _validate_cache(self, cached_data, image_paths):
+        """验证缓存是否仍然有效"""
+        try:
+            # 检查基本信息
+            if 'features' not in cached_data or 'metadata' not in cached_data:
+                return False
+                
+            # 检查图像数量
+            if len(cached_data['features']) != len(image_paths):
+                print(f"图像数量不匹配: 缓存{len(cached_data['features'])} vs 当前{len(image_paths)}")
+                return False
+            
+            # 检查图像路径
+            cached_paths = set(cached_data['features'].keys())
+            current_paths = set(image_paths)
+            if len(cached_paths.intersection(current_paths)) < len(current_paths) * 0.95:  # 95%匹配率
+                print("图像路径不匹配")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            print(f"缓存验证失败: {e}")
+            return False
+    
+    def _save_features_cache(self, features_dict, cache_file, image_paths):
+        """保存特征到缓存文件"""
+        try:
+            cache_data = {
+                'features': features_dict,
+                'metadata': {
+                    'extraction_time': time.time(),
+                    'total_images': len(image_paths),
+                    'feature_dim': list(features_dict.values())[0].shape[-1] if features_dict else 0,
+                    'cache_version': '1.0'
+                }
+            }
+            
+            # 原子性保存
+            temp_file = cache_file + '.tmp'
+            with open(temp_file, 'wb') as f:
+                pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            os.rename(temp_file, cache_file)
+            
+            file_size_mb = os.path.getsize(cache_file) / (1024 * 1024)
+            print(f"✅ 特征缓存保存成功: {cache_file} ({file_size_mb:.1f} MB)")
+            
+        except Exception as e:
+            print(f"❌ 缓存保存失败: {e}")
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+    
+    def get_or_compute_features(self, image_paths, use_cache=True, training=False, use_augmentation=False):
+        """获取或计算图像特征"""
+        if self.multi_extractor is None:
+            raise ValueError("请先调用 set_extractor() 设置特征提取器")
+            
+        cache_file = self.get_cache_path(image_paths, f"features_{training}_{use_augmentation}")
+        
+        # 尝试加载缓存
+        if use_cache and os.path.exists(cache_file):
+            try:
+                print(f"🔍 检查特征缓存: {cache_file}")
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    
+                if self._validate_cache(cached_data, image_paths):
+                    print("🚀 从缓存加载特征")
+                    return cached_data['features']
+                else:
+                    print("⚠️ 缓存无效，重新提取特征")
+                    
+            except Exception as e:
+                print(f"❌ 缓存加载失败: {e}")
+        
+        # 重新提取特征
+        print("🔄 开始特征提取...")
+        features_dict = self._extract_features_from_scratch(image_paths, training, use_augmentation)
+        
+        # 保存缓存
+        if use_cache:
+            self._save_features_cache(features_dict, cache_file, image_paths)
+            
+        return features_dict
+    
+    def _extract_features_from_scratch(self, image_paths, training, use_augmentation):
+        """从头提取特征（使用STORK预处理）"""
+        # STORK预处理包装函数
+        def stork_preprocess_wrapper(path_bytes):
+            """包装STORK预处理以在tf.py_function中使用"""
+            try:
+                path_str = path_bytes.numpy().decode('utf-8')
+                # 使用STORK预处理管道：Hough圆检测 + 中心裁剪
+                processed_img = preprocess_embryo_image(
+                    path_str, 
+                    img_size=224, 
+                    apply_petri_crop=True,  # 启用Petri dish检测
+                    apply_center_crop=True  # 启用中心方形裁剪
+                )
+                return processed_img.astype(np.uint8)
+            except Exception as e:
+                print(f"STORK预处理失败 {path_str}: {e}")
+                # 回退到简单预处理
+                img = cv2.imread(path_str)
+                if img is not None:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    img = cv2.resize(img, (224, 224))
+                    return img.astype(np.uint8)
+                else:
+                    # 创建黑色图像作为最后的回退
+                    return np.zeros((224, 224, 3), dtype=np.uint8)
+        
+        # 构建预处理函数
+        def load_and_preprocess_image(path):
+            # 使用STORK预处理
+            img = tf.py_function(
+                stork_preprocess_wrapper, 
+                [path], 
+                tf.uint8
+            )
+            img.set_shape([224, 224, 3])
+            
+            # 只有训练模式且启用增强时才应用额外增强
+            if training and use_augmentation:
+                # 在STORK预处理基础上添加增强
+                if tf.random.uniform([]) > 0.5:
+                    img = tf.image.random_flip_left_right(img)
+                if tf.random.uniform([]) > 0.7:
+                    img = tf.image.random_brightness(img, max_delta=0.1)
+                if tf.random.uniform([]) > 0.7:
+                    img = tf.image.random_contrast(img, lower=0.9, upper=1.1)
+                    
+            img = tf.cast(img, tf.uint8)
+            return img
+        
+        # 构建数据管道
+        BATCH_SIZE = 32 if training else 64  # 训练时使用较小批次
+        path_dataset = tf.data.Dataset.from_tensor_slices(image_paths)
+        image_dataset = path_dataset.map(load_and_preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+        image_dataset = image_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+        
+        features_dict = {}
+        
+        # 批量提取特征
+        path_idx = 0
+        for batch_images in tqdm(image_dataset, desc="批量特征提取"):
+            batch_features = self.multi_extractor.extract_features(batch_images.numpy())
+            
+            # 将特征按路径存储
+            batch_size = batch_features.shape[0]
+            for i in range(batch_size):
+                if path_idx < len(image_paths):
+                    features_dict[image_paths[path_idx]] = batch_features[i]
+                    path_idx += 1
+                    
+        return features_dict
+    
+    def get_features_by_paths(self, image_paths, cached_features):
+        """从缓存中获取指定路径的特征"""
+        features = []
+        for path in image_paths:
+            if path in cached_features:
+                features.append(cached_features[path])
+            else:
+                print(f"⚠️ 路径 {path} 在缓存中不存在")
+                # 返回零特征向量作为备选
+                if features:
+                    zero_feature = np.zeros_like(features[0])
+                    features.append(zero_feature)
+                    
+        return np.array(features) if features else np.array([])
 
 class MultiModelFeatureExtractor:
     def __init__(self):
@@ -162,9 +377,9 @@ class MultiModelFeatureExtractor:
         combined_features = np.concatenate(features_list, axis=1)
         return combined_features
 
-def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor, valid_embryo_df, training=True, balance=False, use_augmentation=True):
+def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor, valid_embryo_df, training=True, balance=False, use_augmentation=True, use_cache=True, feature_cache=None):
     """
-    Build dataset with image-level augmentation support
+    Build dataset with image-level augmentation support (支持特征缓存)
     
     Args:
         data_root: Image root directory
@@ -174,6 +389,8 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
         training: Whether in training mode
         balance: Whether to balance sampling
         use_augmentation: Whether to use data augmentation (only effective when training=True)
+        use_cache: Whether to use feature caching (default: True)
+        feature_cache: BiLSTMFeatureCache instance (if None, will create one)
     """
     
     def map_half_hour(t):
@@ -229,50 +446,113 @@ def build_dataset_with_image_augmentation(data_root, score_dict, multi_extractor
     # 创建数据处理pipeline
     all_paths = [info[3] for info in image_info_list]
     
-    def load_and_preprocess_with_augmentation(path):
-        # 加载图像
-        img = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(img, channels=3)
-        img = tf.image.resize(img, [224, 224])
+    # 🚀 使用特征缓存机制
+    if use_cache:
+        # 初始化缓存管理器
+        if feature_cache is None:
+            feature_cache = BiLSTMFeatureCache(data_root)
+            feature_cache.set_extractor(multi_extractor)
         
-        # 如果是训练模式且启用增强，则应用图像增强
-        if image_augment_fn is not None:
-            img = tf.cast(img, tf.uint8)  # 确保输入增强函数前为uint8
-            img = image_augment_fn(img)
+        print(f"📦 使用特征缓存 - 训练模式: {training}, 数据增强: {use_augmentation}")
         
-        # 确保最终输出为uint8
-        img = tf.cast(img, tf.uint8)
-        return img
-    
-    def load_and_preprocess_no_augmentation(path):
-        # 不使用增强的版本（用于验证和测试）
-        img = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(img, channels=3)
-        img = tf.image.resize(img, [224, 224])
-        img = tf.cast(img, tf.uint8)
-        return img
-    
-    # 选择合适的预处理函数
-    if training and use_augmentation:
-        preprocess_fn = load_and_preprocess_with_augmentation
+        # 从缓存获取或计算特征
+        features_dict = feature_cache.get_or_compute_features(
+            all_paths, 
+            use_cache=use_cache,
+            training=training, 
+            use_augmentation=use_augmentation
+        )
+        
+        # 按顺序提取特征
+        all_features = []
+        for path in all_paths:
+            if path in features_dict:
+                all_features.append(features_dict[path])
+            else:
+                # 如果缓存中没有该特征，创建零向量
+                print(f"⚠️ 缓存中缺少特征: {path}")
+                zero_feature = np.zeros(multi_extractor.total_feature_dim, dtype=np.float32)
+                all_features.append(zero_feature)
+        
+        all_features = np.array(all_features)
+        
     else:
-        preprocess_fn = load_and_preprocess_no_augmentation
-    
-    # 构建高效的tf.data pipeline
-    BATCH_SIZE = 64 if (training and use_augmentation) else 128  # 增强时减小批量大小
-    dataset = tf.data.Dataset.from_tensor_slices(all_paths)
-    dataset = dataset.map(preprocess_fn, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-    
-    # 批量提取所有特征
-    all_features = []
-    
-    for batch_images in tqdm(dataset, desc="GPU批量特征提取"):
-        batch_features = multi_extractor.extract_features(batch_images.numpy())
-        all_features.append(batch_features)
-    
-    # 合并所有特征
-    all_features = np.concatenate(all_features, axis=0)
+        # 🔄 原始特征提取方式（不使用缓存）
+        print("⚠️ 未使用缓存，进行原始特征提取")
+        
+        def stork_preprocess_wrapper(path_bytes):
+            """包装STORK预处理以在tf.py_function中使用"""
+            try:
+                path_str = path_bytes.numpy().decode('utf-8')
+                # 使用STORK预处理管道：Hough圆检测 + 中心裁剪
+                processed_img = preprocess_embryo_image(
+                    path_str, 
+                    img_size=224, 
+                    apply_petri_crop=True,  # 启用Petri dish检测
+                    apply_center_crop=True  # 启用中心方形裁剪
+                )
+                return processed_img.astype(np.uint8)
+            except Exception as e:
+                print(f"STORK预处理失败 {path_str}: {e}")
+                # 回退到简单预处理
+                img = cv2.imread(path_str)
+                if img is not None:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    img = cv2.resize(img, (224, 224))
+                    return img.astype(np.uint8)
+                else:
+                    return np.zeros((224, 224, 3), dtype=np.uint8)
+        
+        def load_and_preprocess_with_augmentation(path):
+            # 使用STORK预处理
+            img = tf.py_function(
+                stork_preprocess_wrapper, 
+                [path], 
+                tf.uint8
+            )
+            img.set_shape([224, 224, 3])
+            
+            # 如果是训练模式且启用增强，则应用图像增强
+            if image_augment_fn is not None:
+                img = tf.cast(img, tf.uint8)  # 确保输入增强函数前为uint8
+                img = image_augment_fn(img)
+            
+            # 确保最终输出为uint8
+            img = tf.cast(img, tf.uint8)
+            return img
+        
+        def load_and_preprocess_no_augmentation(path):
+            # 使用STORK预处理（不增强版本）
+            img = tf.py_function(
+                stork_preprocess_wrapper, 
+                [path], 
+                tf.uint8
+            )
+            img.set_shape([224, 224, 3])
+            img = tf.cast(img, tf.uint8)
+            return img
+        
+        # 选择合适的预处理函数
+        if training and use_augmentation:
+            preprocess_fn = load_and_preprocess_with_augmentation
+        else:
+            preprocess_fn = load_and_preprocess_no_augmentation
+        
+        # 构建高效的tf.data pipeline
+        BATCH_SIZE = 64 if (training and use_augmentation) else 128  # 增强时减小批量大小
+        dataset = tf.data.Dataset.from_tensor_slices(all_paths)
+        dataset = dataset.map(preprocess_fn, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+        
+        # 批量提取所有特征
+        all_features = []
+        
+        for batch_images in tqdm(dataset, desc="GPU批量特征提取"):
+            batch_features = multi_extractor.extract_features(batch_images.numpy())
+            all_features.append(batch_features)
+        
+        # 合并所有特征
+        all_features = np.concatenate(all_features, axis=0)
     
     # 分配特征到胚胎张量
     
@@ -459,6 +739,7 @@ def cross_validate_bilstm_model_with_image_augmentation(root_dir, score_dict, va
     """
     70/30分割 + 4折交叉验证
     实现BiLSTM回归 + 逻辑分类管道，修复了数据泄漏问题
+    使用特征缓存提高性能
     """
     
     print(f"=== 开始70/30分割 + {n_folds}折交叉验证 ===")
@@ -466,11 +747,14 @@ def cross_validate_bilstm_model_with_image_augmentation(root_dir, score_dict, va
     tf.keras.backend.clear_session()
     gc.collect()
     
+    print("初始化特征缓存...")
+    feature_cache = BiLSTMFeatureCache(root_dir)
+    
     print("构建完整数据集...")
-    multi_extractor = MultiModelFeatureExtractor()
     X_full, y_bs_full, quality_labels_full, ages_full = build_dataset_with_image_augmentation(
-        root_dir, score_dict, multi_extractor, valid_embryo_df, 
-        training=False, balance=False, use_augmentation=False
+        root_dir, score_dict, valid_embryo_df, 
+        training=False, balance=False, use_augmentation=False,
+        feature_cache=feature_cache, use_cache=True
     )
     
     print(f"完整数据集形状: {X_full.shape}")
@@ -1040,11 +1324,12 @@ def load_or_build_features(root_dir, score_dict, valid_embryo_df, force_rebuild=
         print(f"已加载特征维度: {X.shape}")
     else:
         print("=== 构建多模型特征数据集（无增强版本）===")
-        multi_extractor = MultiModelFeatureExtractor()
-        # 使用不带增强的版本构建基础特征
+        # 使用新的缓存系统
+        feature_cache = BiLSTMFeatureCache(root_dir)
         X, y_bs, quality_labels, ages = build_dataset_with_image_augmentation(
-            root_dir, score_dict, multi_extractor, valid_embryo_df, 
-            training=False, balance=False, use_augmentation=False
+            root_dir, score_dict, valid_embryo_df, 
+            training=False, balance=False, use_augmentation=False,
+            feature_cache=feature_cache, use_cache=True
         )
         
         # 保存缓存
@@ -1074,7 +1359,8 @@ def build_augmented_training_features(root_dir, score_dict, valid_embryo_df, tra
     """
     print("=== 构建训练集增强特征 ===")
     
-    multi_extractor = MultiModelFeatureExtractor()
+    # 使用新的缓存系统
+    feature_cache = BiLSTMFeatureCache(root_dir)
     
     # 过滤出训练集对应的胚胎
     all_embryo_ids = list(set(valid_embryo_df["EmbryoID"]) & set(score_dict.keys()))
@@ -1083,8 +1369,9 @@ def build_augmented_training_features(root_dir, score_dict, valid_embryo_df, tra
     
     # 使用图像增强构建训练特征
     X_train_aug, y_train_aug, quality_train_aug, ages_train_aug = build_dataset_with_image_augmentation(
-        root_dir, score_dict, multi_extractor, train_embryo_df, 
-        training=True, balance=False, use_augmentation=True
+        root_dir, score_dict, train_embryo_df, 
+        training=True, balance=False, use_augmentation=True,
+        feature_cache=feature_cache, use_cache=True
     )
     
     return X_train_aug, y_train_aug, quality_train_aug, ages_train_aug
@@ -1168,7 +1455,8 @@ def train_model(X_train, y_train, X_val, y_val, feature_dim, save_path,
     # 如果使用图像增强且提供了必要参数，重新构建增强训练数据
     if use_augmentation and all([root_dir, score_dict, valid_embryo_df, train_indices]):
         print("重新构建图像增强训练数据...")
-        multi_extractor = MultiModelFeatureExtractor()
+        # 使用新的缓存系统
+        feature_cache = BiLSTMFeatureCache(root_dir)
         
         # 获取训练集对应的胚胎信息
         all_embryo_ids = list(set(valid_embryo_df["EmbryoID"]) & set(score_dict.keys()))
@@ -1177,8 +1465,9 @@ def train_model(X_train, y_train, X_val, y_val, feature_dim, save_path,
         
         # 使用图像增强构建训练特征
         X_train, y_train, _, _ = build_dataset_with_image_augmentation(
-            root_dir, score_dict, multi_extractor, train_embryo_df, 
-            training=True, balance=False, use_augmentation=True
+            root_dir, score_dict, train_embryo_df, 
+            training=True, balance=False, use_augmentation=True,
+            feature_cache=feature_cache, use_cache=True
         )
         print(f"增强后训练集形状: {X_train.shape}")
     
@@ -1534,11 +1823,14 @@ def cross_validate_with_augmentation(root_dir, score_dict, valid_embryo_df, feat
     gc.collect()
     
     # 首先构建基础数据集（不增强）用于索引拆分
+    print("初始化特征缓存...")
+    feature_cache = BiLSTMFeatureCache(root_dir)
+    
     print("构建基础数据集用于交叉验证拆分...")
-    multi_extractor = MultiModelFeatureExtractor()
     X_base, y_bs_base, quality_labels_base, ages_base = build_dataset_with_image_augmentation(
-        root_dir, score_dict, multi_extractor, valid_embryo_df, 
-        training=False, balance=False, use_augmentation=False
+        root_dir, score_dict, valid_embryo_df, 
+        training=False, balance=False, use_augmentation=False,
+        feature_cache=feature_cache, use_cache=True
     )
     
     print(f"基础数据集形状: {X_base.shape}")
@@ -1577,15 +1869,17 @@ def cross_validate_with_augmentation(root_dir, score_dict, valid_embryo_df, feat
         
         # 构建增强的训练集（使用图像增强）
         X_fold_train_aug, y_fold_train_aug, quality_fold_train_aug, ages_fold_train_aug = build_dataset_with_image_augmentation(
-            root_dir, score_dict, multi_extractor, fold_train_embryo_df, 
-            training=True, balance=False, use_augmentation=True
+            root_dir, score_dict, fold_train_embryo_df, 
+            training=True, balance=False, use_augmentation=True,
+            feature_cache=feature_cache, use_cache=True
         )
         
         print(f"第 {fold_idx + 1} 折：构建验证集...")
         fold_val_embryo_df = valid_embryo_df[valid_embryo_df["EmbryoID"].isin(fold_val_embryo_ids)]
         X_fold_val, y_fold_val, quality_fold_val, ages_fold_val = build_dataset_with_image_augmentation(
-            root_dir, score_dict, multi_extractor, fold_val_embryo_df, 
-            training=False, balance=False, use_augmentation=False
+            root_dir, score_dict, fold_val_embryo_df, 
+            training=False, balance=False, use_augmentation=False,
+            feature_cache=feature_cache, use_cache=True
         )
         
         # 对训练集做类别均衡
@@ -1971,8 +2265,8 @@ def main():
         
         # 2. 计算特征维度
         print("=== 步骤2: 计算特征维度 ===")
-        multi_extractor = MultiModelFeatureExtractor()
-        feature_dim = multi_extractor.total_feature_dim
+        feature_cache = BiLSTMFeatureCache(root_dir)
+        feature_dim = feature_cache.multi_extractor.total_feature_dim
         print(f"多模型特征维度: {feature_dim}")
         
         # 3. 进行交叉验证（只使用训练集，保留图像增强）
