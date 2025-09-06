@@ -247,7 +247,8 @@ def run_training(config):
             use_cache=config.get("use_cache"),
             use_augmentation=config.get("use_augmentation"),
             verbose=config.get("verbose"),
-            random_state=config.get("random_state")
+            random_state=config.get("random_state"),
+            score_dict_path=config.get("score_dict_path")  # 🆕 传递评分字典路径
         )
         
         # 创建可视化结果

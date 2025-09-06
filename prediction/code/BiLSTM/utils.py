@@ -413,7 +413,21 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="s
             embryo_id = str(row["EmbryoID"])
             bs_score = float(row["BS_prime"])
             age = float(row.get("Age", 30))  # 默认年龄30
-            quality = int(row.get("Quality", 1)) if "Quality" in df.columns else (1 if bs_score <= 4 else 0)
+            
+            # 处理Quality字段，支持文本和数字格式
+            if "Quality" in df.columns:
+                quality_val = row.get("Quality", 1)
+                if isinstance(quality_val, str):
+                    # 文本质量映射
+                    quality_map = {
+                        'good': 1, 'high': 1, 'excellent': 1,
+                        'fair': 0, 'poor': 0, 'bad': 0, 'low': 0
+                    }
+                    quality = quality_map.get(quality_val.lower(), 1 if bs_score <= 4 else 0)
+                else:
+                    quality = int(quality_val)
+            else:
+                quality = 1 if bs_score <= 4 else 0
             
             score_dict[embryo_id] = {
                 "bs_score": bs_score,
@@ -427,7 +441,21 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="s
             embryo_id = str(row["EmbryoID"])
             bs_score = float(row["BlastocystScore"])
             age = float(row.get("Age", 30))
-            quality = int(row.get("Quality", 1)) if "Quality" in df.columns else (1 if bs_score <= 4 else 0)
+            
+            # 处理Quality字段，支持文本和数字格式
+            if "Quality" in df.columns:
+                quality_val = row.get("Quality", 1)
+                if isinstance(quality_val, str):
+                    # 文本质量映射
+                    quality_map = {
+                        'good': 1, 'high': 1, 'excellent': 1,
+                        'fair': 0, 'poor': 0, 'bad': 0, 'low': 0
+                    }
+                    quality = quality_map.get(quality_val.lower(), 1 if bs_score <= 4 else 0)
+                else:
+                    quality = int(quality_val)
+            else:
+                quality = 1 if bs_score <= 4 else 0
             
             score_dict[embryo_id] = {
                 "bs_score": bs_score,

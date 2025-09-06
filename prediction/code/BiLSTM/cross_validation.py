@@ -495,7 +495,8 @@ def create_cv_summary_report(cv_results, save_path=None):
 def stratified_cross_validation_with_cache(
     cache, n_folds=4, test_ratio=0.3, feature_dim=512, lstm_units=128, 
     dropout_rate=0.3, learning_rate=0.001, epochs=100, batch_size=32, 
-    patience=15, use_cache=True, use_augmentation=True, verbose=1, random_state=42
+    patience=15, use_cache=True, use_augmentation=True, verbose=1, random_state=42,
+    score_dict_path=None
 ):
     """
     执行完整的分层交叉验证训练流程，使用特征缓存系统
@@ -530,7 +531,11 @@ def stratified_cross_validation_with_cache(
         import json
         
         # 加载评分数据
-        score_dict_path = os.path.join(cache.data_root, "score_dict.json")
+        if score_dict_path is None:
+            score_dict_path = os.path.join(cache.data_root, "score_dict.json")
+        elif not os.path.isabs(score_dict_path):
+            # 如果是相对路径，相对于data_root
+            score_dict_path = os.path.join(cache.data_root, score_dict_path)
         
         if not os.path.exists(score_dict_path):
             raise FileNotFoundError(f"评分文件不存在: {score_dict_path}")
