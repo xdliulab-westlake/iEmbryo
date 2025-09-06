@@ -1,0 +1,389 @@
+#!/usr/bin/env python
+"""
+BiLSTM 胚胎分类系统主程序
+独立的训练和评估入口点，提供完整的参数配置和训练流程
+"""
+
+import os
+import sys
+import argparse
+import json
+from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
+
+# 添加当前路径到系统路径
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from BiLSTM import (
+    configure_gpu, 
+    check_required_paths,
+    BiLSTMFeatureCache,
+    create_model,
+    train_model,
+    perform_logistic_regression,
+    stratified_cross_validation,
+    create_cv_visualization,
+    cleanup_memory
+)
+
+class BiLSTMConfig:
+    """BiLSTM配置管理类"""
+    
+    def __init__(self, config_file=None):
+        # 默认配置
+        self.config = {
+            # 数据路径
+            "data_root": "/Users/lzz/Documents/GitHub/IVF_AI/prediction/code",
+            "image_folder": "image",
+            "score_dict_path": "score_dict.json",
+            "cache_dir": "bilstm_feature_cache",
+            
+            # 模型参数
+            "feature_dim": 1536,  # EfficientNetV2M(512) + ResNet152V2(512) + DenseNet201(512)
+            "lstm_units": 128,
+            "dropout_rate": 0.3,
+            "learning_rate": 0.001,
+            
+            # 训练参数
+            "epochs": 100,
+            "batch_size": 32,
+            "patience": 15,
+            "validation_split": 0.3,
+            
+            # 交叉验证参数
+            "n_folds": 4,
+            "test_ratio": 0.3,
+            "random_state": 42,
+            
+            # 预处理参数
+            "img_size": 224,
+            "apply_petri_crop": True,
+            "apply_center_crop": True,
+            "use_augmentation": True,
+            
+            # 缓存参数
+            "use_cache": True,
+            "force_recompute": False,
+            
+            # 输出参数
+            "model_save_path": "bilstm_model.h5",
+            "results_save_dir": "bilstm_results",
+            "verbose": 1
+        }
+        
+        # 如果提供了配置文件，则加载
+        if config_file and os.path.exists(config_file):
+            self.load_config(config_file)
+    
+    def load_config(self, config_file):
+        """从JSON文件加载配置"""
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+            self.config.update(user_config)
+            print(f"✅ 配置文件已加载: {config_file}")
+        except Exception as e:
+            print(f"⚠️ 配置文件加载失败: {e}")
+            print("使用默认配置...")
+    
+    def save_config(self, config_file):
+        """保存当前配置到JSON文件"""
+        try:
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+            print(f"✅ 配置已保存到: {config_file}")
+        except Exception as e:
+            print(f"❌ 配置保存失败: {e}")
+    
+    def get(self, key, default=None):
+        """获取配置值"""
+        return self.config.get(key, default)
+    
+    def set(self, key, value):
+        """设置配置值"""
+        self.config[key] = value
+    
+    def print_config(self):
+        """打印当前配置"""
+        print("\n=== BiLSTM 配置参数 ===")
+        for section in ["数据路径", "模型参数", "训练参数", "交叉验证参数", "预处理参数"]:
+            print(f"\n{section}:")
+            if section == "数据路径":
+                keys = ["data_root", "image_folder", "score_dict_path", "cache_dir"]
+            elif section == "模型参数":
+                keys = ["feature_dim", "lstm_units", "dropout_rate", "learning_rate"]
+            elif section == "训练参数":
+                keys = ["epochs", "batch_size", "patience", "validation_split"]
+            elif section == "交叉验证参数":
+                keys = ["n_folds", "test_ratio", "random_state"]
+            elif section == "预处理参数":
+                keys = ["img_size", "apply_petri_crop", "apply_center_crop", "use_augmentation"]
+            
+            for key in keys:
+                if key in self.config:
+                    print(f"  {key}: {self.config[key]}")
+
+def setup_directories(config):
+    """创建必要的目录"""
+    dirs_to_create = [
+        config.get("cache_dir"),
+        config.get("results_save_dir"),
+        os.path.dirname(config.get("model_save_path", ""))
+    ]
+    
+    for dir_path in dirs_to_create:
+        if dir_path and dir_path != "":
+            Path(dir_path).mkdir(parents=True, exist_ok=True)
+            print(f"📁 目录已创建: {dir_path}")
+
+def validate_paths(config):
+    """验证必要路径是否存在"""
+    required_paths = {
+        "数据根目录": config.get("data_root"),
+        "图像文件夹": os.path.join(config.get("data_root"), config.get("image_folder")),
+        "分数字典": os.path.join(config.get("data_root"), config.get("score_dict_path"))
+    }
+    
+    print("\n=== 路径验证 ===")
+    all_valid = True
+    for name, path in required_paths.items():
+        if os.path.exists(path):
+            print(f"✅ {name}: {path}")
+        else:
+            print(f"❌ {name}: {path} (不存在)")
+            all_valid = False
+    
+    return all_valid
+
+def run_training(config):
+    """运行完整的训练流程"""
+    print("\n" + "="*50)
+    print("🚀 开始 BiLSTM 胚胎分类系统训练")
+    print("="*50)
+    
+    # 配置GPU
+    print("\n--- 配置GPU环境 ---")
+    configure_gpu()
+    
+    # 验证路径
+    if not validate_paths(config):
+        print("❌ 路径验证失败，请检查配置")
+        return False
+    
+    # 创建目录
+    setup_directories(config)
+    
+    try:
+        # 初始化特征缓存
+        print("\n--- 初始化特征缓存系统 ---")
+        cache = BiLSTMFeatureCache(
+            data_root=config.get("data_root"),
+            cache_dir=config.get("cache_dir")
+        )
+        
+        # 执行交叉验证训练
+        print("\n--- 开始交叉验证训练 ---")
+        cv_results = stratified_cross_validation(
+            cache=cache,
+            n_folds=config.get("n_folds"),
+            test_ratio=config.get("test_ratio"),
+            feature_dim=config.get("feature_dim"),
+            lstm_units=config.get("lstm_units"),
+            dropout_rate=config.get("dropout_rate"),
+            learning_rate=config.get("learning_rate"),
+            epochs=config.get("epochs"),
+            batch_size=config.get("batch_size"),
+            patience=config.get("patience"),
+            use_cache=config.get("use_cache"),
+            use_augmentation=config.get("use_augmentation"),
+            verbose=config.get("verbose"),
+            random_state=config.get("random_state")
+        )
+        
+        # 创建可视化结果
+        print("\n--- 生成可视化结果 ---")
+        create_cv_visualization(
+            cv_results['avg_performance'],
+            cv_results['bilstm_avg'],
+            cv_results['fold_performances']
+        )
+        
+        # 保存结果
+        results_dir = config.get("results_save_dir")
+        results_file = os.path.join(results_dir, "cv_results.json")
+        
+        # 准备可序列化的结果
+        serializable_results = {
+            "avg_performance": cv_results['avg_performance'],
+            "bilstm_avg": cv_results['bilstm_avg'],
+            "config": config.config,
+            "n_folds": len(cv_results['fold_performances'])
+        }
+        
+        with open(results_file, 'w', encoding='utf-8') as f:
+            json.dump(serializable_results, f, indent=2, ensure_ascii=False)
+        
+        print(f"✅ 结果已保存到: {results_file}")
+        
+        # 显示最终结果
+        print("\n" + "="*50)
+        print("🎉 训练完成！最终结果:")
+        print("="*50)
+        print(f"逻辑回归平均准确率: {cv_results['avg_performance']['accuracy']:.4f} ± {cv_results['avg_performance']['accuracy_std']:.4f}")
+        print(f"逻辑回归平均AUC: {cv_results['avg_performance']['auc']:.4f} ± {cv_results['avg_performance']['auc_std']:.4f}")
+        print(f"BiLSTM平均MAE: {cv_results['bilstm_avg']['mae']:.4f} ± {cv_results['bilstm_avg']['mae_std']:.4f}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ 训练过程中发生错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    finally:
+        # 清理GPU内存
+        cleanup_memory()
+
+def run_inference(config, model_path, image_paths):
+    """运行推理模式"""
+    print(f"\n🔮 开始推理模式")
+    print(f"模型路径: {model_path}")
+    print(f"图像数量: {len(image_paths)}")
+    
+    # 配置GPU
+    configure_gpu()
+    
+    try:
+        from BiLSTM import load_trained_model, batch_predict_bs_scores
+        
+        # 加载模型
+        model = load_trained_model(model_path)
+        
+        # 初始化特征缓存
+        cache = BiLSTMFeatureCache(
+            data_root=config.get("data_root"),
+            cache_dir=config.get("cache_dir")
+        )
+        
+        # 提取特征
+        print("提取图像特征...")
+        features = cache.get_or_compute_features(
+            image_paths=image_paths,
+            use_cache=config.get("use_cache"),
+            training=False,
+            use_augmentation=False
+        )
+        
+        # 预测
+        print("执行预测...")
+        predictions = batch_predict_bs_scores(model, features)
+        
+        # 显示结果
+        print("\n=== 预测结果 ===")
+        for i, (img_path, pred) in enumerate(zip(image_paths, predictions)):
+            print(f"{i+1}. {os.path.basename(img_path)}: BS分数 = {pred:.4f}")
+        
+        return predictions
+        
+    except Exception as e:
+        print(f"❌ 推理过程中发生错误: {e}")
+        return None
+    
+    finally:
+        cleanup_memory()
+
+def create_default_config_file(config_path="bilstm_config.json"):
+    """创建默认配置文件"""
+    config = BiLSTMConfig()
+    config.save_config(config_path)
+    print(f"✅ 默认配置文件已创建: {config_path}")
+    return config_path
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(
+        description="BiLSTM胚胎分类系统",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  # 使用默认配置训练
+  python main.py --mode train
+  
+  # 使用自定义配置文件训练
+  python main.py --mode train --config my_config.json
+  
+  # 创建默认配置文件
+  python main.py --create-config
+  
+  # 推理模式
+  python main.py --mode inference --model model.h5 --images img1.jpg img2.jpg
+        """
+    )
+    
+    parser.add_argument('--mode', choices=['train', 'inference'], 
+                       help='运行模式: train(训练) 或 inference(推理)')
+    parser.add_argument('--config', type=str, default=None,
+                       help='配置文件路径 (JSON格式)')
+    parser.add_argument('--create-config', action='store_true',
+                       help='创建默认配置文件')
+    parser.add_argument('--model', type=str,
+                       help='推理模式下的模型文件路径')
+    parser.add_argument('--images', nargs='+',
+                       help='推理模式下的图像文件路径列表')
+    parser.add_argument('--epochs', type=int,
+                       help='训练轮数 (覆盖配置文件)')
+    parser.add_argument('--batch-size', type=int,
+                       help='批量大小 (覆盖配置文件)')
+    parser.add_argument('--learning-rate', type=float,
+                       help='学习率 (覆盖配置文件)')
+    
+    args = parser.parse_args()
+    
+    # 创建配置文件
+    if args.create_config:
+        create_default_config_file()
+        return
+    
+    # 加载配置
+    config = BiLSTMConfig(args.config)
+    
+    # 命令行参数覆盖配置文件
+    if args.epochs:
+        config.set('epochs', args.epochs)
+    if args.batch_size:
+        config.set('batch_size', args.batch_size)
+    if args.learning_rate:
+        config.set('learning_rate', args.learning_rate)
+    
+    # 显示配置
+    config.print_config()
+    
+    # 根据模式执行
+    if args.mode == 'train':
+        success = run_training(config)
+        if success:
+            print("\n🎉 训练成功完成！")
+        else:
+            print("\n❌ 训练失败！")
+            sys.exit(1)
+            
+    elif args.mode == 'inference':
+        if not args.model:
+            print("❌ 推理模式需要指定模型文件 (--model)")
+            sys.exit(1)
+        if not args.images:
+            print("❌ 推理模式需要指定图像文件 (--images)")
+            sys.exit(1)
+            
+        predictions = run_inference(config, args.model, args.images)
+        if predictions is None:
+            sys.exit(1)
+            
+    else:
+        print("请指定运行模式: --mode train 或 --mode inference")
+        print("使用 --help 查看详细帮助")
+
+if __name__ == "__main__":
+    main()
