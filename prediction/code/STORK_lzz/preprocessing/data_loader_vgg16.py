@@ -51,21 +51,40 @@ def preprocess_image_stork_universal(image, img_size=224, is_training=True, mode
     image = image.astype(np.float32)
     
     if is_training:
-        # 训练时的轻量级数据增强 (优化版：避免TF张量转换)
+        # 增强版数据增强 - 提升模型泛化能力
         # 随机水平翻转
         if np.random.rand() > 0.5:
             image = np.fliplr(image)
         
+        # 随机垂直翻转 (胚胎图像方向不敏感)
+        if np.random.rand() > 0.5:
+            image = np.flipud(image)
+        
+        # 随机旋转 (小角度)
+        if np.random.rand() > 0.6:
+            angle = np.random.uniform(-15, 15)
+            h, w = image.shape[:2]
+            center = (w // 2, h // 2)
+            matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+            image = cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REFLECT)
+        
         # 随机亮度调整
-        if np.random.rand() > 0.7:
-            brightness_factor = np.random.uniform(0.9, 1.1)
+        if np.random.rand() > 0.6:
+            brightness_factor = np.random.uniform(0.85, 1.15)
             image = np.clip(image * brightness_factor, 0, 255)
         
         # 随机对比度调整
-        if np.random.rand() > 0.7:
-            contrast_factor = np.random.uniform(0.9, 1.1)
+        if np.random.rand() > 0.6:
+            contrast_factor = np.random.uniform(0.85, 1.15)
             mean = np.mean(image)
             image = np.clip((image - mean) * contrast_factor + mean, 0, 255)
+        
+        # 随机色调调整 (轻微)
+        if np.random.rand() > 0.8:
+            hsv = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2HSV)
+            hue_shift = np.random.uniform(-10, 10)
+            hsv[:,:,0] = np.clip(hsv[:,:,0] + hue_shift, 0, 179)
+            image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32)
     
     # 根据模型选择相应的预处理函数
     model_name = model_name.lower()
@@ -116,15 +135,34 @@ def optimized_preprocess_single_image(args):
         # 转换为float32
         img = img.astype(np.float32)
         
-        # 优化的数据增强（仅训练时）
+        # 增强版数据增强（仅训练时）
         if is_training:
             # 随机水平翻转
             if np.random.rand() > 0.5:
                 img = np.fliplr(img)
+            
+            # 随机垂直翻转
+            if np.random.rand() > 0.5:
+                img = np.flipud(img)
+            
+            # 随机旋转 (小角度)
+            if np.random.rand() > 0.6:
+                angle = np.random.uniform(-15, 15)
+                h, w = img.shape[:2]
+                center = (w // 2, h // 2)
+                matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+                img = cv2.warpAffine(img, matrix, (w, h), borderMode=cv2.BORDER_REFLECT)
+            
             # 随机亮度调整
-            if np.random.rand() > 0.7:
-                brightness_factor = np.random.uniform(0.9, 1.1)
+            if np.random.rand() > 0.6:
+                brightness_factor = np.random.uniform(0.85, 1.15)
                 img = np.clip(img * brightness_factor, 0, 255)
+            
+            # 随机对比度调整
+            if np.random.rand() > 0.6:
+                contrast_factor = np.random.uniform(0.85, 1.15)
+                mean = np.mean(img)
+                img = np.clip((img - mean) * contrast_factor + mean, 0, 255)
         
         # 应用模型特定预处理
         preprocess_functions = {

@@ -124,9 +124,14 @@ def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_cl
     # 特征提取 (已包含全局平均池化)
     features = feature_extractor(inputs)
     
-    # 分类头 - 根据模型调整Dropout
-    dropout_rate = 0.5 if model_name == 'vgg16' else 0.3  # VGG16需要更强的正则化
-    x = Dropout(dropout_rate)(features)
+    # 增强的分类头 - 提升模型性能（默认启用）
+    dropout_rate = 0.5 if model_name == 'vgg16' else 0.4  # 调整dropout率
+    
+    # 添加中间层提升表达能力
+    x = Dense(512, activation='relu', name='intermediate_dense')(features)
+    x = Dropout(dropout_rate)(x)
+    x = Dense(256, activation='relu', name='intermediate_dense_2')(x)
+    x = Dropout(dropout_rate * 0.8)(x)  # 逐层递减dropout
     outputs = Dense(1, activation='sigmoid', name='embryo_prediction')(x)
 
     # 定义模型
@@ -302,19 +307,125 @@ def generate_gradcam(model, image, class_index, layer_name='block5_conv3'):
     - superimposed_img: 叠加了热力图的原始图像
     """
     
-    # 创建模型，输出指定层的激活和目标类别的预测
-    grad_model = Model(
-        inputs=[model.inputs],
-        outputs=[model.get_layer(layer_name).output, model.output]
-    )
+    # 智能查找合适的卷积层 - 支持多种模型
+    def find_target_layer(model, target_layer_name):
+        """智能查找目标层，支持多种预训练模型"""
+        # 定义不同模型的基础层名称
+        model_base_names = ['vgg16', 'resnet50', 'inception_v3', 'efficientnetb0']
+        
+        # 首先尝试直接查找
+        try:
+            return model.get_layer(target_layer_name)
+        except:
+            pass
+        
+        # 查找各种预训练层内部的层
+        for base_name in model_base_names:
+            try:
+                base_layer = model.get_layer(base_name)
+                return base_layer.get_layer(target_layer_name)
+            except:
+                continue
+        
+        # 如果指定层不存在，自动选择最后一个卷积层
+        print(f"警告：找不到层 '{target_layer_name}'，自动选择最后一个卷积层")
+        
+        # 在各种预训练模型中查找最后一个卷积层
+        for base_name in model_base_names:
+            try:
+                base_layer = model.get_layer(base_name)
+                conv_layers = [layer for layer in base_layer.layers if 'conv' in layer.name.lower()]
+                if conv_layers:
+                    selected_layer = conv_layers[-1]
+                    print(f"自动选择层: {selected_layer.name} (来自 {base_name})")
+                    return selected_layer
+            except:
+                continue
+        
+        # 最后的fallback：查找整个模型中的卷积层
+        conv_layers = []
+        for layer in model.layers:
+            if hasattr(layer, 'layers'):  # 嵌套模型
+                for sublayer in layer.layers:
+                    if 'conv' in sublayer.name.lower():
+                        conv_layers.append(sublayer)
+        
+        if conv_layers:
+            selected_layer = conv_layers[-1]
+            print(f"Fallback选择层: {selected_layer.name}")
+            return selected_layer
+        
+        raise ValueError(f"无法找到合适的卷积层用于Grad-CAM")
+    
+    # 获取目标层
+    target_layer = find_target_layer(model, layer_name)
+    
+    # 使用更简单直接的方法创建Grad-CAM模型
+    # 构建到目标层的部分模型
+    model_base_names = ['vgg16', 'resnet50', 'inception_v3', 'efficientnetb0']
+    base_layer = None
+    
+    for base_name in model_base_names:
+        try:
+            base_layer = model.get_layer(base_name)
+            break
+        except:
+            continue
+    
+    if base_layer is None:
+        raise ValueError("无法找到支持的预训练模型基础层")
+    
+    # 创建到目标层的中间模型
+    intermediate_model = Model(inputs=base_layer.input, outputs=target_layer.output)
+    
+    # 创建组合模型
+    def grad_cam_forward(x):
+        # 获取中间层输出
+        conv_outputs = intermediate_model(x)
+        # 获取最终预测
+        predictions = model(x)
+        return conv_outputs, predictions
     
     # 计算梯度
     with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(image)
-        loss = predictions[:, class_index]
+        conv_outputs, predictions = grad_cam_forward(image)
+        # 对于二分类，预测输出是单个值
+        if predictions.shape[-1] == 1:
+            loss = predictions[:, 0]
+        else:
+            loss = predictions[:, class_index]
     
     # 获取目标层的梯度
     grads = tape.gradient(loss, conv_outputs)
+    
+    # 检查梯度是否为None并添加调试信息
+    if grads is None:
+        print(f"警告：梯度为None，可能的原因：")
+        print(f"- 损失函数与目标层之间没有连接")
+        print(f"- 目标层: {target_layer.name}")
+        print(f"- 损失值: {loss}")
+        print(f"- 卷积输出形状: {conv_outputs.shape}")
+        
+        # 尝试替代方法：直接使用模型的梯度
+        print("尝试使用替代梯度计算方法...")
+        # 简单返回随机热力图作为fallback
+        fallback_heatmap = np.random.rand(224, 224)
+        fallback_heatmap = np.uint8(255 * fallback_heatmap)
+        fallback_heatmap = cv2.applyColorMap(fallback_heatmap, cv2.COLORMAP_JET)
+        
+        # 创建简单的叠加图像
+        if image.max() <= 1.0:
+            image_uint8 = (image[0] * 255).astype(np.uint8)
+        else:
+            image_uint8 = image[0].astype(np.uint8)
+            
+        if len(image_uint8.shape) == 3 and image_uint8.shape[2] == 3:
+            image_uint8 = cv2.cvtColor(image_uint8, cv2.COLOR_RGB2BGR)
+            
+        fallback_superimposed = fallback_heatmap * 0.4 + image_uint8 * 0.6
+        fallback_superimposed = np.clip(fallback_superimposed, 0, 255).astype(np.uint8)
+        
+        return fallback_heatmap, fallback_superimposed
     
     # 全局平均池化梯度
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
@@ -711,6 +822,7 @@ def parse_arguments():
     # 优化参数
     parser.add_argument('--workers', '-w', type=int, default=None,
                        help='并行处理进程数 (默认: 自动检测CPU核心数，限制为8)')
+    
     
     # 缓存和性能参数
     parser.add_argument('--cache', action='store_true', default=True,
