@@ -146,13 +146,13 @@ python main.py --mode train --config bilstm_config.json
 # 方式3: 使用命令行参数快速调整
 python main.py --mode train --feature-model efficientnet --epochs 50
 
-# 方式4: 🆕 备份文件风格数据结构训练（推荐）
-# 配置 embryo_info_path 后使用结构化数据训练
-python main.py --mode train --config backup_style_config.json
+# 方式4: 🆕 backup_final.py完全匹配策略训练（推荐）
+# 配置服务器CSV路径后使用与backup_final.py完全相同的数据策略
+python main.py --mode train --config bilstm_config.json
 
-# 方式5: 自动生成评分字典并训练（传统功能）
+# 方式5: 自动生成评分字典并训练（传统功能，向后兼容）
 # 在配置文件中设置CSV路径后，系统会自动生成score_dict.json
-python main.py --mode train --config my_config.json
+python main.py --mode train --config legacy_config.json
 ```
 
 ### 🔧 模块化编程使用
@@ -396,20 +396,20 @@ python main.py --mode train --config bilstm_config.json --epochs 100 --batch-siz
 
 #### 📁 数据路径参数
 
-**🔑 关键配置项**：
+**🔑 关键配置项（backup_final.py策略）**：
 ```json
 {
-  "data_root": "/path/to/your/data",           // 数据根目录（必须是绝对路径）
-  "image_folder": "image",                    // 图像文件夹名称
-  "score_dict_path": "score_dict.json",       // 分数字典文件路径
-  "cache_dir": "bilstm_feature_cache",        // 特征缓存目录
+  "data_root": "/liaozizhuo/image",                // 服务器图像根目录（必须是绝对路径）
+  "cache_dir": "bilstm_feature_cache",             // 特征缓存目录
   
-  // 🆕 备份文件风格数据结构支持（推荐）
-  "embryo_info_path": "BiLSTM/embryo_info.csv",    // 胚胎图像信息文件路径 (自动生成)
+  // 🆕 backup_final.py完全匹配策略（当前推荐）
+  "maindb_csv_path": "/liaozizhuo/scripts/MainDB.csv",                      // 主数据库CSV文件路径
+  "filtered_csv_path": "/liaozizhuo/scripts/filtered_clean_embryos.csv",    // 胚胎信息CSV文件路径
+  "slide_info_path": "/liaozizhuo/scripts/SlidePatientBirthDates.csv",      // 年龄信息CSV文件路径
   
-  // 🔄 自动评分字典生成功能（传统方式，可选）
-  "maindb_csv_path": "",                           // 主数据库CSV文件路径
-  "filtered_csv_path": ""                          // 低质量胚胎CSV文件路径（可选）
+  // 🔄 传统方式（向后兼容，可选）
+  "score_dict_path": "score_dict.json",           // 评分字典文件路径
+  "embryo_info_path": "BiLSTM/embryo_info.csv"    // 胚胎信息文件路径（传统方式）
 }
 ```
 
@@ -898,7 +898,28 @@ def _build_models(self):
 
 ## 📝 更新日志
 
-### v2.3.0 (当前版本)
+### v2.4.0 (当前版本) - 完全匹配backup_final.py策略
+- ✅ 🆕 **完全匹配backup_final.py数据加载策略**
+  - 🔄 新增 `load_and_prepare_embryo_data()` 函数，完全按照原backup策略
+  - 📊 使用 `filtered_clean_embryos.csv` 直接读取胚胎信息，而不是生成评分字典
+  - 🎯 ICM/TE评分映射：`{'A': 1, 'B': 2, 'C': 4}` 和 `{'A': 1, 'B': 3, 'C': 4}`
+  - 🧬 poor胚胎自动处理：分配6.0-6.5随机评分
+  - 👴 年龄信息：通过`PatientID`前缀映射到`SlidePatientBirthDates.csv`
+  - 📈 缺失值处理：使用**中位数填充**而不是跳过胚胎，避免使用默认值
+- ✅ 🆕 **服务器环境兼容性**
+  - 🖼️ 保留复杂目录结构图像读取功能（`/liaozizhuo/image/D2023.../images/F0/`）
+  - 🔍 保留图像格式检测和临时文件处理
+  - 💾 智能缓存系统与新数据策略完全集成
+- ✅ 🆕 **配置文件更新**
+  - 📋 更新 `bilstm_config.json` 匹配服务器路径
+  - 🔧 新增 `maindb_csv_path`, `filtered_csv_path`, `slide_info_path` 配置
+  - 🎯 `data_root` 更新为 `"/liaozizhuo/image"`
+- ✅ 🆕 **向后兼容性保持**
+  - 🔄 `stratified_cross_validation_with_cache()` 支持新旧两套参数
+  - 📊 自动检测使用backup策略还是传统策略
+  - 🛠️ 保持所有原有功能接口不变
+
+### v2.3.0 (历史版本)
 - ✅ 🆕 **自动胚胎信息文件生成系统**
   - 🔄 自动从 `score_dict.json` 生成 `embryo_info.csv`
   - 📊 BS分数到质量等级的智能映射 (Excellent/Good/Fair/Poor)
@@ -944,6 +965,160 @@ def _build_models(self):
 - 基础BiLSTM模型实现
 - 简单特征提取和缓存
 - 基本交叉验证功能
+
+## 🔄 完整训练流程详解
+
+### 📋 训练流程概览
+
+BiLSTM胚胎分类系统使用**双层机器学习管道**，完整训练流程如下：
+
+```
+                           BiLSTM胚胎分类系统 - 完整训练流程
+                                        
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                                🎯 一键启动                                          │
+│                       python main.py --mode train                                  │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         1️⃣ 数据加载与准备 (backup_final.py策略)                     │
+│                                                                                     │
+│  📋 MainDB.csv                🧬 filtered_clean_embryos.csv      👴 SlidePatientBirthDates.csv │
+│  ├─ ICM评分映射               ├─ 胚胎信息(ID,质量,患者ID)          ├─ 年龄信息映射              │
+│  ├─ TE评分映射                ├─ EmbryoQuality                    └─ 中位数填充缺失值         │
+│  └─ BS_prime计算              └─ poor胚胎随机评分(6.0-6.5)                                  │
+│                                                                                     │
+│  输出: root_dir + score_dict + valid_embryo_df                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            2️⃣ 图像预处理 (STORK管道)                               │
+│                                                                                     │
+│  📁 复杂目录结构              🔍 智能图像搜索             ⭕ Hough圆检测            │
+│  /embryo_id/                  ├─ images/F0/ (优先)        ├─ 培养皿边界检测         │
+│  └─images/                    ├─ images/F15/              ├─ 96.2%成功率            │
+│    ├─F0/                      └─ images/F30/              └─ 智能裁剪               │
+│    ├─F15/ ← focal depth       🖼️ 格式检测                📐 标准化                │
+│    └─图像文件                  └─ 支持无扩展名图像         └─ 224x224 + 数据增强    │
+│                                                                                     │
+│  输出: 预处理后的标准化图像 [batch_size, 224, 224, 3]                              │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            3️⃣ 多模型特征提取                                        │
+│                                                                                     │
+│  🧠 预训练模型融合            💾 智能缓存系统              🚀 性能优化               │
+│  ├─ EfficientNetV2M (1280维) ├─ MD5哈希键                 ├─ 9次→1次重复优化         │
+│  ├─ ResNet152V2 (2048维)     ├─ 原子文件操作              ├─ GPU内存管理             │
+│  ├─ DenseNet201 (1920维)     ├─ 自动失效检测             └─ 多GPU并行               │
+│  ├─ VGG16 (512维)            └─ 缓存复用                                           │
+│  └─ 融合特征 (5760维)                                                              │
+│                                                                                     │
+│  输出: 高维深度特征 [batch_size, sequence_length, 5760]                            │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                          4️⃣ BiLSTM模型训练 (第一层 - 回归)                         │
+│                                                                                     │
+│  🧠 神经网络架构                                                                   │
+│  Input(5760) → Bidirectional(LSTM(128)) → TimeDistributed(Dense(64)) → Dense(1)   │
+│                                                                                     │
+│  🔄 特性优势                 🛡️ 正则化策略              ⏱️ 训练控制                │
+│  ├─ 双向LSTM时序建模         ├─ Dropout(0.3)             ├─ EarlyStopping           │
+│  ├─ 捕获前后关系             ├─ 防过拟合                 ├─ 学习率调度               │
+│  └─ 连续BS评分预测           └─ L2正则化                 └─ 模型检查点               │
+│                                                                                     │
+│  输出: 训练好的BiLSTM回归模型 + 囊胚评分预测                                       │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         5️⃣ 逻辑回归分类 (第二层 - 分类)                            │
+│                                                                                     │
+│  🔗 特征融合                  ⚖️ 类别平衡                📊 最终决策               │
+│  ├─ BiLSTM预测评分 (连续)     ├─ balanced权重策略          ├─ 二分类输出             │
+│  └─ 母体年龄 (临床特征)       ├─ 处理数据不平衡            ├─ Excellent/Good vs     │
+│                               └─ 标准化预处理              └─ Fair/Poor             │
+│  🎯 双层优势                                                                      │
+│  ├─ 专门化训练: BiLSTM专注回归 + 逻辑回归专注分类                                   │
+│  ├─ 特征互补: 深度学习特征 + 临床经验特征                                          │
+│  └─ 性能提升: 两阶段优于端到端                                                    │
+│                                                                                     │
+│  输出: 最终分类结果 + 概率分数 + 性能指标                                          │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            6️⃣ 交叉验证评估                                         │
+│                                                                                     │
+│  🔀 严格验证策略              📊 数据分离                  📈 多指标评估            │
+│  ├─ 4折分层K折验证            ├─ 70%训练 / 30%测试         ├─ 准确率 (Accuracy)     │
+│  ├─ 确保类别平衡              ├─ 避免数据泄漏              ├─ AUC分数               │
+│  ├─ 随机种子控制              └─ 严格分离                 ├─ 精确率 (Precision)    │
+│  └─ 可重现结果                🎨 训练策略                 ├─ 召回率 (Recall)       │
+│                               ├─ 训练时数据增强            ├─ F1分数                │
+│                               └─ 验证时禁用增强            └─ 混淆矩阵               │
+│                                                                                     │
+│  输出: 平均性能 ± 标准差 + 各折详细结果                                            │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           7️⃣ 结果可视化与保存                                      │
+│                                                                                     │
+│  📈 综合可视化                📁 模型保存                  📊 结果输出              │
+│  ├─ training_curves.png       ├─ fold_1_model.h5           ├─ cv_results.json      │
+│  ├─ confusion_matrices.png    ├─ fold_2_model.h5           ├─ 详细数值结果         │
+│  ├─ roc_curves.png           ├─ fold_3_model.h5           ├─ 配置参数记录         │
+│  └─ performance_summary.png   └─ fold_4_model.h5           └─ 训练日志             │
+│                                                                                     │
+│  🎯 最终输出: 完整的性能报告 + 训练好的模型 + 可视化结果                            │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+
+                          ✨ 训练完成！系统准备用于胚胎质量预测 ✨
+```
+
+### 🎯 核心优势总结
+
+```
+💡 双层机器学习管道
+├─ 第一层: BiLSTM回归 → 预测连续囊胚评分
+└─ 第二层: 逻辑回归 → 最终质量分类
+
+🔧 智能自动化
+├─ backup_final.py完全匹配策略
+├─ 端到端自动化流程  
+├─ 智能缓存与优化
+└─ 一键训练命令
+
+✅ 严格验证框架
+├─ 4折分层交叉验证
+├─ 数据泄漏防护
+├─ 多指标综合评估
+└─ 可重现结果
+
+🚀 性能优化
+├─ GPU内存管理
+├─ 特征缓存复用
+├─ 多模型融合
+└─ 参数自动调整
+```
+
+### 📋 快速开始
+
+```bash
+# 完整训练流程（一键启动）
+python main.py --mode train --config bilstm_config.json
+
+# 训练过程监控
+nvidia-smi                              # GPU使用情况
+tail -f bilstm_results/training.log     # 实时日志
+du -sh bilstm_feature_cache/            # 缓存使用情况
+```
 
 ## 📞 技术支持
 

@@ -13,6 +13,127 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
+# ======================================================================
+# 匹配backup_final.py策略的数据加载函数
+# ======================================================================
+
+def load_and_prepare_embryo_data(config):
+    """
+    加载和准备胚胎数据，完全匹配原backup_final.py的策略
+    
+    Args:
+        config: BiLSTMConfig配置对象
+        
+    Returns:
+        tuple: (root_dir, score_dict, valid_embryo_df)
+    """
+    print("=== 数据加载和准备 ===")
+    
+    # 获取配置参数
+    root_dir = "/liaozizhuo/image"
+    maindb_csv_path = config.get('maindb_csv_path') or "/liaozizhuo/scripts/MainDB.csv"
+    filtered_csv_path = config.get('filtered_csv_path') or "/liaozizhuo/scripts/filtered_clean_embryos.csv"
+    slide_info_path = config.get('slide_info_path') or "/liaozizhuo/scripts/SlidePatientBirthDates.csv"
+    
+    # 检查必需文件
+    required_files = [maindb_csv_path, filtered_csv_path]
+    for file_path in required_files:
+        if not os.path.exists(file_path):
+            print(f"⚠️ 必需文件不存在: {file_path}")
+    
+    # 1. 加载评分信息（使用原backup策略）
+    print("📋 加载评分信息...")
+    score_dict = load_score_dict_backup_style(maindb_csv_path, filtered_csv_path)
+    
+    # 2. 读取胚胎信息
+    print("🧬 读取胚胎信息...")
+    try:
+        valid_embryo_df = pd.read_csv(filtered_csv_path)
+        print(f"✅ 成功加载胚胎信息: {valid_embryo_df.shape}")
+    except Exception as e:
+        print(f"❌ 加载胚胎信息失败: {e}")
+        raise
+    
+    # 3. 加载年龄信息
+    print("👴 加载年龄信息...")
+    if os.path.exists(slide_info_path):
+        try:
+            slide_info_df = pd.read_csv(slide_info_path)
+            print(f"✅ 成功加载年龄信息: {slide_info_df.shape}")
+            
+            # 提取年龄映射（完全按照原backup策略）
+            slide_info_df["EmbryoPatientID"] = slide_info_df["SlideID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
+            age_map = dict(zip(slide_info_df["EmbryoPatientID"], slide_info_df["Age"]))
+            
+            # 将年龄映射到胚胎数据（使用PatientID列）
+            valid_embryo_df["PatientID_Prefix"] = valid_embryo_df["PatientID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
+            valid_embryo_df["Age"] = valid_embryo_df["PatientID_Prefix"].map(age_map)
+            
+            # 检查年龄数据完整性并填充缺失值（使用中位数，不跳过）
+            age_missing = valid_embryo_df["Age"].isna().sum()
+            if age_missing > 0:
+                print(f"⚠️ {age_missing} 个胚胎缺少年龄信息")
+                median_age = valid_embryo_df["Age"].median()
+                valid_embryo_df["Age"].fillna(median_age, inplace=True)
+                print(f"✅ 用中位数年龄 {median_age:.1f} 填充了缺失值")
+            
+        except Exception as e:
+            print(f"❌ 加载年龄信息失败: {e}")
+            # 创建默认年龄列
+            print("📝 创建默认年龄信息")
+            valid_embryo_df["Age"] = 30.0
+    else:
+        print(f"⚠️ 年龄信息文件不存在: {slide_info_path}")
+        # 创建默认年龄列
+        print("📝 创建默认年龄信息")
+        valid_embryo_df["Age"] = 30.0
+    
+    # 4. 数据验证
+    print(f"📊 总胚胎数量: {len(valid_embryo_df)}")
+    if 'EmbryoQuality' in valid_embryo_df.columns:
+        print(f"📊 质量分布:\n{valid_embryo_df['EmbryoQuality'].value_counts()}")
+    print(f"📊 年龄范围: {valid_embryo_df['Age'].min():.1f} - {valid_embryo_df['Age'].max():.1f}")
+    
+    # 检查数据质量
+    if 'EmbryoQuality' in valid_embryo_df.columns:
+        quality_counts = valid_embryo_df['EmbryoQuality'].value_counts()
+        if len(quality_counts) < 2:
+            print("⚠️ 胚胎质量类别不足，可能影响训练效果")
+    
+    return root_dir, score_dict, valid_embryo_df
+
+
+def load_score_dict_backup_style(maindb_csv_path, filtered_csv_path):
+    """
+    按照backup_final.py的策略加载评分字典
+    """
+    print(f"📋 从MainDB加载评分: {maindb_csv_path}")
+    
+    df = pd.read_csv(maindb_csv_path)
+    
+    # ICM和TE映射（完全按照backup策略）
+    icm_map = {'A': 1, 'B': 2, 'C': 4}
+    te_map = {'A': 1, 'B': 3, 'C': 4}
+    
+    df["ICM_score"] = df["ICM"].map(icm_map)
+    df["TE_score"] = df["TE"].map(te_map)
+    df["BS_prime"] = df["ICM_score"] + df["TE_score"]
+    
+    score_dict = dict(zip(df["EmbryoID"], df["BS_prime"]))
+    
+    # 处理filtered_clean_embryos.csv中的poor胚胎（完全按照backup策略）
+    if os.path.exists(filtered_csv_path):
+        print(f"📋 处理poor胚胎: {filtered_csv_path}")
+        filtered_df = pd.read_csv(filtered_csv_path)
+        if 'EmbryoQuality' in filtered_df.columns:
+            poor_embryos = filtered_df[filtered_df["EmbryoQuality"] == "poor"]
+            for emb_id in poor_embryos["EmbryoID"].unique():
+                if emb_id not in score_dict:
+                    score_dict[emb_id] = 6.0 + random.uniform(0, 0.5)
+                    
+    print(f"✅ 加载了 {len(score_dict)} 个胚胎的评分信息")
+    return score_dict
+
 def ensure_float32(*arrays):
     """
     Convert data types to float32.
@@ -365,7 +486,7 @@ def safe_divide(a, b, default=0.0):
     """
     return default if b == 0 else a / b
 
-def generate_embryo_info_from_score_dict(score_dict_path, output_path, data_root, image_folder="image", default_age=30):
+def generate_embryo_info_from_score_dict(score_dict_path, output_path, data_root, image_folder="image", require_age=True):
     """
     从评分字典生成胚胎信息CSV文件
     
@@ -374,7 +495,7 @@ def generate_embryo_info_from_score_dict(score_dict_path, output_path, data_root
         output_path (str): 输出的 embryo_info.csv 文件路径
         data_root (str): 数据根目录路径
         image_folder (str): 图像文件夹名称
-        default_age (int): 默认年龄
+        require_age (bool): 是否要求必须有年龄信息，True则跳过无年龄信息的胚胎
         
     Returns:
         str: 生成的文件路径
@@ -412,7 +533,12 @@ def generate_embryo_info_from_score_dict(score_dict_path, output_path, data_root
     for embryo_id, info in score_dict.items():
         # 获取基本信息
         bs_score = info.get("bs_score", 5.0)
-        age = info.get("age", default_age)
+        age = info.get("age")
+        
+        # 如果要求必须有年龄信息但没有找到，跳过这个胚胎
+        if require_age and age is None:
+            print(f"❌ 跳过胚胎 {embryo_id}：score_dict中缺少年龄信息")
+            continue
         
         # 生成质量等级
         quality = bs_score_to_quality(bs_score)
@@ -445,13 +571,68 @@ def generate_embryo_info_from_score_dict(score_dict_path, output_path, data_root
     
     return output_path
 
-def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="score_dict.json"):
+def load_age_information(slide_info_path):
+    """
+    从SlidePatientBirthDates.csv加载年龄信息
+    
+    Args:
+        slide_info_path (str): SlidePatientBirthDates.csv 文件路径
+        
+    Returns:
+        dict: 胚胎ID到年龄的映射字典，如果文件不存在返回None
+    """
+    if not slide_info_path or not os.path.exists(slide_info_path):
+        print(f"⚠️ 年龄信息文件不存在: {slide_info_path}")
+        return None
+    
+    try:
+        print(f"📂 读取年龄信息文件: {slide_info_path}")
+        slide_info_df = pd.read_csv(slide_info_path)
+        print(f"✅ 成功加载年龄信息: {slide_info_df.shape}")
+        
+        # 提取胚胎患者ID模式：D2023.09.04_S00918_I4425_P
+        if 'SlideID' in slide_info_df.columns:
+            slide_info_df["EmbryoPatientID"] = slide_info_df["SlideID"].str.extract(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)")
+            
+            # 创建年龄映射
+            age_map = dict(zip(slide_info_df["EmbryoPatientID"], slide_info_df["Age"]))
+            
+            print(f"✅ 提取到 {len(age_map)} 个患者的年龄信息")
+            return age_map
+        else:
+            print("❌ SlideID列不存在于年龄信息文件中")
+            return None
+            
+    except Exception as e:
+        print(f"❌ 加载年龄信息失败: {e}")
+        return None
+
+
+def extract_patient_id_from_embryo_id(embryo_id):
+    """
+    从胚胎ID中提取患者ID前缀
+    
+    Args:
+        embryo_id (str): 胚胎ID，如 'D2023.09.04_S00918_I4425_P_10'
+        
+    Returns:
+        str: 患者ID前缀，如 'D2023.09.04_S00918_I4425_P'
+    """
+    import re
+    match = re.match(r"^(D\d{4}\.\d{2}\.\d{2}_S\d{5}_I\d{4}_P)", embryo_id)
+    if match:
+        return match.group(1)
+    return None
+
+
+def generate_score_dict_from_csv(maindb_path, filtered_path=None, slide_info_path=None, output_path="score_dict.json"):
     """
     从CSV文件生成评分字典并保存为JSON
     
     Args:
         maindb_path (str): MainDB.csv 文件路径
         filtered_path (str, optional): filtered_clean_embryos.csv 文件路径
+        slide_info_path (str, optional): SlidePatientBirthDates.csv 年龄信息文件路径
         output_path (str): 输出的 score_dict.json 文件路径
         
     Returns:
@@ -460,6 +641,9 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="s
     import json
     
     print("=== 开始生成评分字典 ===")
+    
+    # 加载年龄信息（如果提供）
+    age_map = load_age_information(slide_info_path) if slide_info_path else None
     
     # 检查主数据文件
     if not os.path.exists(maindb_path):
@@ -487,7 +671,28 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="s
         for _, row in df.iterrows():
             embryo_id = str(row["EmbryoID"])
             bs_score = float(row["BS_prime"])
-            age = float(row.get("Age", 30))  # 默认年龄30
+            
+            # 尝试从年龄映射中获取年龄
+            age = None
+            age_source = None
+            
+            if age_map and embryo_id:
+                # 从胚胎ID提取患者ID前缀
+                patient_id_prefix = extract_patient_id_from_embryo_id(embryo_id)
+                if patient_id_prefix and patient_id_prefix in age_map:
+                    age = float(age_map[patient_id_prefix])
+                    age_source = "SlidePatientBirthDates.csv"
+                    print(f"✅ 为胚胎 {embryo_id} 从年龄文件找到年龄: {age}")
+            
+            if age is None and "Age" in df.columns and pd.notna(row.get("Age")):
+                # 如果CSV文件中直接有Age列
+                age = float(row["Age"])
+                age_source = "MainDB.csv"
+                print(f"✅ 为胚胎 {embryo_id} 从主数据文件找到年龄: {age}")
+            
+            if age is None:
+                print(f"❌ 跳过胚胎 {embryo_id}：缺少年龄信息")
+                continue  # 跳过没有年龄信息的胚胎
             
             # 处理Quality字段，支持文本和数字格式
             if "Quality" in df.columns:
@@ -515,7 +720,28 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, output_path="s
         for _, row in df.iterrows():
             embryo_id = str(row["EmbryoID"])
             bs_score = float(row["BlastocystScore"])
-            age = float(row.get("Age", 30))
+            
+            # 尝试从年龄映射中获取年龄
+            age = None
+            age_source = None
+            
+            if age_map and embryo_id:
+                # 从胚胎ID提取患者ID前缀
+                patient_id_prefix = extract_patient_id_from_embryo_id(embryo_id)
+                if patient_id_prefix and patient_id_prefix in age_map:
+                    age = float(age_map[patient_id_prefix])
+                    age_source = "SlidePatientBirthDates.csv"
+                    print(f"✅ 为胚胎 {embryo_id} 从年龄文件找到年龄: {age}")
+            
+            if age is None and "Age" in df.columns and pd.notna(row.get("Age")):
+                # 如果CSV文件中直接有Age列
+                age = float(row["Age"])
+                age_source = "MainDB.csv"
+                print(f"✅ 为胚胎 {embryo_id} 从主数据文件找到年龄: {age}")
+            
+            if age is None:
+                print(f"❌ 跳过胚胎 {embryo_id}：缺少年龄信息")
+                continue  # 跳过没有年龄信息的胚胎
             
             # 处理Quality字段，支持文本和数字格式
             if "Quality" in df.columns:

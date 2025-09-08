@@ -496,7 +496,9 @@ def stratified_cross_validation_with_cache(
     cache, n_folds=4, test_ratio=0.3, feature_dim=512, lstm_units=128, 
     dropout_rate=0.3, learning_rate=0.001, epochs=100, batch_size=32, 
     patience=15, use_cache=True, use_augmentation=True, verbose=1, random_state=42,
-    score_dict_path=None, embryo_info_path=None
+    score_dict_path=None, embryo_info_path=None,  # 保持向后兼容
+    # 新的backup策略参数
+    root_dir=None, score_dict=None, valid_embryo_df=None
 ):
     """
     执行完整的分层交叉验证训练流程，使用特征缓存系统
@@ -531,37 +533,50 @@ def stratified_cross_validation_with_cache(
         import json
         import pandas as pd
         
-        # 加载评分数据
-        if score_dict_path is None:
-            score_dict_path = os.path.join(cache.data_root, "score_dict.json")
-        elif not os.path.isabs(score_dict_path):
-            # 如果是相对路径，相对于data_root
-            score_dict_path = os.path.join(cache.data_root, score_dict_path)
-        
-        if not os.path.exists(score_dict_path):
-            raise FileNotFoundError(f"评分文件不存在: {score_dict_path}")
+        # 🆕 使用新的backup策略数据
+        if root_dir is not None and score_dict is not None and valid_embryo_df is not None:
+            print(f"✅ 使用backup策略数据")
+            print(f"📊 评分数据: {len(score_dict)} 个胚胎")
+            print(f"📊 胚胎信息: {valid_embryo_df.shape}")
             
-        with open(score_dict_path, 'r') as f:
-            score_data = json.load(f)
-        
-        print(f"✅ 加载评分数据: {len(score_data)} 个胚胎")
-        
-        # 🆕 使用备份文件风格的数据加载方式（必须提供 embryo_info_path）
-        if not embryo_info_path or not embryo_info_path.strip():
-            raise ValueError("必须提供 embryo_info_path 参数（胚胎图像信息文件路径）")
-        
-        if not os.path.exists(embryo_info_path):
-            raise FileNotFoundError(f"胚胎信息文件不存在: {embryo_info_path}")
-        
-        print(f"🔄 使用备份文件风格的数据加载方式")
-        print(f"📂 胚胎信息文件: {embryo_info_path}")
-        
-        # 加载胚胎图像信息
-        embryo_df = pd.read_csv(embryo_info_path)
-        print(f"✅ 加载胚胎信息: {embryo_df.shape}")
+            score_data = score_dict
+            embryo_df = valid_embryo_df
+            
+        else:
+            # 回退到旧的数据加载方式（向后兼容）
+            print(f"⚠️ 使用旧的数据加载方式")
+            
+            # 加载评分数据
+            if score_dict_path is None:
+                score_dict_path = os.path.join(cache.data_root, "score_dict.json")
+            elif not os.path.isabs(score_dict_path):
+                # 如果是相对路径，相对于data_root
+                score_dict_path = os.path.join(cache.data_root, score_dict_path)
+            
+            if not os.path.exists(score_dict_path):
+                raise FileNotFoundError(f"评分文件不存在: {score_dict_path}")
+                
+            with open(score_dict_path, 'r') as f:
+                score_data = json.load(f)
+            
+            print(f"✅ 加载评分数据: {len(score_data)} 个胚胎")
+            
+            # 🆕 使用备份文件风格的数据加载方式（必须提供 embryo_info_path）
+            if not embryo_info_path or not embryo_info_path.strip():
+                raise ValueError("必须提供 embryo_info_path 参数（胚胎图像信息文件路径）")
+            
+            if not os.path.exists(embryo_info_path):
+                raise FileNotFoundError(f"胚胎信息文件不存在: {embryo_info_path}")
+            
+            print(f"🔄 使用备份文件风格的数据加载方式")
+            print(f"📂 胚胎信息文件: {embryo_info_path}")
+            
+            # 加载胚胎图像信息
+            embryo_df = pd.read_csv(embryo_info_path)
+            print(f"✅ 加载胚胎信息: {embryo_df.shape}")
         
         # 检查必要的列
-        required_columns = ['EmbryoID', 'FullPath']
+        required_columns = ['EmbryoID']
         missing_columns = [col for col in required_columns if col not in embryo_df.columns]
         if missing_columns:
             raise ValueError(f"胚胎信息文件缺少必要的列: {missing_columns}")

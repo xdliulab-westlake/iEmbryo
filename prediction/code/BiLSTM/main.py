@@ -45,6 +45,7 @@ class BiLSTMConfig:
             # 评分字典生成路径
             "maindb_csv_path": "",  # MainDB.csv 文件路径
             "filtered_csv_path": "",  # filtered_clean_embryos.csv 文件路径（可选）
+            "slide_info_path": "",  # SlidePatientBirthDates.csv 年龄信息文件路径
             
             # 🆕 备份文件风格的数据结构支持
             "embryo_info_path": "",  # 胚胎图像信息文件路径 (包含EmbryoID, FullPath等列)
@@ -234,6 +235,11 @@ def run_training(config):
         extractor = MultiModelFeatureExtractor(model_name=model_name)
         cache.set_extractor(extractor)
         
+        # 加载数据（使用backup策略）
+        print("\n--- 加载数据（匹配backup策略）---")
+        from BiLSTM.utils import load_and_prepare_embryo_data
+        root_dir, score_dict, valid_embryo_df = load_and_prepare_embryo_data(config)
+        
         # 执行交叉验证训练
         print("\n--- 开始交叉验证训练 ---")
         cv_results = stratified_cross_validation_with_cache(
@@ -251,8 +257,10 @@ def run_training(config):
             use_augmentation=config.get("use_augmentation"),
             verbose=config.get("verbose"),
             random_state=config.get("random_state"),
-            score_dict_path=config.get("score_dict_path"),  # 🆕 传递评分字典路径
-            embryo_info_path=config.get("embryo_info_path")  # 🆕 传递胚胎信息文件路径
+            # 使用新的数据加载策略参数
+            root_dir=root_dir,
+            score_dict=score_dict,
+            valid_embryo_df=valid_embryo_df
         )
         
         # 创建可视化结果
