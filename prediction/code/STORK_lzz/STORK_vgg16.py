@@ -32,10 +32,12 @@ import absl.logging
 import argparse
 import sys
 from preprocessing.data_loader_vgg16 import load_data_with_stork_preprocessing
+from preprocessing.data_augmentation import augment_training_data, get_default_augmenter
 # STORK图像处理函数通过 data_loader_vgg16 间接调用，无需直接导入
 sys.path.append('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code')
 from utils.data_utils import balance_classes, check_class_distribution
 import cv2
+
 
 # Build a pre-trained model with custom top layers (supports multiple architectures)
 def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_classes=2, fine_tune_at=18, fine_tune=False):
@@ -687,7 +689,7 @@ def analyze_attention_patterns(model, X_eval, y_eval, save_dir="attention_analys
 
 # Evaluate Deep Learning Model
 def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'], 
-                               n_folds=4, epochs=50, batch_size=32, img_size=224, fine_tune=True):
+                               n_folds=4, epochs=50, batch_size=32, img_size=224, fine_tune=True, use_augmentation=True):
     """
     四折分层交叉验证评估多个模型
     
@@ -700,6 +702,7 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
         batch_size: 批处理大小
         img_size: 图像尺寸
         fine_tune: 是否启用微调
+        use_augmentation: 是否对训练数据应用数据增强
     
     Returns:
         dict: 包含所有模型交叉验证结果的字典
@@ -708,6 +711,8 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
     
     print(f"\n🎯 开始 {n_folds} 折交叉验证，比较 {len(model_names)} 个模型")
     print(f"🔢 模型列表: {', '.join(model_names)}")
+    print(f"🔧 微调模式: {'启用' if fine_tune else '禁用'}")
+    print(f"🎨 数据增强: {'启用' if use_augmentation else '禁用'}")
     
     if images is None or len(images) == 0:
         raise ValueError("无法加载数据，请检查数据")
@@ -742,6 +747,13 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
         print(f"   训练集: {len(X_train)} 样本 (类别: {np.bincount(y_train.astype(int))})")
         print(f"   验证集: {len(X_val)} 样本 (类别: {np.bincount(y_val.astype(int))})")
         
+        # 对训练数据应用数据增强（如果启用）
+        if use_augmentation:
+            print("🎨 应用数据增强到训练集...")
+            X_train_augmented = augment_training_data(X_train)
+        else:
+            X_train_augmented = X_train
+        
         # 为每个模型训练和评估
         for model_name in model_names:
             print(f"\n🚀 训练模型: {model_name.upper()}")
@@ -761,9 +773,9 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
                     ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=0)
                 ]
                 
-                # 训练模型
+                # 训练模型（使用增强后的训练数据）
                 history = model.fit(
-                    X_train, y_train,
+                    X_train_augmented, y_train,
                     validation_data=(X_val, y_val),
                     epochs=epochs,
                     batch_size=batch_size,
@@ -1034,6 +1046,9 @@ def parse_arguments():
   # 交叉验证禁用微调（更快但性能可能较差）
   python STORK_vgg16.py --cv --cv-no-fine-tune --cv-epochs 30
   
+  # 交叉验证禁用数据增强（更快训练）
+  python STORK_vgg16.py --cv --cv-no-augmentation --cv-epochs 30
+  
   # 其他功能
   python STORK_vgg16.py --list-models
 
@@ -1120,6 +1135,9 @@ def parse_arguments():
     
     parser.add_argument('--cv-no-fine-tune', action='store_true', default=False,
                        help='交叉验证中禁用微调 (默认启用微调)')
+    
+    parser.add_argument('--cv-no-augmentation', action='store_true', default=False,
+                       help='交叉验证中禁用数据增强 (默认启用数据增强)')
     
     # 实用功能
     parser.add_argument('--list-models', action='store_true',
@@ -1274,7 +1292,8 @@ if __name__ == "__main__":
             epochs=args.cv_epochs,
             batch_size=args.batch_size,
             img_size=args.img_size,
-            fine_tune=not args.cv_no_fine_tune
+            fine_tune=not args.cv_no_fine_tune,
+            use_augmentation=not args.cv_no_augmentation
         )
         
         # 绘制结果

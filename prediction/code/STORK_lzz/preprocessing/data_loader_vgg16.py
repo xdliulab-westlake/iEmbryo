@@ -13,6 +13,7 @@ from tensorflow.keras.applications.resnet50 import preprocess_input as resnet50_
 from tensorflow.keras.applications.inception_v3 import preprocess_input as inception_preprocess
 from tensorflow.keras.applications.efficientnet import preprocess_input as efficientnet_preprocess
 from .stork_image_utils import *
+from .data_augmentation import get_default_augmenter
 
 # STORK + 多种预训练模型预处理管道
 def preprocess_image_stork_universal(image, img_size=224, is_training=True, model_name='vgg16'):
@@ -51,33 +52,9 @@ def preprocess_image_stork_universal(image, img_size=224, is_training=True, mode
     image = image.astype(np.float32)
     
     if is_training:
-        # 增强版数据增强 - 提升模型泛化能力
-        # 随机水平翻转
-        if np.random.rand() > 0.5:
-            image = np.fliplr(image)
-        
-        # 随机垂直翻转 (胚胎图像方向不敏感)
-        if np.random.rand() > 0.5:
-            image = np.flipud(image)
-        
-        # 随机旋转 (小角度)
-        if np.random.rand() > 0.6:
-            angle = np.random.uniform(-15, 15)
-            h, w = image.shape[:2]
-            center = (w // 2, h // 2)
-            matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-            image = cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REFLECT)
-        
-        # 随机亮度调整
-        if np.random.rand() > 0.6:
-            brightness_factor = np.random.uniform(0.85, 1.15)
-            image = np.clip(image * brightness_factor, 0, 255)
-        
-        # 随机对比度调整
-        if np.random.rand() > 0.6:
-            contrast_factor = np.random.uniform(0.85, 1.15)
-            mean = np.mean(image)
-            image = np.clip((image - mean) * contrast_factor + mean, 0, 255)
+        # 使用统一的数据增强模块
+        augmenter = get_default_augmenter()
+        image = augmenter.augment_single_image(image)
         
         # 随机色调调整 (轻微)
         if np.random.rand() > 0.8:
@@ -135,34 +112,10 @@ def optimized_preprocess_single_image(args):
         # 转换为float32
         img = img.astype(np.float32)
         
-        # 增强版数据增强（仅训练时）
+        # 使用统一的数据增强模块（仅训练时）
         if is_training:
-            # 随机水平翻转
-            if np.random.rand() > 0.5:
-                img = np.fliplr(img)
-            
-            # 随机垂直翻转
-            if np.random.rand() > 0.5:
-                img = np.flipud(img)
-            
-            # 随机旋转 (小角度)
-            if np.random.rand() > 0.6:
-                angle = np.random.uniform(-15, 15)
-                h, w = img.shape[:2]
-                center = (w // 2, h // 2)
-                matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-                img = cv2.warpAffine(img, matrix, (w, h), borderMode=cv2.BORDER_REFLECT)
-            
-            # 随机亮度调整
-            if np.random.rand() > 0.6:
-                brightness_factor = np.random.uniform(0.85, 1.15)
-                img = np.clip(img * brightness_factor, 0, 255)
-            
-            # 随机对比度调整
-            if np.random.rand() > 0.6:
-                contrast_factor = np.random.uniform(0.85, 1.15)
-                mean = np.mean(img)
-                img = np.clip((img - mean) * contrast_factor + mean, 0, 255)
+            augmenter = get_default_augmenter()
+            img = augmenter.augment_single_image(img)
         
         # 应用模型特定预处理
         preprocess_functions = {
