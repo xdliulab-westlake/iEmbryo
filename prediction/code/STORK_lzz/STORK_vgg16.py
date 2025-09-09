@@ -26,7 +26,7 @@ from tensorflow.keras.regularizers import l1_l2, l2
 from tensorflow.keras.metrics import Precision, Recall, CategoricalAccuracy
 from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
 from tensorflow.keras.applications import InceptionV3, EfficientNetB0, ResNet50
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix
 import absl.logging
 import argparse
@@ -91,11 +91,6 @@ def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_cl
     print(f"🏗️  构建模型: {model_name.upper()}")
     print(f"📝 描述: {config['description']}")
     
-    # 使用默认微调层数如果没有指定
-    if fine_tune_at == 18 and model_name != 'vgg16':
-        fine_tune_at = config['default_fine_tune_at']
-        print(f"🔧 使用 {model_name.upper()} 的推荐微调层数: {fine_tune_at}")
-    
     # 加载预训练模型
     feature_extractor = config['model_class'](
         weights="imagenet",
@@ -104,16 +99,28 @@ def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_cl
         input_shape=input_shape
     )
     
-    # 配置可训练层
+    total_layers = len(feature_extractor.layers)
+    
+    # 使用最优微调策略：固定前1/3的层，微调后2/3的层
     if fine_tune:
-        print(f"🔓 启用微调: 从第 {fine_tune_at} 层开始解冻")
-        for i, layer in enumerate(feature_extractor.layers[:fine_tune_at]):
+        optimal_fine_tune_at = int(total_layers * 1/3)
+        
+        print(f"🔓 启用最优微调策略: 固定前1/3层")
+        print(f"📊 {model_name.upper()} 层数分析:")
+        print(f"   总层数: {total_layers}")
+        print(f"   固定层数: {optimal_fine_tune_at} (前 {optimal_fine_tune_at/total_layers:.1%})")
+        print(f"   微调层数: {total_layers - optimal_fine_tune_at} (后 {(total_layers - optimal_fine_tune_at)/total_layers:.1%})")
+        
+        # 冻结前1/3的层
+        for i, layer in enumerate(feature_extractor.layers[:optimal_fine_tune_at]):
             layer.trainable = False
-        for i, layer in enumerate(feature_extractor.layers[fine_tune_at:]):
+        
+        # 解冻后2/3的层
+        for i, layer in enumerate(feature_extractor.layers[optimal_fine_tune_at:]):
             layer.trainable = True
             
         trainable_count = sum(1 for layer in feature_extractor.layers if layer.trainable)
-        print(f"   可训练层数: {trainable_count}/{len(feature_extractor.layers)}")
+        print(f"✅ 微调配置完成: {trainable_count}/{total_layers} 层可训练")
     else:
         print("🔒 冻结所有预训练层")
         feature_extractor.trainable = False
@@ -132,7 +139,10 @@ def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_cl
     x = Dropout(dropout_rate)(x)
     x = Dense(256, activation='relu', name='intermediate_dense_2')(x)
     x = Dropout(dropout_rate * 0.8)(x)  # 逐层递减dropout
-    outputs = Dense(1, activation='sigmoid', name='embryo_prediction')(x)
+    if num_classes == 1:
+        outputs = Dense(1, activation='sigmoid', name='embryo_prediction')(x)
+    else:
+        outputs = Dense(num_classes, activation='softmax', name='embryo_prediction')(x)
 
     # 定义模型
     model = Model(inputs=inputs, outputs=outputs, name=f"embryo_classifier_{model_name}")
@@ -676,6 +686,242 @@ def analyze_attention_patterns(model, X_eval, y_eval, save_dir="attention_analys
     print(f"注意力分析结果已保存到: {save_dir}")
 
 # Evaluate Deep Learning Model
+def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'], 
+                               n_folds=4, epochs=50, batch_size=32, img_size=224, fine_tune=True):
+    """
+    四折分层交叉验证评估多个模型
+    
+    Args:
+        images: 输入图像数组
+        labels: 标签数组
+        model_names: 要比较的模型列表
+        n_folds: 折数
+        epochs: 训练轮数
+        batch_size: 批处理大小
+        img_size: 图像尺寸
+        fine_tune: 是否启用微调
+    
+    Returns:
+        dict: 包含所有模型交叉验证结果的字典
+    """
+    from sklearn.metrics import precision_score, recall_score, f1_score
+    
+    print(f"\n🎯 开始 {n_folds} 折交叉验证，比较 {len(model_names)} 个模型")
+    print(f"🔢 模型列表: {', '.join(model_names)}")
+    
+    if images is None or len(images) == 0:
+        raise ValueError("无法加载数据，请检查数据")
+    
+    print(f"✅ 数据准备完成: {len(images)} 个样本")
+    print(f"   - 类别分布: {np.bincount(labels.astype(int))}")
+    
+    # 初始化结果存储
+    results = {model_name: {
+        'fold_scores': [],
+        'fold_aucs': [],
+        'fold_precision': [],
+        'fold_recall': [],
+        'fold_f1': []
+    } for model_name in model_names}
+    
+    # 创建分层K折
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    
+    print(f"\n🔄 开始 {n_folds} 折交叉验证...")
+    
+    for fold, (train_idx, val_idx) in enumerate(skf.split(images, labels)):
+        print(f"\n{'='*60}")
+        print(f"📋 第 {fold + 1}/{n_folds} 折")
+        print(f"{'='*60}")
+        
+        # 分割数据
+        X_train, X_val = images[train_idx], images[val_idx]
+        y_train, y_val = labels[train_idx], labels[val_idx]
+        
+        print(f"📊 数据分割:")
+        print(f"   训练集: {len(X_train)} 样本 (类别: {np.bincount(y_train.astype(int))})")
+        print(f"   验证集: {len(X_val)} 样本 (类别: {np.bincount(y_val.astype(int))})")
+        
+        # 为每个模型训练和评估
+        for model_name in model_names:
+            print(f"\n🚀 训练模型: {model_name.upper()}")
+            
+            try:
+                # 构建模型
+                model = build_pretrained_model(model_name=model_name, fine_tune=fine_tune, num_classes=1)
+                
+                # 修改输出层为sigmoid激活
+                if model.output.shape[-1] == 2:  # 如果是2类输出
+                    # 重新构建模型使用单一输出
+                    model = build_pretrained_model(model_name=model_name, fine_tune=fine_tune, num_classes=1)
+                
+                # 设置回调
+                callbacks = [
+                    EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=0),
+                    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=0)
+                ]
+                
+                # 训练模型
+                history = model.fit(
+                    X_train, y_train,
+                    validation_data=(X_val, y_val),
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    callbacks=callbacks,
+                    verbose=0
+                )
+                
+                # 评估模型
+                val_loss, val_acc = model.evaluate(X_val, y_val, verbose=0)
+                
+                # 计算预测和AUC
+                y_pred_proba = model.predict(X_val, verbose=0)
+                if len(y_pred_proba.shape) > 1 and y_pred_proba.shape[1] > 1:
+                    y_pred_proba = y_pred_proba[:, 1]  # 取正类概率
+                else:
+                    y_pred_proba = y_pred_proba.flatten()
+                
+                val_auc = roc_auc_score(y_val, y_pred_proba)
+                
+                # 计算其他指标
+                y_pred = (y_pred_proba > 0.5).astype(int)
+                val_prec = precision_score(y_val, y_pred, zero_division=0)
+                val_rec = recall_score(y_val, y_pred, zero_division=0)
+                val_f1 = f1_score(y_val, y_pred, zero_division=0)
+                
+                # 存储结果
+                results[model_name]['fold_scores'].append(val_acc)
+                results[model_name]['fold_aucs'].append(val_auc)
+                results[model_name]['fold_precision'].append(val_prec)
+                results[model_name]['fold_recall'].append(val_rec)
+                results[model_name]['fold_f1'].append(val_f1)
+                
+                print(f"✅ {model_name.upper()} 结果:")
+                print(f"   准确率: {val_acc:.4f}")
+                print(f"   AUC: {val_auc:.4f}")
+                print(f"   精确率: {val_prec:.4f}")
+                print(f"   召回率: {val_rec:.4f}")
+                print(f"   F1分数: {val_f1:.4f}")
+                
+                # 清理内存
+                del model
+                tf.keras.backend.clear_session()
+                gc.collect()
+                
+            except Exception as e:
+                print(f"❌ {model_name.upper()} 训练失败: {str(e)}")
+                # 填充失败的结果
+                for metric in ['fold_scores', 'fold_aucs', 'fold_precision', 'fold_recall', 'fold_f1']:
+                    results[model_name][metric].append(0.0)
+    
+    return results
+
+def plot_cv_results(results, save_path="cross_validation_comparison.png"):
+    """
+    绘制交叉验证结果的柱状图比较
+    """
+    print(f"\n🎨 绘制交叉验证结果比较图...")
+    
+    model_names = list(results.keys())
+    
+    # 计算平均值和标准差
+    summary = {}
+    for model_name in model_names:
+        summary[model_name] = {
+            'mean_acc': np.mean(results[model_name]['fold_scores']),
+            'std_acc': np.std(results[model_name]['fold_scores']),
+            'mean_auc': np.mean(results[model_name]['fold_aucs']),
+            'std_auc': np.std(results[model_name]['fold_aucs']),
+            'mean_precision': np.mean(results[model_name]['fold_precision']),
+            'std_precision': np.std(results[model_name]['fold_precision']),
+            'mean_recall': np.mean(results[model_name]['fold_recall']),
+            'std_recall': np.std(results[model_name]['fold_recall']),
+            'mean_f1': np.mean(results[model_name]['fold_f1']),
+            'std_f1': np.std(results[model_name]['fold_f1'])
+        }
+    
+    # 设置图形参数
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('🧬 STORK胚胎分类模型交叉验证性能比较', fontsize=16, fontweight='bold')
+    
+    metrics = ['准确率', 'AUC', '精确率', '召回率', 'F1分数']
+    metric_keys = ['mean_acc', 'mean_auc', 'mean_precision', 'mean_recall', 'mean_f1']
+    std_keys = ['std_acc', 'std_auc', 'std_precision', 'std_recall', 'std_f1']
+    
+    # 颜色配置
+    colors = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12']
+    
+    # 绘制每个指标的柱状图
+    for i, (metric, metric_key, std_key) in enumerate(zip(metrics, metric_keys, std_keys)):
+        if i < 5:  # 只绘制5个指标
+            row = i // 3
+            col = i % 3
+            ax = axes[row, col]
+            
+            # 提取数据
+            means = [summary[model][metric_key] for model in model_names]
+            stds = [summary[model][std_key] for model in model_names]
+            
+            # 绘制柱状图
+            bars = ax.bar(range(len(model_names)), means, yerr=stds, 
+                         color=colors[:len(model_names)], alpha=0.8, capsize=5)
+            
+            # 设置图形属性
+            ax.set_title(f'{metric}比较', fontsize=14, fontweight='bold')
+            ax.set_xlabel('模型', fontsize=12)
+            ax.set_ylabel(f'{metric}', fontsize=12)
+            ax.set_xticks(range(len(model_names)))
+            ax.set_xticklabels([name.upper() for name in model_names], rotation=45)
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(0, 1.0)
+            
+            # 在柱子上显示具体数值
+            for j, (bar, mean, std) in enumerate(zip(bars, means, stds)):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height + std + 0.01,
+                       f'{mean:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    # 移除多余的子图
+    axes[1, 2].remove()
+    
+    # 添加最佳模型信息
+    best_models = {}
+    for metric, metric_key in zip(metrics, metric_keys):
+        best_model = max(model_names, key=lambda x: summary[x][metric_key])
+        best_score = summary[best_model][metric_key]
+        best_models[metric] = f"{best_model.upper()} ({best_score:.3f})"
+    
+    # 在右下角添加最佳模型信息
+    textstr = "最佳模型:\n"
+    for metric, best_info in best_models.items():
+        textstr += f"{metric}: {best_info}\n"
+    
+    fig.text(0.70, 0.25, textstr, fontsize=11, 
+             bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.8))
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.93, bottom=0.1)
+    
+    # 保存图形
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✅ 交叉验证比较图已保存: {save_path}")
+    
+    # 显示图形
+    plt.show()
+    
+    # 打印最终结果
+    print(f"\n🏆 交叉验证结果汇总:")
+    print("="*60)
+    for model_name in model_names:
+        print(f"\n{model_name.upper()}:")
+        print(f"   准确率: {summary[model_name]['mean_acc']:.4f} ± {summary[model_name]['std_acc']:.4f}")
+        print(f"   AUC: {summary[model_name]['mean_auc']:.4f} ± {summary[model_name]['std_auc']:.4f}")
+        print(f"   精确率: {summary[model_name]['mean_precision']:.4f} ± {summary[model_name]['std_precision']:.4f}")
+        print(f"   召回率: {summary[model_name]['mean_recall']:.4f} ± {summary[model_name]['std_recall']:.4f}")
+        print(f"   F1分数: {summary[model_name]['mean_f1']:.4f} ± {summary[model_name]['std_f1']:.4f}")
+    
+    return fig, summary
+
 def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test", save_path="auc_curve.pdf", 
                                 generate_gradcam_viz=True, num_gradcam_samples=8):
     """
@@ -775,9 +1021,20 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 示例用法:
+  # 单模型训练
   python STORK_vgg16.py --model vgg16 --epochs 100 --cache --workers 8
   python STORK_vgg16.py --model resnet50 --epochs 50 --no-cache --batch-size 32 --workers 12
-  python STORK_vgg16.py --model efficientnetb0 --fine-tune --gradcam-samples 5 --workers 6
+  
+  # 四折交叉验证比较所有模型（默认启用微调）
+  python STORK_vgg16.py --cross-validation --cv-epochs 50 --batch-size 32
+  
+  # 交叉验证比较指定模型
+  python STORK_vgg16.py --cv --compare-models vgg16 resnet50 --cv-folds 4
+  
+  # 交叉验证禁用微调（更快但性能可能较差）
+  python STORK_vgg16.py --cv --cv-no-fine-tune --cv-epochs 30
+  
+  # 其他功能
   python STORK_vgg16.py --list-models
 
 支持的模型:
@@ -787,8 +1044,11 @@ def parse_arguments():
   - efficientnetb0: EfficientNetB0高效网络，平衡准确率和计算效率
 
 优化特性:
-  - 多进程并行预处理 (5-8x 速度提升)  
+  - 最优微调策略 (固定前1/3层，微调后2/3层)
+  - 四折分层交叉验证 (多模型性能比较)  
+  - 多进程并行预处理 (5-8x 速度提升)
   - NumPy数据增强 (避免TF张量转换开销)
+  - 交叉验证结果可视化 (Bar Plot比较)
   - 详细进度报告和性能统计
         '''
     )
@@ -843,6 +1103,23 @@ def parse_arguments():
     
     parser.add_argument('--no-gradcam', action='store_true',
                        help='跳过Grad-CAM可视化')
+    
+    # 交叉验证参数
+    parser.add_argument('--cross-validation', '--cv', action='store_true',
+                       help='启用四折交叉验证模式比较所有模型')
+    
+    parser.add_argument('--cv-folds', type=int, default=4,
+                       help='交叉验证折数 (默认: 4)')
+    
+    parser.add_argument('--cv-epochs', type=int, default=50,
+                       help='交叉验证中每折的训练轮数 (默认: 50)')
+    
+    parser.add_argument('--compare-models', nargs='+', 
+                       choices=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'],
+                       help='指定要在交叉验证中比较的模型列表')
+    
+    parser.add_argument('--cv-no-fine-tune', action='store_true', default=False,
+                       help='交叉验证中禁用微调 (默认启用微调)')
     
     # 实用功能
     parser.add_argument('--list-models', action='store_true',
@@ -970,9 +1247,46 @@ if __name__ == "__main__":
     print(f"验证集: {len(y_val)} 样本") 
     print(f"测试集: {len(y_test)} 样本")
     
-    # 训练模型（使用70%-15%-15%分割的数据）
-    print("=== 开始训练 ===")
-    model, history = train_model_with_augmentation(
+    # 如果启用交叉验证模式
+    if args.cross_validation:
+        print("\n🔄 启用交叉验证模式")
+        
+        # 确定要比较的模型列表
+        if args.compare_models:
+            models_to_compare = args.compare_models
+        else:
+            models_to_compare = ['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0']
+        
+        print(f"📊 将比较以下模型: {', '.join([m.upper() for m in models_to_compare])}")
+        
+        # 合并所有数据用于交叉验证
+        all_images = np.concatenate([X_train, X_val, X_test], axis=0)
+        all_labels = np.concatenate([y_train, y_val, y_test], axis=0)
+        
+        print(f"📋 交叉验证数据: {len(all_images)} 个样本")
+        
+        # 执行交叉验证
+        cv_results = stratified_cross_validation(
+            images=all_images,
+            labels=all_labels,
+            model_names=models_to_compare,
+            n_folds=args.cv_folds,
+            epochs=args.cv_epochs,
+            batch_size=args.batch_size,
+            img_size=args.img_size,
+            fine_tune=not args.cv_no_fine_tune
+        )
+        
+        # 绘制结果
+        if not args.no_gradcam:  # 使用no_gradcam参数控制是否生成图形
+            plot_cv_results(cv_results, save_path=f"cv_comparison_{args.cv_folds}fold.png")
+        
+        print("🎉 交叉验证完成！")
+        
+    else:
+        # 常规单模型训练模式
+        print("=== 开始训练 ===")
+        model, history = train_model_with_augmentation(
         X_train, y_train, np.zeros(len(y_train)), q_train,     # 训练集 (70%)
         X_val, y_val, np.zeros(len(y_val)), q_val,             # 验证集 (15%)
         num_epochs=args.epochs, 
@@ -982,33 +1296,33 @@ if __name__ == "__main__":
         fine_tune=args.fine_tune,
         copy_images=False,
         model_name=args.model
-    )
-    
-    # 评估模型（使用已分割的测试数据）
-    print("=== 评估模型 ===")
-    latest_model_path = f'{args.model}_best_model.h5'
-    if os.path.exists(latest_model_path):
-        print(f"Evaluating model: {latest_model_path}")
-        if not args.no_gradcam:
-            evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
-                                       save_path=f"{args.model}_test_auc.pdf",
-                                       generate_gradcam_viz=True, 
-                                       num_gradcam_samples=args.gradcam_samples)
+        )
+        
+        # 评估模型（使用已分割的测试数据）
+        print("=== 评估模型 ===")
+        latest_model_path = f'{args.model}_best_model.h5'
+        if os.path.exists(latest_model_path):
+            print(f"Evaluating model: {latest_model_path}")
+            if not args.no_gradcam:
+                evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
+                                           save_path=f"{args.model}_test_auc.pdf",
+                                           generate_gradcam_viz=True, 
+                                           num_gradcam_samples=args.gradcam_samples)
+            else:
+                evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
+                                           save_path=f"{args.model}_test_auc.pdf",
+                                           generate_gradcam_viz=False, 
+                                           num_gradcam_samples=0)
         else:
-            evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
-                                       save_path=f"{args.model}_test_auc.pdf",
-                                       generate_gradcam_viz=False, 
-                                       num_gradcam_samples=0)
-    else:
-        print("No model found at the specified path.")
-    
-    if not args.quiet:
-        print("\n" + "=" * 70)
-        print("🎉 优化版训练和评估完成!")
-        print(f"📊 模型文件: {latest_model_path}")
-        print(f"📈 AUC图表: {args.model}_test_auc.pdf")
-        print(f"⏱️  预处理时间: {preprocessing_time:.2f} 秒 (优化版)")
-        if not args.no_gradcam:
-            print(f"🔍 Grad-CAM结果: gradcam_test/ 目录")
-        print("⚡ 使用的优化: 并行预处理 + NumPy增强 + 详细统计")
-        print("=" * 70)
+            print("No model found at the specified path.")
+        
+        if not args.quiet:
+            print("\n" + "=" * 70)
+            print("🎉 优化版训练和评估完成!")
+            print(f"📊 模型文件: {latest_model_path}")
+            print(f"📈 AUC图表: {args.model}_test_auc.pdf")
+            print(f"⏱️  预处理时间: {preprocessing_time:.2f} 秒 (优化版)")
+            if not args.no_gradcam:
+                print(f"🔍 Grad-CAM结果: gradcam_test/ 目录")
+            print("⚡ 使用的优化: 并行预处理 + NumPy增强 + 详细统计")
+            print("=" * 70)
