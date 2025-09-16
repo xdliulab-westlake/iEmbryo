@@ -166,8 +166,8 @@ def batch_preprocess_images_parallel(paths: List[str], img_size: int, is_trainin
 
 def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, use_cache=True, model_name='vgg16', num_workers=None):
     """
-    使用优化的STORK预处理的数据加载函数（支持缓存和并行处理）
-    
+    使用优化的STORK预处理的数据加载函数（70/30分割策略）
+
     Parameters:
     - data_dir: 数据目录路径
     - img_size: 图像尺寸，默认224x224
@@ -175,18 +175,17 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, us
     - use_cache: 是否使用缓存，默认True
     - model_name: 预训练模型名称，影响预处理方式
     - num_workers: 并行处理进程数，默认为None（自动检测）
-    
+
     Returns:
-    - X_train, train_labels, train_quals: 训练集数据、标签、质量 (70%)
-    - X_val, val_labels, val_quals: 验证集数据、标签、质量 (15%)
-    - X_test, test_labels, test_quals: 测试集数据、标签、质量 (15%)
-    
+    - X_train, train_labels, train_quals: 训练集数据、标签、质量 (70%) - 用于交叉验证
+    - X_test, test_labels, test_quals: 测试集数据、标签、质量 (30%) - 用于最终评估
+
     优化特性:
     - 多进程并行图像预处理 (5-8x 速度提升)
-    - NumPy数据增强 (避免TF张量转换开销)  
+    - NumPy数据增强 (避免TF张量转换开销)
     - 支持预处理数据缓存
     - 详细进度报告和性能统计
-    - 固定数据分割：70%训练集 - 15%验证集 - 15%测试集
+    - 论文级数据分割：70%训练集(交叉验证) - 30%测试集(最终评估)
     - STORK预处理：复杂培养皿检测、中心方形裁剪等专业胚胎学图像处理
     """
     image_paths = []
@@ -227,54 +226,48 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, us
     print(f"找到 {len(image_paths)} 张图像")
     print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
     
-    # 数据分割：70%训练 - 15%验证 - 15%测试
+    # 🎯 论文级数据分割：70%训练(交叉验证) - 30%测试(最终评估)
     from sklearn.model_selection import train_test_split
-    
-    # 第一步：分离出训练集 (70%) 和临时集 (30%)
-    train_paths, temp_paths, train_labels, temp_labels, train_quals, temp_quals = train_test_split(
+
+    print("🎯 采用论文级70/30数据分割策略...")
+
+    # 直接进行70/30分割，避免数据泄漏
+    train_paths, test_paths, train_labels, test_labels, train_quals, test_quals = train_test_split(
         image_paths, labels, qualities, test_size=0.3, random_state=42, stratify=labels
     )
-    
-    # 第二步：从临时集 (30%) 中均分为验证集 (15%) 和测试集 (15%)
-    val_paths, test_paths, val_labels, test_labels, val_quals, test_quals = train_test_split(
-        temp_paths, temp_labels, temp_quals, test_size=0.5, random_state=42, stratify=temp_labels
-    )
-    
+
     # 验证分割比例
     total_samples = len(image_paths)
     train_samples = len(train_paths)
-    val_samples = len(val_paths)
     test_samples = len(test_paths)
-    
-    print(f"数据分割完成:")
+
+    print(f"📊 数据分割完成:")
     print(f"  总样本数: {total_samples}")
-    print(f"  训练集: {train_samples} ({train_samples/total_samples*100:.1f}%)")
-    print(f"  验证集: {val_samples} ({val_samples/total_samples*100:.1f}%)")
-    print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%)")
+    print(f"  训练集: {train_samples} ({train_samples/total_samples*100:.1f}%) - 用于交叉验证")
+    print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%) - 用于最终评估")
+    print(f"  🔒 测试集完全隔离，防止数据泄漏")
     
     # 缓存机制：生成缓存文件名
     if use_cache:
         # 基于数据目录路径、图像大小、模型名称和进程数生成唯一的缓存标识
-        cache_key = f"optimized_{data_dir}_{img_size}_{len(image_paths)}_{model_name}_{num_workers}"
+        cache_key = f"paper_70_30_{data_dir}_{img_size}_{len(image_paths)}_{model_name}_{num_workers}"
         cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
         cache_dir = "cache_preprocessed_data"
         os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, f"optimized_stork_preprocessed_{cache_hash}.pkl")
-        
+        cache_file = os.path.join(cache_dir, f"paper_70_30_stork_preprocessed_{cache_hash}.pkl")
+
         # 检查缓存是否存在
         if os.path.exists(cache_file):
-            print(f"🚀 找到缓存文件，直接加载: {cache_file}")
+            print(f"🚀 找到70/30分割缓存文件，直接加载: {cache_file}")
             try:
                 with open(cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
-                
+
                 print("✅ 缓存加载成功！跳过图像预处理步骤")
                 print(f"训练集形状: {cached_data['X_train'].shape}")
-                print(f"验证集形状: {cached_data['X_val'].shape}")
                 print(f"测试集形状: {cached_data['X_test'].shape}")
-                
+
                 return (cached_data['X_train'], cached_data['train_labels'], cached_data['train_quals'],
-                        cached_data['X_val'], cached_data['val_labels'], cached_data['val_quals'],
                         cached_data['X_test'], cached_data['test_labels'], cached_data['test_quals'])
                         
             except Exception as e:
@@ -284,50 +277,42 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, us
             print(f"📝 缓存文件不存在，将在预处理完成后保存: {cache_file}")
     
     # 使用优化的并行处理
-    print("=== 并行预处理训练集（STORK + 数据增强）===")
+    print("=== 🎯 并行预处理训练集（70% - 用于交叉验证）===")
     import time
     start_time = time.time()
-    X_train = batch_preprocess_images_parallel(train_paths, img_size, is_training=True, 
+    X_train = batch_preprocess_images_parallel(train_paths, img_size, is_training=True,
                                              model_name=model_name, num_workers=num_workers)
     train_time = time.time() - start_time
     print(f"✅ 训练集预处理完成，耗时: {train_time:.2f} 秒")
-    
-    print("=== 并行预处理验证集（仅STORK预处理）===")
+
+    print("=== 🔒 并行预处理测试集（30% - 最终评估，完全隔离）===")
     start_time = time.time()
-    X_val = batch_preprocess_images_parallel(val_paths, img_size, is_training=False, 
-                                           model_name=model_name, num_workers=num_workers)
-    val_time = time.time() - start_time
-    print(f"✅ 验证集预处理完成，耗时: {val_time:.2f} 秒")
-    
-    print("=== 并行预处理测试集（仅STORK预处理）===")
-    start_time = time.time()
-    X_test = batch_preprocess_images_parallel(test_paths, img_size, is_training=False, 
+    X_test = batch_preprocess_images_parallel(test_paths, img_size, is_training=False,
                                             model_name=model_name, num_workers=num_workers)
     test_time = time.time() - start_time
     print(f"✅ 测试集预处理完成，耗时: {test_time:.2f} 秒")
-    
-    total_time = train_time + val_time + test_time
-    print("=== 优化的STORK数据预处理完成 ===")
-    print(f"训练集形状: {X_train.shape}")
-    print(f"验证集形状: {X_val.shape}")
-    print(f"测试集形状: {X_test.shape}")
+
+    total_time = train_time + test_time
+    print("=== 📊 论文级70/30数据预处理完成 ===")
+    print(f"训练集形状: {X_train.shape} (用于交叉验证)")
+    print(f"测试集形状: {X_test.shape} (最终评估)")
     print(f"⏱️  总预处理时间: {total_time:.2f} 秒 (并行优化版)")
     print(f"📊 平均每张图像: {total_time/len(image_paths)*1000:.2f} 毫秒")
     
     # 保存缓存
     if use_cache:
-        print(f"💾 保存优化版预处理数据缓存: {cache_file}")
+        print(f"💾 保存70/30分割预处理数据缓存: {cache_file}")
         try:
             cache_data = {
                 'X_train': X_train, 'train_labels': train_labels, 'train_quals': train_quals,
-                'X_val': X_val, 'val_labels': val_labels, 'val_quals': val_quals,
                 'X_test': X_test, 'test_labels': test_labels, 'test_quals': test_quals,
                 'img_size': img_size,
                 'data_dir': data_dir,
                 'total_samples': len(image_paths),
-                'version': 'optimized_parallel',
+                'version': 'paper_70_30_split',
                 'num_workers': num_workers,
-                'processing_time': total_time
+                'processing_time': total_time,
+                'split_strategy': '70% train (for CV), 30% test (final eval)'
             }
             
             with open(cache_file, 'wb') as f:
@@ -340,6 +325,6 @@ def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, us
             print(f"❌ 缓存保存失败: {e}")
             print("不影响训练过程，继续执行...")
     
-    return (X_train, train_labels, train_quals,
-            X_val, val_labels, val_quals,
-            X_test, test_labels, test_quals)
+    # 🎯 返回70/30分割的数据（论文级策略）
+    return (X_train, train_labels, train_quals,    # 70% - 用于交叉验证
+            X_test, test_labels, test_quals)        # 30% - 用于最终评估

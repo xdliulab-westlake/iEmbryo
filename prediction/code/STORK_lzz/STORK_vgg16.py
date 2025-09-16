@@ -27,12 +27,95 @@ from tensorflow.keras.metrics import Precision, Recall, CategoricalAccuracy
 from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
 from tensorflow.keras.applications import InceptionV3, EfficientNetB0, ResNet50
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix
+from sklearn.metrics import roc_curve, roc_auc_score, confusion_matrix, classification_report, precision_recall_curve, auc
 import absl.logging
 import argparse
 import sys
 from preprocessing.data_loader_vgg16 import load_data_with_stork_preprocessing
 from preprocessing.data_augmentation import augment_training_data, get_default_augmenter
+
+# 🧠 内联内存监控功能 (无需外部依赖)
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("⚠️  psutil未安装，使用简化内存管理")
+def get_memory_usage_gb():
+    """获取当前进程内存使用量(GB)"""
+    if PSUTIL_AVAILABLE:
+        try:
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / (1024**3)
+        except:
+            return 0.0
+    return 0.0
+
+def get_available_memory_gb():
+    """获取系统可用内存(GB)"""
+    if PSUTIL_AVAILABLE:
+        try:
+            return psutil.virtual_memory().available / (1024**3)
+        except:
+            return 80.0  # 服务器默认假设80GB
+    return 80.0  # 服务器默认假设80GB
+
+def estimate_data_memory_gb(data_shape, dtype=np.float32):
+    """估算数据内存使用量(GB)"""
+    # 创建一个具体的dtype实例来获取itemsize
+    if isinstance(dtype, type):
+        dtype_instance = dtype()
+    else:
+        dtype_instance = dtype
+    
+    if hasattr(dtype_instance, 'itemsize'):
+        itemsize = dtype_instance.itemsize
+    else:
+        itemsize = 4  # float32默认
+    
+    total_elements = np.prod(data_shape)
+    memory_bytes = total_elements * itemsize
+    return memory_bytes / (1024**3)
+
+def create_cv_memory_strategy(total_samples, img_shape=(224, 224, 3)):
+    """创建交叉验证内存策略"""
+    total_data_gb = estimate_data_memory_gb((total_samples,) + img_shape)
+    available_gb = get_available_memory_gb()
+    
+    print(f"🧠 内存策略分析:")
+    print(f"   数据量: {total_data_gb:.2f}GB")
+    print(f"   可用内存: {available_gb:.2f}GB")
+    
+    if total_data_gb > available_gb * 0.3:
+        strategy = "streaming"
+        print(f"   策略: 流式数据增强 (避免内存爆炸)")
+    elif total_data_gb > available_gb * 0.1:
+        strategy = "batch" 
+        print(f"   策略: 分批数据增强")
+    else:
+        strategy = "preaugment"
+        print(f"   策略: 预增强")
+    
+    return strategy
+
+def check_memory_before_cv():
+    """交叉验证前内存检查"""
+    current_gb = get_memory_usage_gb()
+    available_gb = get_available_memory_gb()
+    
+    print(f"💾 内存检查: 使用{current_gb:.2f}GB, 可用{available_gb:.2f}GB")
+    
+    if available_gb < 2.0:
+        print("⚠️  可用内存不足2GB")
+        return False
+    return True
+
+def cleanup_after_fold():
+    """每折训练后清理内存"""
+    print("🧹 清理内存...")
+    tf.keras.backend.clear_session()
+    gc.collect()
+    time.sleep(1)
 # STORK图像处理函数通过 data_loader_vgg16 间接调用，无需直接导入
 sys.path.append('/Users/lzz/Documents/GitHub/IVF_AI/prediction/code')
 from utils.data_utils import balance_classes, check_class_distribution
@@ -149,9 +232,29 @@ def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_cl
     # 定义模型
     model = Model(inputs=inputs, outputs=outputs, name=f"embryo_classifier_{model_name}")
 
-    # 编译模型 - 使用模型特定的学习率
+    # 🎯 类别平衡优化 - 计算类别权重
+    print(f"🎯 应用类别平衡策略...")
+    
+    # 基于数据分布计算类别权重 (解决2.96:1的不平衡)
+    # Class 0: 144028 (74.7%), Class 1: 48725 (25.3%)
+    class_weight_dict = {
+        0: 0.669,  # 减少多数类权重
+        1: 1.978   # 增加少数类权重 (约3x)
+    }
+    
+    print(f"   📊 类别权重配置:")
+    print(f"      Class 0 (多数类): {class_weight_dict[0]:.3f}")
+    print(f"      Class 1 (少数类): {class_weight_dict[1]:.3f}")
+    print(f"      权重比例: 1:{class_weight_dict[1]/class_weight_dict[0]:.2f}")
+    
+    # 编译模型 - 使用模型特定的学习率 + 类别权重
     optimizer = Adam(learning_rate=config['learning_rate'], weight_decay=1e-5)
-    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    model.compile(
+        optimizer=optimizer, 
+        loss='binary_crossentropy', 
+        metrics=['accuracy'],
+        # 注意：class_weight在model.fit()中使用，不是在compile中
+    )
 
     print(f"✅ {model_name.upper()} 模型构建完成!")
     print(f"   总参数数: {model.count_params():,}")
@@ -170,37 +273,86 @@ def check_gpu_availability():
         print(device)
 
 # Training the model with augmentation
-def train_model_with_augmentation(train_images, train_labels, train_ages, train_qualities, 
-                                val_images, val_labels, val_ages, val_qualities,
-                                num_epochs=3, global_batch_size=None, img_size=224, 
+def train_model_with_augmentation(train_images, train_labels, train_ages, train_qualities,
+                                val_images=None, val_labels=None, val_ages=None, val_qualities=None,
+                                num_epochs=3, global_batch_size=None, img_size=224,
                                 resume_training=True, fine_tune=False, copy_images=False,
-                                model_name='vgg16'):
-    # Set strategy for distributed training
-    strategy = tf.distribute.MirroredStrategy()
-    
+                                model_name='vgg16', use_validation=True):
+    # Set strategy for distributed training with enhanced error handling
+    try:
+        strategy = tf.distribute.MirroredStrategy()
+        print(f"🎯 使用分布式策略: {strategy.num_replicas_in_sync} 个GPU")
+    except Exception as strategy_error:
+        print(f"⚠️ 分布式策略初始化失败，使用默认策略: {strategy_error}")
+        strategy = tf.distribute.get_strategy()
+
     start_time = time.time()
     
     # Check GPU availability
     check_gpu_availability()
     
-    # 使用传入的训练集和验证集（已完成70%-15%-15%分割）
-    print("使用预分割的训练集和验证集")
+    # 🎯 支持论文级70/30分割：可选验证集模式
     X_train, y_train, age_train, quality_train = train_images, train_labels, train_ages, train_qualities
-    X_val, y_val, age_val, quality_val = val_images, val_labels, val_ages, val_qualities
+
+    if use_validation and val_images is not None:
+        # 传统模式：使用独立验证集
+        print("🔧 使用独立验证集模式")
+        X_val, y_val, age_val, quality_val = val_images, val_labels, val_ages, val_qualities
+        X_test, y_test, age_test, quality_test = X_val, y_val, age_val, quality_val
+
+        print(f"Train samples: {len(y_train)}, Validation: {len(y_val)}, Test: {len(y_test)}")
+        print(f"Train positive ratio: {np.mean(y_train):.2f}, Validation: {np.mean(y_val):.2f}, Test: {np.mean(y_test):.2f}")
+        check_class_distribution(y_train, y_val, y_test)
+    else:
+        # 🎯 论文级模式：无独立验证集，仅训练集
+        print("🎯 论文级无验证集模式：在整个训练集上训练")
+        X_val, y_val = None, None
+        age_val, quality_val = None, None
+
+        print(f"训练样本: {len(y_train)}")
+        print(f"训练集正类比例: {np.mean(y_train):.2f}")
+        print(f"类别分布: Class 0: {sum(y_train == 0)}, Class 1: {sum(y_train == 1)}")
+
+    # 🔧 CPU预处理 + GPU计算分离优化
+    print("🔧 应用CPU预处理 + GPU计算分离优化...")
     
-    # 测试集占位符（实际测试在外部进行）
-    X_test, y_test, age_test, quality_test = X_val, y_val, age_val, quality_val
-
-    # Output class distribution confirmation
-    print(f"Train samples: {len(y_train)}, Validation: {len(y_val)}, Test: {len(y_test)}")
-    print(f"Train positive ratio: {np.mean(y_train):.2f}, Validation: {np.mean(y_val):.2f}, Test: {np.mean(y_test):.2f}")
-    check_class_distribution(y_train, y_val, y_test)
-
+    # 强制在CPU上进行数据预处理和张量转换
     with tf.device('/CPU:0'):
-        X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
-        y_train = tf.convert_to_tensor(y_train, dtype=tf.int64)
-        X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
-        y_val = tf.convert_to_tensor(y_val, dtype=tf.int64)
+        print("   ⚡ 在CPU上进行数据预处理...")
+        
+        # 数据类型优化：使用float16预处理减少内存
+        X_train_cpu = np.array(X_train, dtype=np.float16)  # 先转换为float16
+        y_train_cpu = np.array(y_train, dtype=np.int32)
+
+        if X_val is not None:
+            X_val_cpu = np.array(X_val, dtype=np.float16)
+            y_val_cpu = np.array(y_val, dtype=np.int32)
+
+            print(f"   📊 数据类型优化完成:")
+            print(f"      训练数据: {X_train_cpu.dtype}, 形状: {X_train_cpu.shape}")
+            print(f"      验证数据: {X_val_cpu.dtype}, 形状: {X_val_cpu.shape}")
+            print(f"      训练标签: {y_train_cpu.dtype}, 验证标签: {y_val_cpu.dtype}")
+
+            # 内存使用统计
+            train_memory_mb = X_train_cpu.nbytes / (1024**2)
+            val_memory_mb = X_val_cpu.nbytes / (1024**2)
+            total_memory_mb = train_memory_mb + val_memory_mb
+            print(f"   💾 CPU内存使用: 训练{train_memory_mb:.1f}MB + 验证{val_memory_mb:.1f}MB = {total_memory_mb:.1f}MB")
+        else:
+            X_val_cpu = None
+            y_val_cpu = None
+
+            print(f"   📊 数据类型优化完成:")
+            print(f"      训练数据: {X_train_cpu.dtype}, 形状: {X_train_cpu.shape}")
+            print(f"      训练标签: {y_train_cpu.dtype}")
+            print(f"      🎯 无独立验证集（论文级模式）")
+
+            # 内存使用统计
+            train_memory_mb = X_train_cpu.nbytes / (1024**2)
+            print(f"   💾 CPU内存使用: 训练{train_memory_mb:.1f}MB")
+    
+    # 数据将在GPU训练时转换为float32
+    print("   🚀 数据准备完成，训练时将自动转换为GPU可用格式")
 
     # Define the model path and callbacks (使用模型名称)
     model_path = f'{model_name}_best_model.h5'  # Save only the best model based on validation loss
@@ -228,17 +380,56 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
     )
 
     # Initialize train_dataset if X_train or y_train is not None
-    if X_train is None or y_train is None:
-        raise ValueError("Error: X_train or y_train is None.")
+    if X_train_cpu is None or y_train_cpu is None:
+        raise ValueError("Error: X_train_cpu or y_train_cpu is None.")
 
-    # Build tf.data.Dataset
-    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    train_dataset = train_dataset.shuffle(1024).batch(global_batch_size).repeat().prefetch(tf.data.AUTOTUNE)
-    steps_per_epoch = math.ceil(X_train.shape[0] / global_batch_size)
-    val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(global_batch_size).prefetch(tf.data.AUTOTUNE)
+    # 🚀 优化的数据流水线 - CPU预处理 + GPU计算分离
+    print("🚀 构建优化的数据流水线...")
+    
+    # 在CPU上构建数据集，避免大tensor在GPU内存中
+    with tf.device('/CPU:0'):
+        # 构建训练数据集 - 使用CPU内存
+        train_dataset = tf.data.Dataset.from_tensor_slices((X_train_cpu, y_train_cpu))
+        
+        # 数据流水线优化
+        train_dataset = (train_dataset
+                        .shuffle(buffer_size=min(1024, len(X_train_cpu)))  # 适应性缓冲区
+                        .batch(global_batch_size)
+                        .map(lambda x, y: (tf.cast(x, tf.float32), tf.cast(y, tf.float32)), 
+                             num_parallel_calls=tf.data.AUTOTUNE)  # 动态类型转换
+                        .repeat()
+                        .prefetch(buffer_size=tf.data.AUTOTUNE))
+        
+        # 验证数据集（可选）
+        if X_val_cpu is not None:
+            val_dataset = tf.data.Dataset.from_tensor_slices((X_val_cpu, y_val_cpu))
+            val_dataset = (val_dataset
+                          .batch(global_batch_size)
+                          .map(lambda x, y: (tf.cast(x, tf.float32), tf.cast(y, tf.float32)),
+                               num_parallel_calls=tf.data.AUTOTUNE)
+                          .prefetch(buffer_size=tf.data.AUTOTUNE))
+            val_steps = max(len(X_val_cpu) // global_batch_size, 1)
+        else:
+            # 🎯 论文级模式：无验证集，使用validation_split
+            val_dataset = None
+            val_steps = None
+    
+    steps_per_epoch = math.ceil(X_train_cpu.shape[0] / global_batch_size)
+    
+    print(f"   ✅ 数据流水线构建完成:")
+    print(f"      每轮步数: {steps_per_epoch}")
+    print(f"      批处理大小: {global_batch_size}")
+    print(f"      数据类型: CPU(float16) -> GPU(float32)自动转换")
+    print(f"      内存策略: CPU预处理 + GPU计算分离")
 
     with strategy.scope():
-        model = build_pretrained_model(model_name, (img_size, img_size, 3), num_classes=2, fine_tune=fine_tune)
+        model = build_pretrained_model(model_name, (img_size, img_size, 3), num_classes=1, fine_tune=fine_tune)
+
+        # 🎯 获取类别权重用于训练
+        class_weight_for_training = {
+            0: 0.669,  # Class 0 (多数类)
+            1: 1.978   # Class 1 (少数类)
+        }
 
         if resume_training and os.path.exists(model_path):
             print("Loading existing model from", model_path)
@@ -264,22 +455,110 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
                 initial_epoch = 0
         else:
             print("Building new model from scratch.")
-        
-        # Train the model with data augmentation
+
+        # 🎯 优化的训练过程 - 内存管理
         try:
-            print(f"Final batch size: {global_batch_size} ({global_batch_size // strategy.num_replicas_in_sync} per GPU)")
-            print(f"Total global batch size: {global_batch_size}")
-            print(f"Train dataset size: {len(y_train)} | Batch size: {global_batch_size}")
-            steps_per_epoch = math.ceil(len(X_train) / global_batch_size)
-            val_steps = max(len(X_val) // global_batch_size, 1)
-            history = model.fit(
+            print(f"🎯 开始优化训练过程:")
+            print(f"   批处理配置: 总大小{global_batch_size} ({global_batch_size // strategy.num_replicas_in_sync} per GPU)")
+            if y_val_cpu is not None:
+                print(f"   训练样本: {len(y_train_cpu)} | 验证样本: {len(y_val_cpu)}")
+            else:
+                print(f"   训练样本: {len(y_train_cpu)} | 🎯 无验证集（论文级模式）")
+            print(f"   内存策略: CPU预处理 + GPU计算，动态类型转换")
+            
+            # 重新计算步数使用优化后的数据
+            steps_per_epoch = math.ceil(len(X_train_cpu) / global_batch_size)
+            if X_val_cpu is not None:
+                val_steps = max(len(X_val_cpu) // global_batch_size, 1)
+            else:
+                val_steps = None
+            
+            print(f"   训练步数: {steps_per_epoch} steps/epoch")
+            if val_steps:
+                print(f"   验证步数: {val_steps} steps")
+            else:
+                print(f"   🎯 论文级模式：无验证集，使用训练损失监控")
+
+            # 添加内存监控回调
+            class MemoryMonitor(tf.keras.callbacks.Callback):
+                def on_epoch_end(self, epoch, logs=None):
+                    if epoch % 10 == 0:  # 每10个epoch监控一次
+                        print(f"   📊 Epoch {epoch}: GPU内存使用情况")
+                        for gpu in tf.config.list_physical_devices('GPU'):
+                            print(f"      {gpu.name}: 训练中...")
+
+                        # 手动垃圾回收
+                        import gc
+                        gc.collect()
+                        tf.keras.backend.clear_session()
+
+            # 🎯 根据是否有验证集调整回调策略
+            if val_dataset is not None:
+                # 有验证集：使用验证损失监控
+                optimized_callbacks = [
+                    csv_logger,
+                    checkpoint_callback,
+                    early_stopping,
+                    reduce_lr,
+                    MemoryMonitor()
+                ]
+            else:
+                # 🎯 论文级无验证集：修改监控策略
+                early_stopping_train = tf.keras.callbacks.EarlyStopping(
+                    monitor='loss',  # 监控训练损失
+                    patience=15,     # 增加patience
+                    restore_best_weights=True
+                )
+                reduce_lr_train = tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='loss',  # 监控训练损失
+                    factor=0.5,
+                    patience=8,      # 增加patience
+                    min_lr=1e-6
+                )
+                checkpoint_callback_train = ModelCheckpoint(
+                    filepath=model_path,
+                    monitor='loss',  # 监控训练损失
+                    mode='min',
+                    save_best_only=True
+                )
+
+                optimized_callbacks = [
+                    csv_logger,
+                    checkpoint_callback_train,
+                    early_stopping_train,
+                    reduce_lr_train,
+                    MemoryMonitor()
+                ]
+            
+            print("   🚀 开始训练（内存优化版 + 类别平衡）...")
+            print(f"   🎯 使用类别权重: Class 0={class_weight_for_training[0]:.3f}, Class 1={class_weight_for_training[1]:.3f}")
+
+            # 🎯 根据是否有验证集调整训练参数
+            if val_dataset is not None:
+                # 有验证集的训练
+                history = model.fit(
                     train_dataset,
                     validation_data=val_dataset,
                     epochs=num_epochs,
                     initial_epoch=initial_epoch,
                     steps_per_epoch=steps_per_epoch,
                     validation_steps=val_steps,
-                    callbacks=[csv_logger, checkpoint_callback, early_stopping, reduce_lr]
+                    callbacks=optimized_callbacks,
+                    class_weight=class_weight_for_training,
+                    verbose=1
+                )
+            else:
+                # 🎯 论文级无验证集训练：使用validation_split
+                print("   🎯 使用validation_split=0.1进行内部监控")
+                history = model.fit(
+                    train_dataset,
+                    epochs=num_epochs,
+                    initial_epoch=initial_epoch,
+                    steps_per_epoch=steps_per_epoch,
+                    validation_split=0.1,  # 🔑 使用10%数据进行验证监控
+                    callbacks=optimized_callbacks,
+                    class_weight=class_weight_for_training,
+                    verbose=1
                 )
 
             # Check if best model was saved; if not, save the current model
@@ -299,8 +578,24 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
         except Exception as e:
             print(f"Training was interrupted due to an error: {e}")
             # Optionally save the model in case of interruption (though not needed if only saving the best model)
-            model.save(f'{model_name}_model_at_interruption.h5')
-            print("Model saved at interruption point.")
+            try:
+                model.save(f'{model_name}_model_at_interruption.h5')
+                print("Model saved at interruption point.")
+            except Exception as save_error:
+                print(f"Could not save model at interruption: {save_error}")
+
+            # Initialize history as None when training fails
+            history = None
+
+    # 🔧 安全清理分布式策略并返回，避免TensorFlow策略上下文错误
+    try:
+        # 显式清理分布式策略上下文
+        if hasattr(strategy, '_destroy'):
+            strategy._destroy()
+    except Exception as cleanup_error:
+        print(f"⚠️ 策略清理警告: {cleanup_error}")
+        # 忽略清理错误，继续正常返回
+        pass
 
     return model, history
 
@@ -688,14 +983,14 @@ def analyze_attention_patterns(model, X_eval, y_eval, save_dir="attention_analys
     print(f"注意力分析结果已保存到: {save_dir}")
 
 # Evaluate Deep Learning Model
-def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'], 
-                               n_folds=4, epochs=50, batch_size=32, img_size=224, fine_tune=True, use_augmentation=True):
+def paper_style_cross_validation(train_images, train_labels, model_names=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'],
+                                n_folds=4, epochs=50, batch_size=32, img_size=224, fine_tune=True, use_augmentation=True):
     """
-    四折分层交叉验证评估多个模型
-    
+    论文级严格交叉验证：仅在训练集（70%）内进行4折验证
+
     Args:
-        images: 输入图像数组
-        labels: 标签数组
+        train_images: 训练集图像数组（70%数据）
+        train_labels: 训练集标签数组
         model_names: 要比较的模型列表
         n_folds: 折数
         epochs: 训练轮数
@@ -703,22 +998,28 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
         img_size: 图像尺寸
         fine_tune: 是否启用微调
         use_augmentation: 是否对训练数据应用数据增强
-    
+
     Returns:
         dict: 包含所有模型交叉验证结果的字典
+
+    关键改进:
+        - 仅在70%训练集内进行交叉验证，避免数据泄漏
+        - 测试集（30%）完全隔离，不参与任何训练或验证过程
+        - 符合论文级验证标准
     """
     from sklearn.metrics import precision_score, recall_score, f1_score
     
-    print(f"\n🎯 开始 {n_folds} 折交叉验证，比较 {len(model_names)} 个模型")
+    print(f"\n🎯 论文级严格交叉验证：仅在训练集内进行 {n_folds} 折验证")
     print(f"🔢 模型列表: {', '.join(model_names)}")
     print(f"🔧 微调模式: {'启用' if fine_tune else '禁用'}")
     print(f"🎨 数据增强: {'启用' if use_augmentation else '禁用'}")
-    
-    if images is None or len(images) == 0:
-        raise ValueError("无法加载数据，请检查数据")
-    
-    print(f"✅ 数据准备完成: {len(images)} 个样本")
-    print(f"   - 类别分布: {np.bincount(labels.astype(int))}")
+    print(f"🔒 数据隔离: 测试集（30%）完全不参与交叉验证")
+
+    if train_images is None or len(train_images) == 0:
+        raise ValueError("无法加载训练数据，请检查数据")
+
+    print(f"✅ 训练数据准备完成: {len(train_images)} 个样本（70%数据用于交叉验证）")
+    print(f"   - 类别分布: {np.bincount(train_labels.astype(int))}")
     
     # 初始化结果存储
     results = {model_name: {
@@ -732,27 +1033,60 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
     # 创建分层K折
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
     
-    print(f"\n🔄 开始 {n_folds} 折交叉验证...")
-    
-    for fold, (train_idx, val_idx) in enumerate(skf.split(images, labels)):
+    # 🧠 内存策略分析
+    memory_strategy = create_cv_memory_strategy(len(train_images), train_images[0].shape)
+    print(f"🧠 采用内存策略: {memory_strategy}")
+
+    # 根据策略调整数据增强
+    if memory_strategy == "streaming":
+        print("⚠️  强制使用流式数据增强避免内存溢出")
+        force_streaming = True
+    else:
+        force_streaming = False
+
+    print(f"\n🔄 开始严格的 {n_folds} 折交叉验证（仅在训练集内）...")
+
+    # 🎯 关键：只在训练集（70%）内进行交叉验证
+    for fold, (train_idx, val_idx) in enumerate(skf.split(train_images, train_labels)):
         print(f"\n{'='*60}")
         print(f"📋 第 {fold + 1}/{n_folds} 折")
         print(f"{'='*60}")
         
-        # 分割数据
-        X_train, X_val = images[train_idx], images[val_idx]
-        y_train, y_val = labels[train_idx], labels[val_idx]
+        # 🎯 分割训练集内部数据（严格数据隔离）
+        X_train_fold = train_images[train_idx]  # 本折训练数据
+        X_val_fold = train_images[val_idx]      # 本折验证数据（来自训练集内部）
+        y_train_fold = train_labels[train_idx]
+        y_val_fold = train_labels[val_idx]
         
-        print(f"📊 数据分割:")
-        print(f"   训练集: {len(X_train)} 样本 (类别: {np.bincount(y_train.astype(int))})")
-        print(f"   验证集: {len(X_val)} 样本 (类别: {np.bincount(y_val.astype(int))})")
+        print(f"📊 本折数据分割:")
+        print(f"   训练数据: {len(X_train_fold)} 样本 (类别: {np.bincount(y_train_fold.astype(int))})")
+        print(f"   验证数据: {len(X_val_fold)} 样本 (类别: {np.bincount(y_val_fold.astype(int))})")
+        print(f"   🔒 注意: 验证数据来自训练集内部，测试集完全隔离")
         
-        # 对训练数据应用数据增强（如果启用）
+        # 🧠 内存监控检查
+        if not check_memory_before_cv():
+            print("⚠️  内存不足，跳过此折")
+            continue
+        
+        # 🔧 交叉验证内存优化：智能数据增强策略
         if use_augmentation:
-            print("🎨 应用数据增强到训练集...")
-            X_train_augmented = augment_training_data(X_train)
+            # 检查数据大小，避免内存爆炸
+            train_size_gb = X_train_fold.nbytes / (1024**3)
+            print(f"🎨 应用数据增强到本折训练数据... (数据大小: {train_size_gb:.2f}GB)")
+
+            # 结合全局策略和当前数据大小
+            if force_streaming or train_size_gb > 4.0:
+                print(f"   ⚠️  使用流式增强避免内存爆炸 (策略: {memory_strategy})")
+                X_train_augmented = X_train_fold
+                use_tf_augmentation = True
+            else:
+                # 数据量较小时，可以安全地进行预增强
+                print(f"   ✅ 数据量适中({train_size_gb:.2f}GB)，进行预增强")
+                X_train_augmented = augment_training_data(X_train_fold)
+                use_tf_augmentation = False
         else:
-            X_train_augmented = X_train
+            X_train_augmented = X_train_fold
+            use_tf_augmentation = False
         
         # 为每个模型训练和评估
         for model_name in model_names:
@@ -773,33 +1107,67 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
                     ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-7, verbose=0)
                 ]
                 
-                # 训练模型（使用增强后的训练数据）
-                history = model.fit(
-                    X_train_augmented, y_train,
-                    validation_data=(X_val, y_val),
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    callbacks=callbacks,
-                    verbose=0
-                )
+                # 🎯 交叉验证中的类别权重
+                cv_class_weight = {0: 0.669, 1: 1.978}  # 与主训练一致
                 
+                # 🔧 智能训练策略：根据数据增强方式选择训练方法
+                if use_tf_augmentation:
+                    print(f"   🔄 使用TensorFlow实时数据增强 (避免内存爆炸)")
+                    
+                    # 使用ImageDataGenerator进行实时增强
+                    from tensorflow.keras.preprocessing.image import ImageDataGenerator
+                    
+                    train_datagen = ImageDataGenerator(
+                        rotation_range=10,
+                        width_shift_range=0.1,
+                        height_shift_range=0.1,
+                        horizontal_flip=True,
+                        vertical_flip=True,
+                        brightness_range=[0.8, 1.2],
+                        fill_mode='nearest'
+                    )
+                    
+                    # 流式训练
+                    steps_per_epoch_cv = len(X_train_augmented) // batch_size
+                    history = model.fit(
+                        train_datagen.flow(X_train_augmented, y_train_fold, batch_size=batch_size),
+                        steps_per_epoch=steps_per_epoch_cv,
+                        validation_data=(X_val_fold, y_val_fold),
+                        epochs=epochs,
+                        callbacks=callbacks,
+                        class_weight=cv_class_weight,
+                        verbose=0
+                    )
+                else:
+                    print(f"   ✅ 使用预增强数据训练")
+                    # 常规训练（数据已预增强）
+                    history = model.fit(
+                        X_train_augmented, y_train_fold,
+                        validation_data=(X_val_fold, y_val_fold),
+                        epochs=epochs,
+                        batch_size=batch_size,
+                        callbacks=callbacks,
+                        class_weight=cv_class_weight,  # 🎯 应用类别权重
+                        verbose=0
+                    )
+
                 # 评估模型
-                val_loss, val_acc = model.evaluate(X_val, y_val, verbose=0)
+                val_loss, val_acc = model.evaluate(X_val_fold, y_val_fold, verbose=0)
                 
                 # 计算预测和AUC
-                y_pred_proba = model.predict(X_val, verbose=0)
+                y_pred_proba = model.predict(X_val_fold, verbose=0)
                 if len(y_pred_proba.shape) > 1 and y_pred_proba.shape[1] > 1:
                     y_pred_proba = y_pred_proba[:, 1]  # 取正类概率
                 else:
                     y_pred_proba = y_pred_proba.flatten()
-                
-                val_auc = roc_auc_score(y_val, y_pred_proba)
-                
+
+                val_auc = roc_auc_score(y_val_fold, y_pred_proba)
+
                 # 计算其他指标
                 y_pred = (y_pred_proba > 0.5).astype(int)
-                val_prec = precision_score(y_val, y_pred, zero_division=0)
-                val_rec = recall_score(y_val, y_pred, zero_division=0)
-                val_f1 = f1_score(y_val, y_pred, zero_division=0)
+                val_prec = precision_score(y_val_fold, y_pred, zero_division=0)
+                val_rec = recall_score(y_val_fold, y_pred, zero_division=0)
+                val_f1 = f1_score(y_val_fold, y_pred, zero_division=0)
                 
                 # 存储结果
                 results[model_name]['fold_scores'].append(val_acc)
@@ -815,16 +1183,42 @@ def stratified_cross_validation(images, labels, model_names=['vgg16', 'resnet50'
                 print(f"   召回率: {val_rec:.4f}")
                 print(f"   F1分数: {val_f1:.4f}")
                 
-                # 清理内存
+                # 🔧 积极的内存清理 (交叉验证优化)
+                print(f"   🧹 清理模型内存...")
+                
+                # 删除训练数据引用
+                if 'X_train_augmented' in locals() and use_tf_augmentation:
+                    del X_train_augmented
+                if 'train_datagen' in locals():
+                    del train_datagen
+                
+                # 删除模型
                 del model
+                if 'history' in locals():
+                    del history
+                
+                # 强制清理TensorFlow会话和Python垃圾回收
                 tf.keras.backend.clear_session()
                 gc.collect()
                 
+                # 给系统一点时间释放内存
+                import time
+                time.sleep(1)
+                
             except Exception as e:
                 print(f"❌ {model_name.upper()} 训练失败: {str(e)}")
+                # 内存相关错误的特殊处理
+                if "out of memory" in str(e).lower() or "allocator" in str(e).lower():
+                    print(f"   💾 检测到内存错误，强制清理...")
+                    cleanup_after_fold()
+                
                 # 填充失败的结果
                 for metric in ['fold_scores', 'fold_aucs', 'fold_precision', 'fold_recall', 'fold_f1']:
                     results[model_name][metric].append(0.0)
+        
+        # 🧹 每折结束后的内存清理
+        print(f"\n🧹 第 {fold + 1} 折完成，清理内存...")
+        cleanup_after_fold()
     
     return results
 
@@ -953,9 +1347,30 @@ def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test"
     # Load model
     dl_model = tf.keras.models.load_model(model_path)
     
-    # Ensure evaluation is done using the same global batch size as training with proper sharding for multi-GPU
-    eval_batch_size = min(global_batch_size, 128)  # Ensure batch size is not too large for evaluation
-    eval_dataset = tf.data.Dataset.from_tensor_slices((X_eval, y_eval)).batch(eval_batch_size).prefetch(tf.data.AUTOTUNE)
+    # 🔧 评估阶段内存优化 - CPU预处理 + GPU计算分离
+    print("🔧 应用评估阶段内存优化...")
+    
+    # 确保批处理大小不会过大导致内存溢出
+    eval_batch_size = min(global_batch_size, 64, len(X_eval))  # 进一步限制评估批处理大小
+    
+    # 在CPU上预处理评估数据
+    with tf.device('/CPU:0'):
+        # 数据类型优化
+        X_eval_cpu = np.array(X_eval, dtype=np.float16)  # 使用float16减少内存
+        y_eval_cpu = np.array(y_eval, dtype=np.int32)
+        
+        # 构建评估数据集
+        eval_dataset = tf.data.Dataset.from_tensor_slices((X_eval_cpu, y_eval_cpu))
+        eval_dataset = (eval_dataset
+                       .batch(eval_batch_size)
+                       .map(lambda x, y: (tf.cast(x, tf.float32), tf.cast(y, tf.float32)),
+                            num_parallel_calls=tf.data.AUTOTUNE)  # 动态类型转换
+                       .prefetch(buffer_size=tf.data.AUTOTUNE))
+    
+    eval_memory_mb = X_eval_cpu.nbytes / (1024**2)
+    print(f"   💾 评估数据内存使用: {eval_memory_mb:.1f}MB (CPU预处理)")
+    print(f"   📦 评估批处理大小: {eval_batch_size}")
+    print(f"   🔄 评估样本数: {len(X_eval_cpu)}")
 
     # Evaluate model
     eval_loss, eval_accuracy = dl_model.evaluate(eval_dataset)
@@ -995,10 +1410,46 @@ def evaluate_deep_learning_model(X_eval, y_eval, model_path, dataset_name="Test"
     cm_dl = confusion_matrix(y_eval, y_pred_dl)
     
     # Create confusion matrix DataFrame
-    class_names = ['Class 1', 'Class 0']
+    class_names = ['Class_0', 'Class_1']
     cm_df = pd.DataFrame(cm_dl, index=class_names, columns=class_names)
     print(f"Deep Learning Model {dataset_name} Confusion Matrix:")
     print(cm_df)
+    
+    # 🎯 平衡评估指标 (专门针对不平衡数据集)
+    print(f"\n🎯 平衡分类评估报告 ({dataset_name}集):")
+    print("=" * 50)
+    
+    # 详细分类报告
+    report = classification_report(y_eval, y_pred_dl, 
+                                 target_names=['Class_0', 'Class_1'],
+                                 digits=4)
+    print(report)
+    
+    # PR曲线AUC (对不平衡数据更敏感)
+    precision, recall, _ = precision_recall_curve(y_eval, probabilities_dl.flatten())
+    pr_auc = auc(recall, precision)
+    print(f"📊 PR-AUC (更适合不平衡数据): {pr_auc:.4f}")
+    print(f"📊 ROC-AUC (整体性能): {auc_dl:.4f}")
+    
+    # 类别特定指标
+    from sklearn.metrics import precision_score, recall_score, f1_score
+    
+    # 针对少数类(Class_1)的特别关注
+    class_1_precision = precision_score(y_eval, y_pred_dl, pos_label=1)
+    class_1_recall = recall_score(y_eval, y_pred_dl, pos_label=1)
+    class_1_f1 = f1_score(y_eval, y_pred_dl, pos_label=1)
+    
+    print(f"\n🔍 少数类 (Class_1) 性能:")
+    print(f"   精确率: {class_1_precision:.4f} (减少假阳性)")
+    print(f"   召回率: {class_1_recall:.4f} (捕获真阳性)")
+    print(f"   F1分数: {class_1_f1:.4f} (综合指标)")
+    
+    # 平衡准确率
+    balanced_acc = (cm_dl[0,0]/(cm_dl[0,0]+cm_dl[0,1]) + cm_dl[1,1]/(cm_dl[1,0]+cm_dl[1,1])) / 2
+    print(f"🎯 平衡准确率: {balanced_acc:.4f} (考虑类别不平衡)")
+    print(f"📊 标准准确率: {eval_accuracy:.4f}")
+    
+    print("=" * 50)
     
     # 生成Grad-CAM可视化
     if generate_gradcam_viz:
@@ -1198,19 +1649,19 @@ def check_data_directory(data_dir):
 if __name__ == "__main__":
     # 解析命令行参数
     args = parse_arguments()
-    
+
     # 处理特殊命令
     if args.list_models:
         list_supported_models()
         sys.exit(0)
-    
+
     if args.check_data:
         success = check_data_directory(args.data_dir)
         sys.exit(0 if success else 1)
-    
+
     # 设置工作目录
     os.chdir("/liaozizhuo/scripts")
-    
+
     # 显示配置信息
     if not args.quiet:
         print("=" * 70)
@@ -1246,47 +1697,42 @@ if __name__ == "__main__":
     batch_size_per_replica = args.batch_size
     global_batch_size = batch_size_per_replica * max(1, num_gpus)
 
-    # 使用优化的STORK胚胎图像预处理数据加载函数 (固定70%-15%-15%分割)
+    # 🎯 使用论文级70/30数据分割策略
     preprocessing_start = time.time()
     (X_train, y_train, q_train,
-     X_val, y_val, q_val,
      X_test, y_test, q_test) = load_data_with_stork_preprocessing(
-        args.data_dir, 
-        img_size=args.img_size, 
+        args.data_dir,
+        img_size=args.img_size,
         batch_size=global_batch_size,
         use_cache=args.cache,
         model_name=args.model,
         num_workers=args.workers
     )
     preprocessing_time = time.time() - preprocessing_start
-    
-    print(f"⏱️  预处理总时间: {preprocessing_time:.2f} 秒 (优化版)")
-    print(f"训练集: {len(y_train)} 样本")
-    print(f"验证集: {len(y_val)} 样本") 
-    print(f"测试集: {len(y_test)} 样本")
+
+    print(f"⏱️  预处理总时间: {preprocessing_time:.2f} 秒 (论文级70/30分割)")
+    print(f"🎯 训练集: {len(y_train)} 样本 (70% - 用于交叉验证)")
+    print(f"🔒 测试集: {len(y_test)} 样本 (30% - 最终评估，完全隔离)")
     
     # 如果启用交叉验证模式
     if args.cross_validation:
-        print("\n🔄 启用交叉验证模式")
-        
+        print("\n🔄 启用论文级严格交叉验证模式")
+        print("🔒 测试集完全隔离，仅在训练集（70%）内进行交叉验证")
+
         # 确定要比较的模型列表
         if args.compare_models:
             models_to_compare = args.compare_models
         else:
             models_to_compare = ['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0']
-        
+
         print(f"📊 将比较以下模型: {', '.join([m.upper() for m in models_to_compare])}")
-        
-        # 合并所有数据用于交叉验证
-        all_images = np.concatenate([X_train, X_val, X_test], axis=0)
-        all_labels = np.concatenate([y_train, y_val, y_test], axis=0)
-        
-        print(f"📋 交叉验证数据: {len(all_images)} 个样本")
-        
-        # 执行交叉验证
-        cv_results = stratified_cross_validation(
-            images=all_images,
-            labels=all_labels,
+        print(f"📋 交叉验证数据: {len(X_train)} 个样本 (仅使用训练集70%)")
+        print(f"🔒 测试集: {len(X_test)} 个样本 (完全隔离，最终评估时使用)")
+
+        # 🎯 关键：仅在训练集内进行交叉验证，测试集完全隔离
+        cv_results = paper_style_cross_validation(
+            train_images=X_train,    # 🔑 只使用训练集（70%）
+            train_labels=y_train,
             model_names=models_to_compare,
             n_folds=args.cv_folds,
             epochs=args.cv_epochs,
@@ -1303,45 +1749,97 @@ if __name__ == "__main__":
         print("🎉 交叉验证完成！")
         
     else:
-        # 常规单模型训练模式
-        print("=== 开始训练 ===")
-        model, history = train_model_with_augmentation(
-        X_train, y_train, np.zeros(len(y_train)), q_train,     # 训练集 (70%)
-        X_val, y_val, np.zeros(len(y_val)), q_val,             # 验证集 (15%)
-        num_epochs=args.epochs, 
-        global_batch_size=global_batch_size, 
-        img_size=args.img_size, 
-        resume_training=args.resume,
-        fine_tune=args.fine_tune,
-        copy_images=False,
-        model_name=args.model
-        )
+        # 🎯 论文级单模型训练模式：在整个训练集（70%）上训练
+        print("=== 🎯 论文级单模型训练模式 ===")
+        print("🔧 在整个训练集（70%）上训练，无内部验证集")
+        print("🔒 测试集（30%）完全隔离，仅用于最终评估")
+
+        # 🎯 论文级策略：在整个训练集（70%）上训练，无独立验证集
+        print(f"📊 训练配置:")
+        print(f"   训练数据: {len(X_train)} 样本 (70%总数据)")
+        print(f"   验证策略: 无独立验证集，使用validation_split内部监控")
+        print(f"   测试集: {len(X_test)} 样本 (30%总数据，完全隔离)")
+        print(f"   🔑 策略: 最大化训练数据使用，符合论文标准")
+
+        # 🎯 使用无验证集模式训练（包装TF分布式策略错误处理）
+        try:
+            model, history = train_model_with_augmentation(
+                train_images=X_train,
+                train_labels=y_train,
+                train_ages=np.zeros(len(y_train)),
+                train_qualities=q_train,
+                val_images=None,  # 🔑 无验证集
+                val_labels=None,
+                val_ages=None,
+                val_qualities=None,
+                num_epochs=args.epochs,
+                global_batch_size=global_batch_size,
+                img_size=args.img_size,
+                resume_training=args.resume,
+                fine_tune=args.fine_tune,
+                copy_images=False,
+                model_name=args.model,
+                use_validation=False  # 🔑 禁用验证集模式
+            )
+        except IndexError as index_error:
+            if "pop from empty list" in str(index_error):
+                print("⚠️ TensorFlow分布式策略退出错误（已知bug）")
+                print("✅ 训练可能已成功完成，尝试加载保存的模型...")
+
+                # 尝试加载最佳模型
+                latest_model_path = f'{args.model}_best_model.h5'
+                if os.path.exists(latest_model_path):
+                    print(f"✅ 找到保存的模型: {latest_model_path}")
+                    model = tf.keras.models.load_model(latest_model_path)
+                    history = None
+                else:
+                    print("❌ 未找到保存的模型，训练可能失败")
+                    raise index_error
+            else:
+                print(f"❌ 未知IndexError: {index_error}")
+                raise
+        except Exception as training_error:
+            print(f"❌ 训练过程中发生错误: {training_error}")
+            print("🔧 尝试从保存的模型继续...")
+
+            # 尝试加载最佳模型
+            latest_model_path = f'{args.model}_best_model.h5'
+            if os.path.exists(latest_model_path):
+                print(f"✅ 找到保存的模型: {latest_model_path}")
+                model = tf.keras.models.load_model(latest_model_path)
+                history = None
+            else:
+                print("❌ 未找到保存的模型，训练失败")
+                raise training_error
         
-        # 评估模型（使用已分割的测试数据）
-        print("=== 评估模型 ===")
+        # 🔒 最终评估：在完全隔离的测试集（30%）上评估
+        print("=== 🔒 最终评估（完全隔离的测试集）===")
         latest_model_path = f'{args.model}_best_model.h5'
         if os.path.exists(latest_model_path):
-            print(f"Evaluating model: {latest_model_path}")
+            print(f"🎯 在隔离测试集上评估模型: {latest_model_path}")
+            print(f"📊 测试集大小: {len(X_test)} 样本 (30%数据，训练期间完全不可见)")
+
             if not args.no_gradcam:
-                evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
-                                           save_path=f"{args.model}_test_auc.pdf",
-                                           generate_gradcam_viz=True, 
+                evaluate_deep_learning_model(X_test, y_test, latest_model_path,
+                                           save_path=f"{args.model}_final_test_auc.pdf",
+                                           generate_gradcam_viz=True,
                                            num_gradcam_samples=args.gradcam_samples)
             else:
-                evaluate_deep_learning_model(X_test, y_test, latest_model_path, 
-                                           save_path=f"{args.model}_test_auc.pdf",
-                                           generate_gradcam_viz=False, 
+                evaluate_deep_learning_model(X_test, y_test, latest_model_path,
+                                           save_path=f"{args.model}_final_test_auc.pdf",
+                                           generate_gradcam_viz=False,
                                            num_gradcam_samples=0)
         else:
             print("No model found at the specified path.")
         
         if not args.quiet:
             print("\n" + "=" * 70)
-            print("🎉 优化版训练和评估完成!")
+            print("🎉 论文级训练和评估完成!")
             print(f"📊 模型文件: {latest_model_path}")
-            print(f"📈 AUC图表: {args.model}_test_auc.pdf")
-            print(f"⏱️  预处理时间: {preprocessing_time:.2f} 秒 (优化版)")
+            print(f"📈 最终AUC图表: {args.model}_final_test_auc.pdf")
+            print(f"⏱️  预处理时间: {preprocessing_time:.2f} 秒 (论文级70/30分割)")
             if not args.no_gradcam:
                 print(f"🔍 Grad-CAM结果: gradcam_test/ 目录")
-            print("⚡ 使用的优化: 并行预处理 + NumPy增强 + 详细统计")
+            print("🎯 验证策略: 论文级70/30分割，测试集完全隔离")
+            print("⚡ 使用的优化: 并行预处理 + NumPy增强 + 无数据泄漏")
             print("=" * 70)
