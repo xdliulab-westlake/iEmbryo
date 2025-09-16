@@ -595,29 +595,166 @@ def stratified_cross_validation_with_cache(
         
         print(f"✅ 找到有效胚胎: {len(available_embryo_ids)} 个")
         
-        # 收集所有图像路径和对应的信息
+        # 收集所有图像路径和对应的信息 - 优化版本
+        print("🚀 使用优化的文件验证方法...")
         image_info_list = []
         embryo_metadata = {}
-        
-        for embryo_id in available_embryo_ids:
-            # 获取该胚胎的所有图像
-            embryo_images = embryo_df[embryo_df['EmbryoID'] == embryo_id].copy()
-            
-            valid_images = []
-            for _, row in embryo_images.iterrows():
-                full_path = row['FullPath']
-                if pd.notna(full_path):
-                    if os.path.exists(full_path):
-                        image_info_list.append((embryo_id, full_path))
-                        valid_images.append(full_path)
+
+        # 🚀 优化路径收集：使用向量化操作替代循环
+        print("📊 优化收集所有文件路径...")
+
+        # 先过滤出有效胚胎的所有数据（一次性操作）
+        print("   过滤有效胚胎数据...")
+        valid_embryo_mask = embryo_df['EmbryoID'].isin(available_embryo_ids)
+        valid_data = embryo_df[valid_embryo_mask].copy()
+        print(f"   过滤后数据量: {len(valid_data)} 行")
+
+        # 去除空路径（向量化操作）
+        print("   去除空路径...")
+        non_null_mask = pd.notna(valid_data['FullPath'])
+        valid_data = valid_data[non_null_mask]
+        print(f"   有效路径数据: {len(valid_data)} 行")
+
+        # 批量提取路径（向量化操作）
+        all_paths_to_check = valid_data['FullPath'].tolist()
+
+        # 使用groupby快速创建embryo_path_mapping（比循环快得多）
+        print("   创建路径映射...")
+        embryo_path_mapping = valid_data.groupby('EmbryoID')['FullPath'].apply(list).to_dict()
+
+        print(f"📊 需要验证 {len(all_paths_to_check)} 个文件路径...")
+
+        # 🚀 快速选项：根据数据量选择验证策略
+        # 对于大量文件（>10万），推荐跳过验证以提升速度
+        SKIP_FILE_VERIFICATION = len(all_paths_to_check) > 100000  # 自动判断
+
+        if SKIP_FILE_VERIFICATION:
+            print("⚡ 使用采样验证策略（大数据集优化）...")
+
+            # 采样验证：随机检查1000个文件来估计整体可用性
+            import random
+            sample_size = min(1000, len(all_paths_to_check))
+            sample_paths = random.sample(all_paths_to_check, sample_size)
+
+            existing_count = sum(1 for path in sample_paths if os.path.exists(path))
+            availability_rate = existing_count / sample_size
+
+            print(f"📊 采样验证结果: {existing_count}/{sample_size} = {availability_rate:.1%} 文件存在")
+
+            if availability_rate > 0.95:  # 95%以上可用率
+                print("✅ 文件可用率良好，假设所有文件都存在")
+                valid_paths_set = set(all_paths_to_check)
+            else:
+                print(f"⚠️ 文件可用率较低 ({availability_rate:.1%})，执行完整验证...")
+                # 如果可用率低，还是执行完整验证
+                SKIP_FILE_VERIFICATION = False
+
+        if not SKIP_FILE_VERIFICATION:
+            # 🚀 超级优化：使用目录扫描替代逐个文件检查
+            print("🔍 使用智能文件验证方法...")
+
+            # 按目录分组路径以减少重复扫描
+            from collections import defaultdict
+            import glob
+
+            dir_to_files = defaultdict(set)
+            path_to_expected = {}
+
+            for path in all_paths_to_check:
+                directory = os.path.dirname(path)
+                filename = os.path.basename(path)
+                dir_to_files[directory].add(filename)
+                path_to_expected[path] = filename
+
+            print(f"📁 需要扫描 {len(dir_to_files)} 个目录...")
+
+            # 并行扫描每个目录（比逐个文件检查快得多）
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def scan_directory(directory):
+                """扫描目录获取所有文件"""
+                try:
+                    if os.path.exists(directory):
+                        # 使用os.listdir比glob更快
+                        files_in_dir = set(os.listdir(directory))
+                        return directory, files_in_dir
                     else:
-                        print(f"⚠️ 图像文件不存在: {full_path} (胚胎ID: {embryo_id})")
-                        print(f"   建议检查路径是否正确或文件是否已移动")
-            
+                        return directory, set()
+                except Exception as e:
+                    print(f"⚠️ 扫描目录失败 {directory}: {e}")
+                    return directory, set()
+
+            valid_paths_set = set()
+
+            # 使用较少线程扫描目录（I/O密集型任务）
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                directory_futures = {executor.submit(scan_directory, directory): directory
+                                   for directory in dir_to_files.keys()}
+
+                processed_dirs = 0
+                for future in as_completed(directory_futures):
+                    directory, actual_files = future.result()
+                    expected_files = dir_to_files[directory]
+
+                    # 找到实际存在的文件
+                    existing_files = expected_files.intersection(actual_files)
+
+                    # 构建完整路径
+                    for filename in existing_files:
+                        full_path = os.path.join(directory, filename)
+                        valid_paths_set.add(full_path)
+
+                    processed_dirs += 1
+                    if processed_dirs % 10 == 0 or processed_dirs == len(dir_to_files):
+                        print(f"   已扫描 {processed_dirs}/{len(dir_to_files)} 个目录, 找到 {len(valid_paths_set)} 个有效文件")
+
+            print(f"✅ 目录扫描完成!")
+
+            # 如果某些文件仍需单独验证（备用方案）
+            remaining_paths = [p for p in all_paths_to_check if p not in valid_paths_set]
+            if remaining_paths and len(remaining_paths) < 10000:
+                print(f"🔍 额外验证 {len(remaining_paths)} 个文件...")
+
+                def check_file_exists(path):
+                    return path if os.path.exists(path) else None
+
+                with ThreadPoolExecutor(max_workers=16) as executor:
+                    batch_size = 1000
+                    for i in range(0, len(remaining_paths), batch_size):
+                        batch = remaining_paths[i:i+batch_size]
+                        results = list(executor.map(check_file_exists, batch))
+                        valid_paths_set.update(filter(None, results))
+
+            print(f"✅ 验证完成: {len(valid_paths_set)}/{len(all_paths_to_check)} 文件存在")
+
+        # 🚀 优化数据结构构建：批量处理替代循环
+        print("📊 构建最终数据结构...")
+
+        # 只处理验证通过的路径
+        valid_data_filtered = valid_data[valid_data['FullPath'].isin(valid_paths_set)].copy()
+        print(f"   通过验证的数据: {len(valid_data_filtered)} 行")
+
+        # 批量构建image_info_list
+        image_info_list = list(zip(valid_data_filtered['EmbryoID'], valid_data_filtered['FullPath']))
+
+        # 🚀 完全向量化处理胚胎元数据
+        print("   处理胚胎元数据（向量化）...")
+
+        # 一次性创建胚胎ID到图像路径的映射
+        embryo_to_images = valid_data_filtered.groupby('EmbryoID')['FullPath'].apply(list).to_dict()
+
+        # 为每个胚胎选择代表行（第一行）
+        embryo_representatives = valid_data_filtered.groupby('EmbryoID').first().reset_index()
+        print(f"   处理 {len(embryo_representatives)} 个胚胎的元数据")
+
+        embryo_metadata = {}
+        for _, embryo_row in embryo_representatives.iterrows():
+            embryo_id = embryo_row['EmbryoID']
+
+            # 从预建映射中获取图像（避免重复过滤）
+            valid_images = embryo_to_images.get(embryo_id, [])
+
             if len(valid_images) > 0:
-                # 获取胚胎的其他信息
-                embryo_row = embryo_images.iloc[0]
-                
                 # 获取质量标签
                 if 'EmbryoQuality' in embryo_row:
                     quality = 1 if embryo_row['EmbryoQuality'] == "good" else 0

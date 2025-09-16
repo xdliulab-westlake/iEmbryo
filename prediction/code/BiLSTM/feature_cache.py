@@ -130,9 +130,23 @@ class BiLSTMFeatureCache:
             except Exception as e:
                 print(f"❌ 缓存加载失败: {e}")
         
-        # 重新提取特征
+        # 重新提取特征 - 智能选择方法
         print("🔄 开始特征提取...")
-        features_dict = self._extract_features_from_scratch(image_paths, training, use_augmentation)
+
+        # 检查GPU数量和图像数量，选择最优策略
+        gpu_count = len(self.multi_extractor.gpu_devices) if hasattr(self.multi_extractor, 'gpu_devices') else 1
+        use_multi_gpu = getattr(self.multi_extractor, 'use_multi_gpu', False)
+
+        print(f"📊 GPU状态: {gpu_count} 个GPU, 多GPU模式: {use_multi_gpu}")
+        print(f"📊 图像数量: {len(image_paths)}")
+
+        # 根据情况选择最优方法
+        if len(image_paths) > 500 or (use_multi_gpu and gpu_count > 1):
+            print("🚀 使用超级优化方法")
+            features_dict = self._extract_features_optimized(image_paths, training, use_augmentation)
+        else:
+            print("🔧 使用标准方法")
+            features_dict = self._extract_features_from_scratch(image_paths, training, use_augmentation)
         
         # 保存缓存
         if use_cache:
@@ -141,7 +155,7 @@ class BiLSTMFeatureCache:
         return features_dict
     
     def _extract_features_from_scratch(self, image_paths, training, use_augmentation):
-        """从头提取特征（使用STORK预处理）"""
+        """从头提取特征（使用STORK预处理） - 优化版本"""
         # STORK预处理包装函数
         def stork_preprocess_wrapper(path_bytes):
             """包装STORK预处理以在tf.py_function中使用"""
@@ -207,10 +221,13 @@ class BiLSTMFeatureCache:
             img = tf.cast(img, tf.uint8)
             return img
         
-        # 构建数据管道
-        BATCH_SIZE = 32 if training else 64  # 训练时使用较小批次
+        # 构建数据管道 - 超保守的批次大小避免OOM
+        BATCH_SIZE = 32  # 减小批次大小避免显存不足
         path_dataset = tf.data.Dataset.from_tensor_slices(image_paths)
-        image_dataset = path_dataset.map(load_and_preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+        image_dataset = path_dataset.map(
+            load_and_preprocess_image,
+            num_parallel_calls=tf.data.AUTOTUNE
+        )
         image_dataset = image_dataset.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
         
         features_dict = {}
@@ -228,7 +245,114 @@ class BiLSTMFeatureCache:
                     path_idx += 1
                     
         return features_dict
-    
+
+    def _extract_features_optimized(self, image_paths, training, use_augmentation):
+        """优化的特征提取方法 - 使用更大批次和内存管理"""
+        import cv2
+        from concurrent.futures import ThreadPoolExecutor
+
+        def load_image_optimized(path):
+            """优化的图像加载函数"""
+            try:
+                if not os.path.exists(path):
+                    print(f"❌ 图像文件不存在: {path}")
+                    return np.zeros((224, 224, 3), dtype=np.uint8)
+
+                # 使用STORK预处理管道
+                processed_img = preprocess_embryo_image(
+                    path,
+                    img_size=224,
+                    apply_petri_crop=True,
+                    apply_center_crop=True
+                )
+                return processed_img.astype(np.uint8)
+
+            except Exception as e:
+                print(f"⚠️ 图像加载失败 {path}: {e}")
+                # 回退到OpenCV加载
+                try:
+                    img = cv2.imread(path)
+                    if img is not None:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        img = cv2.resize(img, (224, 224))
+                        return img.astype(np.uint8)
+                    else:
+                        return np.zeros((224, 224, 3), dtype=np.uint8)
+                except:
+                    return np.zeros((224, 224, 3), dtype=np.uint8)
+
+        print("🚀 使用原版高效的批次处理...")
+
+        # 使用保守的批次大小
+        features_dict = {}
+        BATCH_SIZE = 32  # 减小批次大小避免显存不足
+
+        print(f"🎯 批次大小: {BATCH_SIZE}")
+
+        # 分批处理
+        for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="批量处理"):
+            batch_paths = image_paths[i:i+BATCH_SIZE]
+
+            # 并行加载当前批次的图像 - 增加线程数
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                batch_images = list(executor.map(load_image_optimized, batch_paths))
+
+            # 转换为numpy数组
+            batch_images = np.array(batch_images)
+
+            # 应用数据增强（仅训练时）- 向量化操作
+            if training and use_augmentation:
+                # 向量化数据增强，更高效
+                flip_mask = np.random.random(len(batch_images)) > 0.5
+                for j in range(len(batch_images)):
+                    if flip_mask[j]:
+                        batch_images[j] = np.fliplr(batch_images[j])
+
+                # 批量亮度调整
+                brightness_mask = np.random.random(len(batch_images)) > 0.7
+                brightness_factors = np.random.uniform(0.9, 1.1, len(batch_images))
+                for j in range(len(batch_images)):
+                    if brightness_mask[j]:
+                        batch_images[j] = np.clip(batch_images[j] * brightness_factors[j], 0, 255).astype(np.uint8)
+
+            # 提取特征 - 使用优化的特征提取器
+            try:
+                batch_features = self.multi_extractor.extract_features(batch_images)
+
+                # 存储特征
+                for j, path in enumerate(batch_paths):
+                    if j < len(batch_features):  # 防止索引越界
+                        features_dict[path] = batch_features[j]
+
+            except Exception as e:
+                print(f"⚠️ 批次特征提取失败: {e}")
+                # 如果大批次失败，尝试小批次
+                print("   尝试拆分为小批次...")
+                SMALL_BATCH = 64
+                for k in range(0, len(batch_images), SMALL_BATCH):
+                    small_batch = batch_images[k:k+SMALL_BATCH]
+                    small_paths = batch_paths[k:k+SMALL_BATCH]
+                    try:
+                        small_features = self.multi_extractor.extract_features(small_batch)
+                        for j, path in enumerate(small_paths):
+                            if j < len(small_features):
+                                features_dict[path] = small_features[j]
+                    except Exception as e2:
+                        print(f"   小批次也失败: {e2}")
+
+            # 清理内存并强制垃圾回收
+            del batch_images
+            if 'batch_features' in locals():
+                del batch_features
+
+            # 每处理一定数量后清理GPU内存
+            if i % (BATCH_SIZE * 4) == 0:
+                import gc
+                gc.collect()
+                # 不清理整个session，只是建议垃圾回收
+
+        return features_dict
+
     def get_features_by_paths(self, image_paths, cached_features):
         """从缓存中获取指定路径的特征"""
         features = []
