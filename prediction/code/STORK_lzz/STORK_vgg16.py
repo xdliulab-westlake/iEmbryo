@@ -279,11 +279,18 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
                                 resume_training=True, fine_tune=False, copy_images=False,
                                 model_name='vgg16', use_validation=True):
     # Set strategy for distributed training with enhanced error handling
-    try:
-        strategy = tf.distribute.MirroredStrategy()
-        print(f"🎯 使用分布式策略: {strategy.num_replicas_in_sync} 个GPU")
-    except Exception as strategy_error:
-        print(f"⚠️ 分布式策略初始化失败，使用默认策略: {strategy_error}")
+    num_gpus = len(tf.config.list_physical_devices('GPU'))
+
+    if num_gpus > 1:
+        try:
+            strategy = tf.distribute.MirroredStrategy()
+            print(f"🎯 使用多GPU分布式策略: {strategy.num_replicas_in_sync} 个GPU")
+            print(f"   每个GPU批次大小: {global_batch_size // strategy.num_replicas_in_sync}")
+        except Exception as strategy_error:
+            print(f"⚠️ 多GPU策略初始化失败，使用单GPU模式: {strategy_error}")
+            strategy = tf.distribute.get_strategy()
+    else:
+        print(f"🔧 单GPU模式")
         strategy = tf.distribute.get_strategy()
 
     start_time = time.time()
@@ -984,7 +991,7 @@ def analyze_attention_patterns(model, X_eval, y_eval, save_dir="attention_analys
 
 # Evaluate Deep Learning Model
 def paper_style_cross_validation(train_images, train_labels, model_names=['vgg16', 'resnet50', 'inceptionv3', 'efficientnetb0'],
-                                n_folds=4, epochs=50, batch_size=32, img_size=224, fine_tune=True, use_augmentation=True):
+                                n_folds=4, epochs=50, batch_size=16, img_size=224, fine_tune=True, use_augmentation=True):
     """
     论文级严格交叉验证：仅在训练集（70%）内进行4折验证
 
@@ -1531,8 +1538,8 @@ def parse_arguments():
     parser.add_argument('--epochs', '-e', type=int, default=2000,
                        help='训练轮数 (默认: 2000)')
     
-    parser.add_argument('--batch-size', '-b', type=int, default=64,
-                       help='每个GPU的批处理大小 (默认: 64)')
+    parser.add_argument('--batch-size', '-b', type=int, default=16,
+                       help='每个GPU的批处理大小 (默认: 16, 减小以避免GPU OOM)')
     
     parser.add_argument('--img-size', type=int, default=224,
                        help='输入图像尺寸 (默认: 224)')
@@ -1694,8 +1701,19 @@ if __name__ == "__main__":
 
     # Define the strategy for multi-GPU training
     num_gpus = len(tf.config.list_physical_devices('GPU'))
-    batch_size_per_replica = args.batch_size
-    global_batch_size = batch_size_per_replica * max(1, num_gpus)
+    print(f"🔍 检测到 {num_gpus} 个GPU设备")
+
+    # 优化多GPU批次大小策略 - 避免过大导致OOM
+    if num_gpus > 1:
+        # 多GPU时：每个GPU的批次大小保持较小，总批次才是目标大小
+        batch_size_per_replica = args.batch_size  # 每个GPU的批次大小
+        global_batch_size = batch_size_per_replica * num_gpus
+        print(f"🚀 多GPU模式: {batch_size_per_replica} per GPU × {num_gpus} GPUs = {global_batch_size} total")
+    else:
+        # 单GPU时：直接使用设定的批次大小
+        batch_size_per_replica = args.batch_size
+        global_batch_size = batch_size_per_replica
+        print(f"🔧 单GPU模式: {global_batch_size} batch size")
 
     # 🎯 使用论文级70/30数据分割策略
     preprocessing_start = time.time()
@@ -1760,6 +1778,17 @@ if __name__ == "__main__":
         print(f"   验证策略: 无独立验证集，使用validation_split内部监控")
         print(f"   测试集: {len(X_test)} 样本 (30%总数据，完全隔离)")
         print(f"   🔑 策略: 最大化训练数据使用，符合论文标准")
+
+        # 🎯 设置分布式策略
+        if num_gpus > 1:
+            try:
+                strategy = tf.distribute.MirroredStrategy()
+                print(f"🎯 主训练使用多GPU策略: {strategy.num_replicas_in_sync} 个GPU")
+            except Exception as e:
+                print(f"⚠️ 多GPU策略初始化失败，使用单GPU: {e}")
+                strategy = tf.distribute.get_strategy()
+        else:
+            strategy = tf.distribute.get_strategy()
 
         # 🎯 使用无验证集模式训练（包装TF分布式策略错误处理）
         try:

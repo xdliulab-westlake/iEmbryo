@@ -164,7 +164,7 @@ def batch_preprocess_images_parallel(paths: List[str], img_size: int, is_trainin
     return np.array(processed_images)
 
 
-def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=32, use_cache=True, model_name='vgg16', num_workers=None):
+def load_data_with_stork_preprocessing(data_dir, img_size=224, batch_size=16, use_cache=True, model_name='vgg16', num_workers=None):
     """
     使用优化的STORK预处理的数据加载函数（70/30分割策略）
 
