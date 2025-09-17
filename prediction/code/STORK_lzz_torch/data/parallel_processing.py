@@ -106,6 +106,39 @@ class DatasetCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+    def find_existing_caches(self) -> List[Path]:
+        """查找所有现有的缓存文件"""
+        cache_files = []
+
+        # 搜索当前目录和常见的缓存目录
+        search_dirs = [
+            Path("."),
+            Path("./cache"),
+            Path("./cache_preprocessed_data"),
+            Path("../cache_preprocessed_data"),
+            Path("./data/cache"),
+        ]
+
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                # 查找所有可能的缓存文件模式
+                patterns = [
+                    "stork_preprocessed_*.pkl",
+                    "preprocessed_*.pkl",
+                    "*_cache*.pkl",
+                    "*.pkl"
+                ]
+
+                for pattern in patterns:
+                    found_files = list(search_dir.glob(pattern))
+                    cache_files.extend(found_files)
+
+        # 去重并按修改时间排序
+        unique_files = list(set(cache_files))
+        unique_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        return unique_files
+
     def _generate_cache_key(self,
                           data_dir: str,
                           img_size: int,
@@ -135,8 +168,9 @@ class DatasetCache:
         """
         cache_file = self.get_cache_path(cache_key)
 
+        # 首先尝试精确匹配
         if cache_file.exists():
-            print(f"🚀 找到缓存文件，直接加载: {cache_file}")
+            print(f"🚀 找到精确匹配的缓存文件: {cache_file}")
             try:
                 with open(cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
@@ -149,7 +183,54 @@ class DatasetCache:
                 print("将重新进行图像预处理...")
                 return None
         else:
-            print(f"📝 缓存文件不存在: {cache_file}")
+            # 如果精确匹配失败，尝试查找现有的缓存文件
+            print(f"📝 精确缓存文件不存在: {cache_file.name}")
+
+            # 使用增强的搜索功能查找现有缓存
+            existing_caches = self.find_existing_caches()
+            if existing_caches:
+                print(f"🔍 在多个位置发现 {len(existing_caches)} 个缓存文件:")
+                for i, cache_path in enumerate(existing_caches[:5]):  # 只显示前5个
+                    size_mb = cache_path.stat().st_size / (1024*1024)
+                    print(f"   {i+1}. {cache_path} ({size_mb:.1f}MB)")
+
+                if len(existing_caches) > 5:
+                    print(f"   ... 还有 {len(existing_caches)-5} 个文件")
+
+                # 优先选择STORK相关的缓存文件
+                stork_caches = [p for p in existing_caches if 'stork' in p.name.lower()]
+                if stork_caches:
+                    latest_cache = stork_caches[0]  # 已经按时间排序
+                    print(f"🎯 优先使用STORK缓存: {latest_cache.name}")
+                else:
+                    latest_cache = existing_caches[0]  # 使用最新的缓存
+                    print(f"🔄 使用最新的缓存文件: {latest_cache.name}")
+
+                try:
+                    with open(latest_cache, 'rb') as f:
+                        cached_data = pickle.load(f)
+
+                    print("✅ 已有缓存加载成功！跳过图像预处理步骤")
+                    print("💡 提示: 如果数据配置有变化，请删除缓存文件重新生成")
+                    return cached_data
+
+                except Exception as e:
+                    print(f"❌ 缓存文件损坏: {e}")
+                    print("🔄 尝试下一个缓存文件...")
+
+                    # 如果第一个文件损坏，尝试其他文件
+                    for cache_file in existing_caches[1:3]:  # 尝试接下来2个
+                        try:
+                            print(f"🔄 尝试: {cache_file.name}")
+                            with open(cache_file, 'rb') as f:
+                                cached_data = pickle.load(f)
+                            print("✅ 备用缓存加载成功！")
+                            return cached_data
+                        except Exception as e2:
+                            print(f"❌ {cache_file.name} 也损坏: {e2}")
+                            continue
+
+            print("📝 未找到可用的缓存文件，将重新进行预处理")
             return None
 
     def save_cache(self, cache_key: str, data: Dict[str, Any]) -> bool:
