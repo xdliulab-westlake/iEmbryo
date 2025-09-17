@@ -197,22 +197,22 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
         try:
             # 检查是否已经初始化了分布式
             if not dist.is_initialized():
-                # 自动设置环境变量并初始化分布式训练
-                device_count = torch.cuda.device_count()
-                if 'WORLD_SIZE' not in os.environ:
-                    # 自动设置分布式环境变量
-                    os.environ['MASTER_ADDR'] = 'localhost'
-                    os.environ['MASTER_PORT'] = '12355'
-                    os.environ['RANK'] = '0'
-                    os.environ['WORLD_SIZE'] = str(device_count)
-                    print(f"🚀 自动配置分布式环境，使用 {device_count} 块GPU")
-
-                try:
-                    dist.init_process_group(backend='nccl')
-                    is_distributed = True
-                    print(f"✅ 分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
-                except Exception as e:
-                    print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
+                # 检查是否通过torchrun或launch启动
+                if 'WORLD_SIZE' in os.environ and 'RANK' in os.environ:
+                    # 已经通过分布式启动器启动，直接初始化
+                    print(f"🚀 检测到分布式环境，初始化 {os.environ.get('WORLD_SIZE')} 块GPU")
+                    try:
+                        dist.init_process_group(backend='nccl')
+                        is_distributed = True
+                        print(f"✅ 分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
+                    except Exception as e:
+                        print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
+                        is_distributed = False
+                else:
+                    # 单进程启动，使用DataParallel而不是DistributedDataParallel
+                    print(f"🔧 检测到 {torch.cuda.device_count()} 块GPU，将使用DataParallel进行多GPU训练")
+                    print("💡 提示：如需更高效的分布式训练，请使用以下命令启动：")
+                    print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} main.py --config config/my_config.yaml")
                     is_distributed = False
             else:
                 is_distributed = True

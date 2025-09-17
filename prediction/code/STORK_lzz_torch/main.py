@@ -94,7 +94,7 @@ class STORKApplication:
 
         # 检查是否需要分布式采样器
         train_sampler = None
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if self.optimization_setup['is_distributed'] and torch.distributed.is_initialized():
             from torch.utils.data.distributed import DistributedSampler
             train_sampler = DistributedSampler(train_subset)
             print("🔄 使用分布式采样器")
@@ -131,6 +131,12 @@ class STORKApplication:
 
         # 移动到设备
         self.model = self.model.to(self.device)
+
+        # 多GPU设置
+        if torch.cuda.device_count() > 1 and not self.optimization_setup['is_distributed']:
+            # 使用DataParallel进行多GPU训练
+            self.model = torch.nn.DataParallel(self.model)
+            print(f"🚀 启用DataParallel多GPU训练: {torch.cuda.device_count()} 块GPU")
 
         print("✅ 模型设置完成")
 
