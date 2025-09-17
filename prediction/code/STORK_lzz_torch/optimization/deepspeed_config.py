@@ -141,8 +141,15 @@ class DeepSpeedOptimizer:
 
     def get_strategy_description(self) -> str:
         """获取优化策略描述"""
-        if not self.available:
-            return "标准PyTorch训练"
+        # 实时检查配置状态
+        current_use_deepspeed = self.config.get('optimization', {}).get('use_deepspeed', False)
+
+        if not self.available or not current_use_deepspeed:
+            gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+            if gpu_count > 1:
+                return "DataParallel多GPU训练"
+            else:
+                return "标准PyTorch训练"
 
         zero_stage = self.opt_config.get('zero_stage', 2)
         offload_optimizer = self.opt_config.get('offload_optimizer', True)
@@ -209,11 +216,26 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
                         print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
                         is_distributed = False
                 else:
-                    # 单进程启动，使用DataParallel而不是DistributedDataParallel
-                    print(f"🔧 检测到 {torch.cuda.device_count()} 块GPU，将使用DataParallel进行多GPU训练")
-                    print("💡 提示：如需更高效的分布式训练，请使用以下命令启动：")
-                    print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} main.py --config config/my_config.yaml")
-                    is_distributed = False
+                    # 检查是否要使用DeepSpeed
+                    opt_config = config.get('optimization', {})
+                    use_deepspeed = opt_config.get('use_deepspeed', False) and DEEPSPEED_AVAILABLE
+
+                    if use_deepspeed:
+                        # DeepSpeed需要分布式环境，但单进程启动时禁用DeepSpeed
+                        print(f"⚠️  DeepSpeed需要分布式环境启动，当前为单进程模式")
+                        print("🔄 自动禁用DeepSpeed，使用DataParallel进行多GPU训练")
+                        print("💡 如需使用DeepSpeed，请使用以下命令启动：")
+                        print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} main.py --config config/my_config.yaml")
+
+                        # 在配置中临时禁用DeepSpeed
+                        config['optimization']['use_deepspeed'] = False
+                        is_distributed = False
+                    else:
+                        # 不使用DeepSpeed，使用DataParallel
+                        print(f"🔧 检测到 {torch.cuda.device_count()} 块GPU，将使用DataParallel进行多GPU训练")
+                        print("💡 提示：如需更高效的分布式训练，请使用以下命令启动：")
+                        print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} main.py --config config/my_config.yaml")
+                        is_distributed = False
             else:
                 is_distributed = True
                 print("✅ 分布式训练已初始化")
