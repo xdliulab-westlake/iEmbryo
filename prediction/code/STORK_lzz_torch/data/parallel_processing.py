@@ -447,11 +447,123 @@ def load_data_with_stork_preprocessing(data_dir: str,
             X_test, test_labels, test_quals)        # 测试集
 
 
+class LazySTORKDataset(torch.utils.data.Dataset):
+    """按需加载的STORK数据集，避免内存溢出"""
+
+    def __init__(self, image_paths, labels, img_size=224, is_training=True):
+        self.image_paths = image_paths
+        self.labels = labels
+        self.img_size = img_size
+        self.is_training = is_training
+
+        # ImageNet标准化参数
+        self.mean = torch.tensor([0.485, 0.456, 0.406])
+        self.std = torch.tensor([0.229, 0.224, 0.225])
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        # 按需加载单张图片
+        image_path = self.image_paths[idx]
+        label = self.labels[idx]
+
+        try:
+            # 读取并预处理图片
+            image = self._load_and_preprocess_image(image_path)
+            return image, label
+        except Exception as e:
+            print(f"❌ 加载图片失败 {image_path}: {e}")
+            # 返回黑色图片作为fallback
+            black_image = torch.zeros(3, self.img_size, self.img_size)
+            return black_image, label
+
+    def _load_and_preprocess_image(self, image_path):
+        """加载并预处理单张图片"""
+        import cv2
+        from .stork_image_utils import preprocess_embryo_image
+
+        # 读取图片
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"无法读取图片: {image_path}")
+
+        # BGR to RGB
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # STORK预处理
+        img = preprocess_embryo_image(
+            img,
+            img_size=self.img_size,
+            apply_petri_crop=True,
+            apply_center_crop=True
+        )
+
+        # 训练时应用数据增强
+        if self.is_training:
+            img = self._apply_data_augmentation(img)
+
+        # 转换为PyTorch张量
+        img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+
+        # ImageNet标准化
+        img = (img - self.mean.view(3, 1, 1)) / self.std.view(3, 1, 1)
+
+        return img
+
+    def _apply_data_augmentation(self, image):
+        """应用数据增强（与原始STORK一致）"""
+        import cv2
+        import numpy as np
+        from .data_augmentation import get_default_augmenter
+
+        # 使用统一的数据增强模块
+        augmenter = get_default_augmenter()
+        image = augmenter.augment_single_image(image)
+
+        # 随机色调调整 (轻微)
+        if np.random.rand() > 0.8:
+            hsv = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2HSV)
+            hue_shift = np.random.uniform(-10, 10)
+            hsv[:,:,0] = np.clip(hsv[:,:,0] + hue_shift, 0, 179)
+            image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32)
+
+        return image
+
+
+def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, test_labels,
+                                     img_size=224) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
+    """
+    从图片路径创建按需加载的PyTorch数据集
+
+    Args:
+        train_paths: 训练图片路径列表
+        train_labels: 训练标签列表
+        test_paths: 测试图片路径列表
+        test_labels: 测试标签列表
+        img_size: 图片尺寸
+
+    Returns:
+        训练数据集, 测试数据集
+    """
+    print("🚀 创建按需加载数据集，避免内存溢出...")
+
+    train_dataset = LazySTORKDataset(train_paths, train_labels, img_size, is_training=True)
+    test_dataset = LazySTORKDataset(test_paths, test_labels, img_size, is_training=False)
+
+    print(f"✅ 按需加载数据集创建完成")
+    print(f"   训练集: {len(train_dataset)} 样本")
+    print(f"   测试集: {len(test_dataset)} 样本")
+    print(f"   内存使用: 仅存储路径，约 {(len(train_paths) + len(test_paths)) * 0.1 / 1024:.1f} MB")
+
+    return train_dataset, test_dataset
+
+
 def create_pytorch_datasets_from_cache(cache_data: Dict[str, Any],
                                      train_transform=None,
                                      test_transform=None) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
     """
-    从缓存数据创建PyTorch数据集
+    从缓存数据创建PyTorch数据集 (已弃用，使用按需加载版本)
 
     Args:
         cache_data: 缓存的数据
@@ -461,6 +573,7 @@ def create_pytorch_datasets_from_cache(cache_data: Dict[str, Any],
     Returns:
         训练数据集, 测试数据集
     """
+    print("⚠️  警告：使用内存密集型的缓存加载，可能导致OOM")
     from torch.utils.data import TensorDataset
 
     # 转换为PyTorch张量
@@ -469,6 +582,14 @@ def create_pytorch_datasets_from_cache(cache_data: Dict[str, Any],
 
     X_test = torch.from_numpy(cache_data['X_test']).permute(0, 3, 1, 2).float() / 255.0
     y_test = torch.from_numpy(cache_data['test_labels']).long()
+
+    # 立即释放原始缓存数据以节省内存
+    import gc
+    print("🧹 释放原始缓存数据以节省内存...")
+    cache_data.clear()  # 清空字典
+    del cache_data  # 删除引用
+    gc.collect()  # 强制垃圾回收
+    print("✅ 缓存数据已释放")
 
     # ImageNet标准化
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -507,33 +628,21 @@ class STORKDataLoader:
 
     def load_data(self) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
         """
-        加载数据并返回PyTorch数据集
+        加载数据并返回PyTorch数据集（按需加载版本）
 
         Returns:
             训练数据集, 测试数据集
         """
         if is_main_process():
-            print("🔄 开始加载STORK预处理数据...")
+            print("🔄 开始收集图片路径信息...")
 
-        # 加载预处理数据
-        X_train, train_labels, train_quals, X_test, test_labels, test_quals = \
-            load_data_with_stork_preprocessing(
-                data_dir=self.data_dir,
-                img_size=self.img_size,
-                train_split=self.train_split,
-                use_cache=self.use_cache,
-                apply_petri_crop=self.apply_petri_crop,
-                apply_center_crop=self.apply_center_crop,
-                num_workers=self.num_workers
-            )
+        # 直接收集图片路径，不进行预处理
+        train_paths, train_labels, test_paths, test_labels = self._collect_image_paths()
 
-        # 创建PyTorch数据集
-        cache_data = {
-            'X_train': X_train, 'train_labels': train_labels,
-            'X_test': X_test, 'test_labels': test_labels
-        }
-
-        train_dataset, test_dataset = create_pytorch_datasets_from_cache(cache_data)
+        # 创建按需加载的PyTorch数据集
+        train_dataset, test_dataset = create_pytorch_datasets_from_paths(
+            train_paths, train_labels, test_paths, test_labels, self.img_size
+        )
 
         if is_main_process():
             print(f"✅ 数据加载完成")
@@ -541,6 +650,62 @@ class STORKDataLoader:
             print(f"   测试集: {len(test_dataset)} 样本")
 
         return train_dataset, test_dataset
+
+    def _collect_image_paths(self):
+        """收集图片路径和标签，不加载实际图片数据"""
+        from pathlib import Path
+        from sklearn.model_selection import train_test_split
+        import numpy as np
+
+        image_paths = []
+        labels = []
+
+        if is_main_process():
+            print("=== 收集图片路径信息 ===")
+
+        # 收集所有图像路径和标签
+        data_path = Path(self.data_dir)
+        for class_dir in data_path.iterdir():
+            if not class_dir.is_dir():
+                continue
+
+            class_name = class_dir.name.lower()
+            if class_name in ['0', 'negative', 'no', 'non_viable', 'class_0']:
+                class_label = 0
+            elif class_name in ['1', 'positive', 'yes', 'viable', 'class_1']:
+                class_label = 1
+            else:
+                continue
+
+            for img_file in class_dir.iterdir():
+                if img_file.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
+                    image_paths.append(str(img_file))
+                    labels.append(class_label)
+
+        # 转换为numpy数组
+        image_paths = np.array(image_paths)
+        labels = np.array(labels)
+
+        if is_main_process():
+            print(f"找到 {len(image_paths)} 张图像")
+            print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
+
+        # 数据分割
+        test_size = 1.0 - self.train_split
+        if is_main_process():
+            print(f"🎯 采用 {int(self.train_split*100)}/{int(test_size*100)} 数据分割策略...")
+
+        train_paths, test_paths, train_labels, test_labels = train_test_split(
+            image_paths, labels, test_size=test_size,
+            random_state=42, stratify=labels
+        )
+
+        if is_main_process():
+            print(f"📊 数据分割完成:")
+            print(f"  训练集: {len(train_paths)} ({len(train_paths)/len(image_paths)*100:.1f}%)")
+            print(f"  测试集: {len(test_paths)} ({len(test_paths)/len(image_paths)*100:.1f}%)")
+
+        return train_paths, train_labels, test_paths, test_labels
 
 
 def create_stork_data_loader(config: Dict[str, Any]) -> STORKDataLoader:

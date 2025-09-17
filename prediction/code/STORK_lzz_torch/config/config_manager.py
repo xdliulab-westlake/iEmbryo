@@ -73,6 +73,9 @@ class ConfigManager:
         if hasattr(args, 'fine_tune') and args.fine_tune is not None:
             self.config['model']['fine_tune'] = args.fine_tune
 
+        if hasattr(args, 'pretrained_path') and args.pretrained_path:
+            self.config['model']['pretrained_path'] = args.pretrained_path
+
         if hasattr(args, 'resume') and args.resume is not None:
             self.config['training']['resume_training'] = args.resume
 
@@ -214,6 +217,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
                        help='启用微调模式')
     parser.add_argument('--no-fine-tune', dest='fine_tune', action='store_false',
                        help='禁用微调模式')
+    parser.add_argument('--pretrained-path', type=str, default=None,
+                       help='本地预训练模型文件路径')
 
     # 训练参数
     parser.add_argument('--epochs', '-e', type=int, default=None,
