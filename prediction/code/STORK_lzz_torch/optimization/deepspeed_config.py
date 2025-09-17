@@ -197,13 +197,23 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
         try:
             # 检查是否已经初始化了分布式
             if not dist.is_initialized():
-                # 尝试初始化分布式训练
-                if 'WORLD_SIZE' in os.environ:
+                # 自动设置环境变量并初始化分布式训练
+                device_count = torch.cuda.device_count()
+                if 'WORLD_SIZE' not in os.environ:
+                    # 自动设置分布式环境变量
+                    os.environ['MASTER_ADDR'] = 'localhost'
+                    os.environ['MASTER_PORT'] = '12355'
+                    os.environ['RANK'] = '0'
+                    os.environ['WORLD_SIZE'] = str(device_count)
+                    print(f"🚀 自动配置分布式环境，使用 {device_count} 块GPU")
+
+                try:
                     dist.init_process_group(backend='nccl')
                     is_distributed = True
-                    print(f"🚀 分布式训练初始化完成: World Size = {dist.get_world_size()}")
-                else:
-                    print("🔧 多GPU可用，但未设置分布式环境变量")
+                    print(f"✅ 分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
+                except Exception as e:
+                    print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
+                    is_distributed = False
             else:
                 is_distributed = True
                 print("✅ 分布式训练已初始化")

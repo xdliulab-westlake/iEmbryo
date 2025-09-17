@@ -16,7 +16,6 @@ import torch
 from sklearn.model_selection import train_test_split
 
 from .stork_preprocessing import preprocess_embryo_image
-from .transforms import get_model_transforms
 
 
 def optimized_preprocess_single_image(args: Tuple) -> np.ndarray:

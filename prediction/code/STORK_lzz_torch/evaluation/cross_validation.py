@@ -16,9 +16,14 @@ from collections import defaultdict
 import copy
 import json
 
-from ..training.trainer import STORKTrainer
-from ..data.dataset import EmbryoDataset
-from ..models.backbone import BackboneModel
+# 使用绝对导入而不是相对导入
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
+from training.trainer import STORKTrainer
+from data.dataset import EmbryoDataset
+from models.backbone import BackboneModel
 from torch.utils.data import DataLoader, Subset
 
 

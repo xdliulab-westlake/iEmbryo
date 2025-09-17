@@ -92,9 +92,20 @@ class STORKApplication:
         batch_size = self.config['training']['batch_size']
         num_workers = self.config.get('data', {}).get('num_workers', 4)
 
+        # 检查是否需要分布式采样器
+        train_sampler = None
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            from torch.utils.data.distributed import DistributedSampler
+            train_sampler = DistributedSampler(train_subset)
+            print("🔄 使用分布式采样器")
+
         self.train_loader = DataLoader(
-            train_subset, batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, pin_memory=True
+            train_subset,
+            batch_size=batch_size,
+            shuffle=(train_sampler is None),  # 如果有sampler就不shuffle
+            sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=True
         )
         self.val_loader = DataLoader(
             val_subset, batch_size=batch_size, shuffle=False,

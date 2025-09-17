@@ -44,6 +44,21 @@ def setup_environment():
     requirements_file = Path(__file__).parent / "requirements.txt"
     if requirements_file.exists():
         print("📦 安装Python依赖...")
+
+        # 先升级关键依赖以解决兼容性问题
+        print("🔧 升级核心依赖...")
+        core_deps = [
+            "numpy>=1.25.2",
+            "scipy>=1.10.0",
+            "timm>=0.9.0"
+        ]
+
+        for dep in core_deps:
+            cmd = f"{sys.executable} -m pip install '{dep}'"
+            if not run_command(cmd, check=False):
+                print(f"⚠️  安装 {dep} 失败，继续安装其他依赖...")
+
+        # 安装完整requirements
         cmd = f"{sys.executable} -m pip install -r {requirements_file}"
         if not run_command(cmd):
             print("❌ 依赖安装失败，请手动安装")
