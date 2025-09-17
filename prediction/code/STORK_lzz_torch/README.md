@@ -82,7 +82,7 @@ training:
 ### 4. 开始训练
 
 ```bash
-# 使用默认配置训练
+# 使用默认配置训练（自动多GPU）
 python main.py
 
 # 使用自定义配置
@@ -94,6 +94,12 @@ python main.py --config config/my_config.yaml --debug
 # 仅验证配置（不实际训练）
 python main.py --config config/my_config.yaml --dry-run
 ```
+
+**🚀 多GPU自动配置 (v4.0.0新功能)：**
+- 系统自动检测并使用所有可用GPU进行分布式训练
+- 无需手动配置分布式环境变量或启动命令
+- 支持2×A800-SXM4-80GB等高性能GPU配置
+- 自动优化批次大小和内存使用
 
 ## 📊 系统功能
 
@@ -110,9 +116,10 @@ python main.py --config config/my_config.yaml --dry-run
 - **微调策略** - 支持层级冻结和渐进式微调
 
 ### ⚡ 性能优化
-- **DeepSpeed集成** - 内存优化，支持更大批次训练
+- **智能多GPU配置** - 自动检测并配置所有可用GPU，无需手动分布式设置
+- **DeepSpeed集成** - ZeRO Stage 2内存优化，支持更大批次训练
 - **混合精度训练** - FP16训练，减少内存使用，提升训练速度
-- **分布式训练** - 多GPU并行训练支持
+- **分布式训练** - 自动NCCL后端配置，支持多GPU并行训练
 - **梯度累积** - 模拟更大批次训练
 
 ### 📈 评估和可视化
@@ -369,6 +376,14 @@ outputs/
 
 ### 分布式训练
 
+**v4.0.0 自动多GPU配置 (推荐)：**
+```bash
+# 简单启动，自动使用所有可用GPU
+python main.py --config config/my_config.yaml
+# 系统会自动检测GPU数量并配置分布式训练
+```
+
+**传统手动配置方式：**
 ```bash
 # 单机多GPU
 python -m torch.distributed.launch --nproc_per_node=2 main.py --config config/distributed.yaml
