@@ -19,7 +19,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import torch
 from config import create_arg_parser, load_config
 from models import create_model
-from data import create_stork_data_loader, create_train_transforms, create_val_transforms
+from data import STORKDataLoader, create_train_transforms, create_val_transforms
 from training import STORKTrainer
 from optimization import create_optimization_setup
 from evaluation import evaluate_model, create_cross_validator
@@ -80,7 +80,7 @@ class STORKApplication:
             print("\n📊 设置STORK数据加载器...")
 
         # 创建STORK数据加载器
-        self.data_loader = create_stork_data_loader(self.config)
+        self.data_loader = STORKDataLoader(self.config)
 
         # 加载数据集（使用STORK预处理）
         self.train_dataset, self.test_dataset = self.data_loader.load_data()

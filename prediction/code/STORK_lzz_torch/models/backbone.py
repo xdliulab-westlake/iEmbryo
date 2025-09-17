@@ -9,6 +9,14 @@ import torch.nn as nn
 import torchvision.models as models
 import timm
 from typing import Dict, Tuple
+try:
+    from ..data.gpu_transforms import create_gpu_transforms, check_kornia_available
+except ImportError:
+    # 处理相对导入问题
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from data.gpu_transforms import create_gpu_transforms, check_kornia_available
 
 
 class BackboneModel(nn.Module):
@@ -68,7 +76,8 @@ class BackboneModel(nn.Module):
                  pretrained_path: str = None,
                  num_classes: int = 2,
                  fine_tune: bool = True,
-                 fine_tune_layers: int = None):
+                 fine_tune_layers: int = None,
+                 config: Dict = None):
         """
         初始化预训练模型
 
@@ -79,6 +88,7 @@ class BackboneModel(nn.Module):
             num_classes: 分类类别数
             fine_tune: 是否启用微调
             fine_tune_layers: 微调层数（可选）
+            config: 配置字典（用于GPU数据增强）
         """
         super().__init__()
 
@@ -90,6 +100,19 @@ class BackboneModel(nn.Module):
         self.num_classes = num_classes
         self.fine_tune = fine_tune
         self.pretrained_path = pretrained_path
+        self.config = config or {}
+
+        # 创建GPU数据增强模块
+        self.gpu_aug = None
+        if config and check_kornia_available():
+            try:
+                self.gpu_aug = create_gpu_transforms(config)
+                print("✅ GPU数据增强模块已启用")
+            except Exception as e:
+                print(f"⚠️ GPU数据增强初始化失败: {e}")
+                print("🔄 回退到CPU数据增强")
+        elif config:
+            print("⚠️ Kornia未安装，无法使用GPU数据增强")
 
         # 创建骨干网络
         self.backbone = self._create_backbone(pretrained, pretrained_path)
@@ -389,8 +412,26 @@ class BackboneModel(nn.Module):
             param.requires_grad = False
         print("🔒 骨干网络已冻结，仅训练分类头")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, labels: torch.Tensor = None) -> torch.Tensor:
         """前向传播"""
+        # GPU数据增强（如果启用且在训练模式）
+        if self.gpu_aug is not None and self.training:
+            if labels is not None:
+                # 有标签时，可能会应用MixUp/CutMix
+                x, labels_a, labels_b, lam = self.gpu_aug(x, labels)
+
+                # 特征提取
+                features = self.backbone(x)
+
+                # 分类
+                output = self.classifier(features)
+
+                # 返回混合后的结果和混合参数
+                return output, labels_a, labels_b, lam
+            else:
+                # 无标签时，只应用基础增强
+                x = self.gpu_aug(x)
+
         # 特征提取
         features = self.backbone(x)
 
@@ -432,13 +473,15 @@ def create_model(config: Dict) -> BackboneModel:
     Returns:
         BackboneModel实例
     """
+    model_config = config.get('model', {})
     return BackboneModel(
-        model_name=config.get('name', 'vgg16'),
-        pretrained=config.get('pretrained', True),
-        pretrained_path=config.get('pretrained_path', None),
-        num_classes=config.get('num_classes', 2),
-        fine_tune=config.get('fine_tune', True),
-        fine_tune_layers=config.get('fine_tune_layers', None)
+        model_name=model_config.get('name', 'vgg16'),
+        pretrained=model_config.get('pretrained', True),
+        pretrained_path=model_config.get('pretrained_path', None),
+        num_classes=model_config.get('num_classes', 2),
+        fine_tune=model_config.get('fine_tune', True),
+        fine_tune_layers=model_config.get('fine_tune_layers', None),
+        config=config  # 传递完整配置用于GPU增强
     )
 
 

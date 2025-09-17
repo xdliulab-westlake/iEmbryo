@@ -27,6 +27,9 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 # 安装其他依赖
 pip install -r requirements.txt
+
+# 安装GPU数据增强依赖 (推荐)
+pip install kornia  # GPU加速数据增强
 ```
 
 ### 2. 数据准备
@@ -253,9 +256,41 @@ cross_validation:
 
 ### 数据增强配置 (`augmentation`)
 
+STORK支持两种数据增强方式：GPU加速增强（推荐）和CPU增强。
+
+#### GPU数据增强（推荐）⚡
 ```yaml
 augmentation:
   enabled: true                   # 是否启用数据增强
+  use_gpu_augmentation: true      # 启用GPU数据增强 (需要Kornia)
+
+  # 基础增强
+  rotation_range: 15              # 旋转角度范围
+  horizontal_flip: true           # 水平翻转
+  vertical_flip: false            # 垂直翻转（胚胎图像通常不需要）
+  brightness_range: [0.9, 1.1]    # 亮度调整范围
+
+  # GPU特有增强
+  gaussian_noise: false           # 高斯噪声
+  gaussian_blur: false            # 高斯模糊
+  elastic_transform: false        # 弹性变换（医学图像专用）
+  random_erasing: false           # 随机擦除
+
+  # 高级增强（MixUp/CutMix）
+  mixup_alpha: 0.0               # MixUp强度，0表示禁用
+  cutmix_alpha: 0.0              # CutMix强度，0表示禁用
+```
+
+#### 性能对比
+- **GPU增强**: ~5-10ms/batch，5-10倍加速
+- **CPU增强**: ~50-100ms/batch
+
+#### CPU数据增强（备用）
+```yaml
+augmentation:
+  enabled: true
+  use_gpu_augmentation: false     # 禁用GPU增强
+
   rotation_range: 15              # 旋转角度范围
   width_shift_range: 0.1          # 水平偏移范围
   height_shift_range: 0.1         # 垂直偏移范围
@@ -451,14 +486,22 @@ A: 尝试以下解决方案：
 3. 启用 `gradient_checkpointing: true`
 4. 使用 `zero_stage: 2` 或 `zero_stage: 3`
 
-### Q: 训练速度慢怎么优化？
+## 性能优化
 
-A: 优化建议：
-1. **数据加载优化**：增加 `num_workers` (推荐CPU核心数的1-2倍)
-2. **渐进式缓存**：系统自动使用，第一epoch后显著加速
-3. **存储优化**：使用SSD存储数据，提升I/O性能
-4. **GPU优化**：启用 `mixed_precision: true` 和 `pin_memory: true`
-5. **批次优化**：在GPU内存允许范围内增加 `batch_size`
+**数据处理优化**：
+- 批量缓存系统：自动启用，19万图片→193个文件，加载速度提升5-10倍
+- GPU数据增强：启用 `use_gpu_augmentation: true`，Kornia加速数据增强
+- STORK专业预处理：培养皿检测+中心裁剪，针对胚胎图像优化
+
+**系统性能优化**：
+- 多进程加载：增加 `num_workers` (推荐CPU核心数的1-2倍)
+- 存储优化：使用SSD存储缓存目录，提升I/O性能
+- 内存优化：启用 `pin_memory: true` 和 `persistent_workers: true`
+
+**训练优化**：
+- 混合精度：启用 `mixed_precision: true`，节省GPU内存
+- 批次优化：在GPU内存允许范围内增加 `batch_size`
+- DeepSpeed：大模型使用 `use_deepspeed: true` 分布式训练
 
 ### Q: 如何处理类别不平衡？
 
@@ -473,20 +516,61 @@ training:
 
 A: 设置 `resume_training: true`，系统会自动查找最新的检查点。
 
-### Q: 渐进式缓存是如何工作的？
+## 批量缓存系统
 
-A:
-- **第一个epoch**：系统边训练边缓存STORK预处理结果到 `./preprocessed_cache/` 目录
-- **后续epoch**：直接加载缓存，跳过预处理步骤，训练速度提升5-10倍
-- **数据增强**：仍然动态应用，确保每个epoch的数据都不同
-- **内存安全**：只缓存预处理结果，按需加载，避免内存溢出
+STORK使用**BatchCacheManager**，专为大规模胚胎图像训练优化：
 
-### Q: 如何清理缓存？
-
-A: 如果需要重新生成缓存（例如更改了预处理参数），可以删除缓存目录：
-```bash
-rm -rf ./preprocessed_cache/
+**存储结构**：
 ```
+./batch_cache/
+├── train_chunk_0000.pt      # 1000张训练图片
+├── train_chunk_0001.pt      # 1000张训练图片
+├── test_chunk_0000.pt       # 1000张测试图片
+├── metadata.json            # 缓存元数据
+└── index.json              # 图片路径索引
+```
+
+**工作原理**：
+- 首次训练时图片分块预处理（STORK管道：培养皿检测→中心裁剪→归一化）
+- 每1000张图片保存为一个`.pt`文件，使用PyTorch压缩
+- 后续训练直接加载预处理好的张量，跳过图像处理步骤
+- 基于图片路径+预处理参数生成唯一缓存键
+
+**性能提升**：
+- 文件数量：19万张图片 → 193个文件（减少99.9%）
+- 加载速度：5-10倍提升
+- 存储效率：PyTorch原生压缩，节省空间
+- 跨模型复用：VGG16/ResNet/EfficientNet可共享同一缓存
+
+**缓存管理**：
+```bash
+# 清理缓存（重新生成时使用）
+rm -rf ./batch_cache/
+```
+
+**缓存配置**：
+```yaml
+data:
+  cache_chunk_size: 1000         # 每个缓存文件的图片数量
+
+paths:
+  cache_dir: "./batch_cache"     # 缓存目录位置
+```
+
+**配置建议**：
+- 1000张/块（推荐）：平衡文件数量和加载效率
+- 更大块（2000+）：文件更少，但内存占用更高
+- 更小块（500-）：内存友好，但文件数量增加
+- SSD存储：显著提升缓存读写速度
+- 大容量磁盘：19万图片约需15-20GB空间
+
+### Q: GPU数据增强需要什么依赖？
+
+A: 安装Kornia库：
+```bash
+pip install kornia
+```
+如果没有安装Kornia，系统会自动回退到CPU数据增强。
 
 ### Q: 如何使用自己的预处理方法？
 

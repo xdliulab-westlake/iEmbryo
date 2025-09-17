@@ -232,6 +232,36 @@ def batch_process_images(image_paths: List[str],
     return np.array(processed_images)
 
 
+def preprocess_image_stork_universal(image_path: str,
+                                    img_size: int = 224,
+                                    is_training: bool = True,
+                                    apply_petri_crop: bool = True,
+                                    apply_center_crop: bool = True) -> np.ndarray:
+    """
+    通用STORK预处理函数，与批量缓存兼容
+
+    Args:
+        image_path: 图像路径
+        img_size: 目标图像尺寸
+        is_training: 是否为训练模式（保留参数兼容性）
+        apply_petri_crop: 是否应用培养皿裁剪
+        apply_center_crop: 是否应用中心裁剪
+
+    Returns:
+        预处理后的图像数组 [C, H, W] 格式，范围[0,1]
+    """
+    # 使用现有的预处理函数
+    processed_img = preprocess_embryo_image(
+        image_path, img_size, apply_petri_crop, apply_center_crop
+    )
+
+    # 转换格式：HWC -> CHW, 归一化到[0,1]
+    processed_img = processed_img.astype(np.float32) / 255.0
+    processed_img = np.transpose(processed_img, (2, 0, 1))  # HWC -> CHW
+
+    return processed_img
+
+
 class STORKPreprocessor:
     """STORK预处理器类 - PyTorch版本"""
 

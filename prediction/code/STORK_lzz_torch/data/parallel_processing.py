@@ -270,165 +270,12 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
             X_test, test_labels, test_quals)        # 测试集
 
 
-class LazySTORKDataset(torch.utils.data.Dataset):
-    """按需加载的STORK数据集，带渐进式预处理缓存"""
-
-    def __init__(self, image_paths, labels, img_size=224, is_training=True, cache_dir="./preprocessed_cache"):
-        self.image_paths = image_paths
-        self.labels = labels
-        self.img_size = img_size
-        self.is_training = is_training
-
-        # 设置缓存目录
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # 为每个图片路径生成唯一的缓存文件名
-        import hashlib
-        self.cache_files = []
-        for path in image_paths:
-            # 使用路径的hash作为缓存文件名
-            path_hash = hashlib.md5(str(path).encode()).hexdigest()
-            cache_file = self.cache_dir / f"preprocessed_{path_hash}.npy"
-            self.cache_files.append(cache_file)
-
-        # ImageNet标准化参数
-        self.mean = torch.tensor([0.485, 0.456, 0.406])
-        self.std = torch.tensor([0.229, 0.224, 0.225])
-
-        # 统计缓存命中率
-        self.cache_hits = 0
-        self.total_accesses = 0
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        label = self.labels[idx]
-        cache_file = self.cache_files[idx]
-
-        self.total_accesses += 1
-
-        try:
-            # 尝试加载预处理缓存
-            if cache_file.exists():
-                preprocessed_img = np.load(cache_file)
-                self.cache_hits += 1
-
-                # 显示缓存命中率（每100次访问显示一次）
-                if self.total_accesses % 100 == 0:
-                    hit_rate = self.cache_hits / self.total_accesses * 100
-                    print(f"🚀 缓存命中率: {hit_rate:.1f}% ({self.cache_hits}/{self.total_accesses})")
-            else:
-                # 缓存不存在，进行完整预处理并保存
-                preprocessed_img = self._full_preprocess_and_cache(image_path, cache_file)
-
-            # 转换为tensor
-            image = torch.from_numpy(preprocessed_img).float()
-
-            # 训练时应用动态数据增强
-            if self.is_training:
-                image = self._apply_tensor_augmentation(image)
-
-            # ImageNet标准化
-            image = (image - self.mean.view(3, 1, 1)) / self.std.view(3, 1, 1)
-
-            return image, label
-
-        except Exception as e:
-            print(f"❌ 加载图片失败 {image_path}: {e}")
-            # 返回黑色图片作为fallback
-            black_image = torch.zeros(3, self.img_size, self.img_size)
-            return black_image, label
-
-    def _full_preprocess_and_cache(self, image_path, cache_file):
-        """完整预处理并缓存到磁盘"""
-        # 执行STORK预处理（不包括数据增强）
-        preprocessed_img = self._stork_preprocess_only(image_path)
-
-        # 保存到缓存
-        try:
-            np.save(cache_file, preprocessed_img)
-        except Exception as e:
-            print(f"⚠️  缓存保存失败: {e}")
-
-        return preprocessed_img
-
-    def _stork_preprocess_only(self, image_path):
-        """只进行STORK预处理，不做数据增强"""
-        import cv2
-        import sys
-        import os
-        # 添加STORK_lzz路径到sys.path
-        stork_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'STORK_lzz')
-        if stork_path not in sys.path:
-            sys.path.append(stork_path)
-
-        try:
-            from STORK_lzz.preprocessing.stork_image_utils import preprocess_embryo_image
-        except ImportError:
-            # 使用简化的预处理
-            def preprocess_embryo_image(img, img_size=224, **kwargs):
-                import cv2
-                return cv2.resize(img, (img_size, img_size))
-
-        # 读取图片
-        img = cv2.imread(image_path)
-        if img is None:
-            raise ValueError(f"无法读取图片: {image_path}")
-
-        # BGR to RGB
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        # STORK预处理（不含数据增强）
-        img = preprocess_embryo_image(
-            img,
-            img_size=self.img_size,
-            apply_petri_crop=True,
-            apply_center_crop=True
-        )
-
-        # 转换格式：HWC -> CHW, 归一化到[0,1]
-        img = img.astype(np.float32) / 255.0
-        img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
-
-        return img
-
-    def _apply_tensor_augmentation(self, image):
-        """对tensor格式的图像应用数据增强"""
-        # 这里实现简化的tensor数据增强
-        # 可以使用torchvision.transforms或者简单的随机变换
-
-        # 随机水平翻转
-        if torch.rand(1) > 0.5:
-            image = torch.flip(image, dims=[2])  # 水平翻转
-
-        # 随机亮度调整
-        if torch.rand(1) > 0.8:
-            brightness_factor = 0.9 + torch.rand(1) * 0.2  # [0.9, 1.1]
-            image = torch.clamp(image * brightness_factor, 0.0, 1.0)
-
-        return image
-
-    def get_cache_stats(self):
-        """获取缓存统计信息"""
-        if self.total_accesses > 0:
-            hit_rate = self.cache_hits / self.total_accesses * 100
-            return {
-                'cache_hits': self.cache_hits,
-                'total_accesses': self.total_accesses,
-                'hit_rate': hit_rate,
-                'cache_dir': str(self.cache_dir)
-            }
-        return None
-
 
 
 def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, test_labels,
-                                     img_size=224, cache_dir="./preprocessed_cache") -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
+                                     img_size=224, cache_dir="./batch_cache", chunk_size=1000) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
     """
-    从图片路径创建带渐进式缓存的PyTorch数据集
+    从图片路径创建批量缓存数据集
 
     Args:
         train_paths: 训练图片路径列表
@@ -436,31 +283,42 @@ def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, te
         test_paths: 测试图片路径列表
         test_labels: 测试标签列表
         img_size: 图片尺寸
-        cache_dir: 预处理缓存目录
+        cache_dir: 缓存目录
+        chunk_size: 每个缓存文件的图片数量
 
     Returns:
         训练数据集, 测试数据集
     """
-    print("🚀 创建渐进式缓存数据集，优化训练速度...")
+    try:
+        from .batch_cache import BatchCachedDataset
+    except ImportError:
+        from batch_cache import BatchCachedDataset
 
-    # 为训练和测试数据集使用不同的缓存目录
-    train_cache_dir = f"{cache_dir}/train"
-    test_cache_dir = f"{cache_dir}/test"
+    print(f"🔄 创建批量缓存数据集...")
+    print(f"   图片尺寸: {img_size}×{img_size}")
+    print(f"   训练集: {len(train_paths)} 样本")
+    print(f"   测试集: {len(test_paths)} 样本")
+    print(f"   缓存块大小: {chunk_size} 张/文件")
 
-    train_dataset = LazySTORKDataset(
+    train_dataset = BatchCachedDataset(
         train_paths, train_labels, img_size,
-        is_training=True, cache_dir=train_cache_dir
+        is_training=True, cache_dir=cache_dir,
+        chunk_size=chunk_size, split="train"
     )
-    test_dataset = LazySTORKDataset(
+    test_dataset = BatchCachedDataset(
         test_paths, test_labels, img_size,
-        is_training=False, cache_dir=test_cache_dir
+        is_training=False, cache_dir=cache_dir,
+        chunk_size=chunk_size, split="test"
     )
 
-    print(f"✅ 渐进式缓存数据集创建完成")
+    print(f"✅ 批量缓存数据集创建完成")
     print(f"   训练集: {len(train_dataset)} 样本")
     print(f"   测试集: {len(test_dataset)} 样本")
     print(f"   缓存目录: {cache_dir}")
-    print(f"   🔥 第一个epoch会边训练边缓存，后续epoch将显著加速！")
+
+    # 显示缓存统计
+    stats = train_dataset.get_cache_stats()
+    print(f"   📊 缓存统计: {stats['total_chunks']} 个文件, {stats['total_size_mb']:.1f}MB")
 
     return train_dataset, test_dataset
 
@@ -501,11 +359,16 @@ class STORKDataLoader:
         # 直接收集图片路径，不进行预处理
         train_paths, train_labels, test_paths, test_labels = self._collect_image_paths()
 
-        # 创建带渐进式缓存的PyTorch数据集
+        # 获取缓存配置
+        cache_dir = self.config.get('paths', {}).get('cache_dir', './batch_cache')
+        chunk_size = self.config.get('data', {}).get('cache_chunk_size', 1000)
+
+        # 创建批量缓存PyTorch数据集
         train_dataset, test_dataset = create_pytorch_datasets_from_paths(
             train_paths, train_labels, test_paths, test_labels,
             img_size=self.img_size,
-            cache_dir="./preprocessed_cache"
+            cache_dir=cache_dir,
+            chunk_size=chunk_size
         )
 
         if is_main_process():

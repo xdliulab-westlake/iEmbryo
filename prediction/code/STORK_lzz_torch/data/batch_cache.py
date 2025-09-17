@@ -1,0 +1,384 @@
+"""
+PyTorch原生批量缓存系统
+使用torch.save和分块存储，替代大量小文件的渐进式缓存
+"""
+
+import os
+import json
+import hashlib
+import torch
+import numpy as np
+from pathlib import Path
+from typing import List, Dict, Tuple, Optional, Any
+import time
+# 预处理函数在需要时动态导入
+
+
+class BatchCacheManager:
+    """
+    批量缓存管理器
+    将图片分块存储为PyTorch tensor文件，大幅减少文件数量
+    """
+
+    def __init__(self, cache_dir: str = "./batch_cache", chunk_size: int = 1000):
+        """
+        初始化批量缓存管理器
+
+        Args:
+            cache_dir: 缓存目录
+            chunk_size: 每个文件存储的图片数量
+        """
+        self.cache_dir = Path(cache_dir)
+        self.chunk_size = chunk_size
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # 元数据文件
+        self.metadata_file = self.cache_dir / "metadata.json"
+        self.index_file = self.cache_dir / "index.json"
+
+        # 加载现有元数据
+        self.metadata = self._load_metadata()
+        self.index = self._load_index()
+
+    def _load_metadata(self) -> Dict:
+        """加载缓存元数据"""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        return {
+            "version": "1.0",
+            "chunk_size": self.chunk_size,
+            "total_chunks": 0,
+            "total_images": 0,
+            "img_size": None,
+            "created_time": time.time()
+        }
+
+    def _load_index(self) -> Dict:
+        """加载图片路径索引"""
+        if self.index_file.exists():
+            with open(self.index_file, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def _save_metadata(self):
+        """保存元数据"""
+        with open(self.metadata_file, 'w') as f:
+            json.dump(self.metadata, f, indent=2)
+
+    def _save_index(self):
+        """保存索引"""
+        with open(self.index_file, 'w') as f:
+            json.dump(self.index, f, indent=2)
+
+    def _get_cache_key(self, image_paths: List[str], img_size: int,
+                      apply_petri_crop: bool, apply_center_crop: bool) -> str:
+        """生成缓存键"""
+        # 基于参数生成唯一键
+        params = f"{img_size}_{apply_petri_crop}_{apply_center_crop}"
+        paths_str = "|".join(sorted(image_paths))
+        cache_key = hashlib.md5(f"{params}_{paths_str}".encode()).hexdigest()[:16]
+        return cache_key
+
+    def _get_chunk_filename(self, chunk_id: int, split: str = "train") -> str:
+        """获取分块文件名"""
+        return f"{split}_chunk_{chunk_id:04d}.pt"
+
+    def is_cached(self, image_paths: List[str], img_size: int,
+                  apply_petri_crop: bool = True, apply_center_crop: bool = True) -> bool:
+        """检查是否已缓存"""
+        cache_key = self._get_cache_key(image_paths, img_size, apply_petri_crop, apply_center_crop)
+        return cache_key in self.index
+
+    def save_batch_cache(self, image_paths: List[str], labels: List[int], img_size: int,
+                        apply_petri_crop: bool = True, apply_center_crop: bool = True,
+                        split: str = "train", is_training: bool = True) -> str:
+        """
+        保存批量缓存
+
+        Args:
+            image_paths: 图片路径列表
+            labels: 标签列表
+            img_size: 图片尺寸
+            apply_petri_crop: 是否应用培养皿裁剪
+            apply_center_crop: 是否应用中心裁剪
+            split: 数据分割类型 (train/test)
+            is_training: 是否为训练集
+
+        Returns:
+            缓存键
+        """
+        cache_key = self._get_cache_key(image_paths, img_size, apply_petri_crop, apply_center_crop)
+
+        if cache_key in self.index:
+            print(f"✅ 缓存已存在: {cache_key}")
+            return cache_key
+
+        print(f"🔄 开始批量缓存: {len(image_paths)} 张图片")
+        start_time = time.time()
+
+        # 分块处理
+        chunks_info = []
+        total_chunks = (len(image_paths) + self.chunk_size - 1) // self.chunk_size
+
+        for chunk_id in range(total_chunks):
+            start_idx = chunk_id * self.chunk_size
+            end_idx = min(start_idx + self.chunk_size, len(image_paths))
+
+            chunk_paths = image_paths[start_idx:end_idx]
+            chunk_labels = labels[start_idx:end_idx]
+
+            # 预处理这一批图片
+            chunk_data = []
+            for path in chunk_paths:
+                try:
+                    # 使用现有的预处理函数
+                    from .stork_preprocessing import preprocess_embryo_image
+                    import numpy as np
+
+                    # 调用现有的预处理函数
+                    processed_img = preprocess_embryo_image(
+                        path, img_size, apply_petri_crop, apply_center_crop
+                    )
+
+                    # 转换格式：HWC -> CHW, 归一化到[0,1]
+                    processed_img = processed_img.astype(np.float32) / 255.0
+                    preprocessed_img = np.transpose(processed_img, (2, 0, 1))  # HWC -> CHW
+
+                    chunk_data.append(torch.from_numpy(preprocessed_img))
+                except Exception as e:
+                    print(f"⚠️ 预处理失败: {path}, 错误: {e}")
+                    # 创建零图像作为占位符
+                    chunk_data.append(torch.zeros(3, img_size, img_size))
+
+            # 保存这一块
+            chunk_filename = self._get_chunk_filename(chunk_id, split)
+            chunk_path = self.cache_dir / chunk_filename
+
+            chunk_dict = {
+                'images': torch.stack(chunk_data),  # [N, 3, H, W]
+                'labels': torch.tensor(chunk_labels),  # [N]
+                'paths': chunk_paths,
+                'chunk_id': chunk_id,
+                'start_idx': start_idx,
+                'end_idx': end_idx
+            }
+
+            torch.save(chunk_dict, chunk_path)
+
+            chunks_info.append({
+                'chunk_id': chunk_id,
+                'filename': chunk_filename,
+                'start_idx': start_idx,
+                'end_idx': end_idx,
+                'size': end_idx - start_idx
+            })
+
+            print(f"   保存块 {chunk_id+1}/{total_chunks}: {chunk_filename} ({end_idx-start_idx} 张)")
+
+        # 更新索引
+        self.index[cache_key] = {
+            'image_paths': image_paths,
+            'labels': labels,
+            'img_size': img_size,
+            'apply_petri_crop': apply_petri_crop,
+            'apply_center_crop': apply_center_crop,
+            'split': split,
+            'chunks': chunks_info,
+            'total_images': len(image_paths),
+            'created_time': time.time()
+        }
+
+        # 更新元数据
+        self.metadata['total_chunks'] += total_chunks
+        self.metadata['total_images'] += len(image_paths)
+        self.metadata['img_size'] = img_size
+
+        # 保存索引和元数据
+        self._save_index()
+        self._save_metadata()
+
+        elapsed_time = time.time() - start_time
+        print(f"✅ 批量缓存完成: {cache_key}")
+        print(f"   文件数量: {total_chunks} 个chunk文件 (vs {len(image_paths)} 个单独文件)")
+        print(f"   缓存时间: {elapsed_time:.2f} 秒")
+        print(f"   平均速度: {len(image_paths)/elapsed_time:.1f} 张/秒")
+
+        return cache_key
+
+    def load_cached_data(self, cache_key: str) -> Optional[Tuple[torch.Tensor, torch.Tensor, List[str]]]:
+        """
+        加载缓存数据
+
+        Args:
+            cache_key: 缓存键
+
+        Returns:
+            (images, labels, paths) 或 None
+        """
+        if cache_key not in self.index:
+            return None
+
+        cache_info = self.index[cache_key]
+        chunks = cache_info['chunks']
+
+        print(f"🔄 加载批量缓存: {cache_key}")
+        start_time = time.time()
+
+        all_images = []
+        all_labels = []
+        all_paths = []
+
+        for chunk_info in chunks:
+            chunk_path = self.cache_dir / chunk_info['filename']
+
+            if not chunk_path.exists():
+                print(f"❌ 缓存块不存在: {chunk_info['filename']}")
+                return None
+
+            try:
+                chunk_data = torch.load(chunk_path, map_location='cpu')
+                all_images.append(chunk_data['images'])
+                all_labels.append(chunk_data['labels'])
+                all_paths.extend(chunk_data['paths'])
+            except Exception as e:
+                print(f"❌ 加载缓存块失败: {chunk_info['filename']}, 错误: {e}")
+                return None
+
+        # 检查是否有数据
+        if not all_images:
+            print("❌ 缓存中没有图片数据")
+            return None
+
+        # 合并所有数据
+        images = torch.cat(all_images, dim=0)
+        labels = torch.cat(all_labels, dim=0)
+
+        elapsed_time = time.time() - start_time
+        print(f"✅ 批量缓存加载完成: {len(images)} 张图片")
+        print(f"   加载时间: {elapsed_time:.2f} 秒")
+        print(f"   加载速度: {len(images)/elapsed_time:.1f} 张/秒")
+
+        return images, labels, all_paths
+
+    def clear_cache(self, cache_key: Optional[str] = None):
+        """清理缓存"""
+        if cache_key is None:
+            # 清理所有缓存
+            for file in self.cache_dir.glob("*.pt"):
+                file.unlink()
+            self.index.clear()
+            self.metadata['total_chunks'] = 0
+            self.metadata['total_images'] = 0
+        else:
+            # 清理特定缓存
+            if cache_key in self.index:
+                cache_info = self.index[cache_key]
+                for chunk_info in cache_info['chunks']:
+                    chunk_path = self.cache_dir / chunk_info['filename']
+                    if chunk_path.exists():
+                        chunk_path.unlink()
+                del self.index[cache_key]
+
+        self._save_index()
+        self._save_metadata()
+        print(f"✅ 缓存清理完成")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        total_size = 0
+        for file in self.cache_dir.glob("*.pt"):
+            total_size += file.stat().st_size
+
+        return {
+            'total_caches': len(self.index),
+            'total_chunks': self.metadata.get('total_chunks', 0),
+            'total_images': self.metadata.get('total_images', 0),
+            'total_size_mb': total_size / (1024 * 1024),
+            'avg_size_per_image_kb': (total_size / max(1, self.metadata.get('total_images', 1))) / 1024,
+            'cache_dir': str(self.cache_dir)
+        }
+
+
+class BatchCachedDataset(torch.utils.data.Dataset):
+    """
+    基于批量缓存的数据集
+    自动使用批量缓存或按需创建
+    """
+
+    def __init__(self, image_paths: List[str], labels: List[int], img_size: int = 224,
+                 is_training: bool = True, apply_petri_crop: bool = True,
+                 apply_center_crop: bool = True, cache_dir: str = "./batch_cache",
+                 chunk_size: int = 1000, split: str = "train"):
+        """
+        初始化批量缓存数据集
+
+        Args:
+            image_paths: 图片路径列表
+            labels: 标签列表
+            img_size: 图片尺寸
+            is_training: 是否为训练集
+            apply_petri_crop: 是否应用培养皿裁剪
+            apply_center_crop: 是否应用中心裁剪
+            cache_dir: 缓存目录
+            chunk_size: 每个缓存文件的图片数量
+            split: 数据分割名称
+        """
+        self.image_paths = image_paths
+        self.labels = labels
+        self.img_size = img_size
+        self.is_training = is_training
+        self.apply_petri_crop = apply_petri_crop
+        self.apply_center_crop = apply_center_crop
+        self.split = split
+
+        # 初始化缓存管理器
+        self.cache_manager = BatchCacheManager(cache_dir, chunk_size)
+
+        # 尝试加载或创建缓存
+        self.cache_key = self.cache_manager._get_cache_key(
+            image_paths, img_size, apply_petri_crop, apply_center_crop
+        )
+
+        # 检查是否有图片
+        if len(image_paths) == 0:
+            print(f"⚠️ {split}数据集为空，创建空数据集")
+            self.images = torch.empty(0, 3, img_size, img_size)
+            self.cached_labels = torch.empty(0, dtype=torch.long)
+            self.cached_paths = []
+            return
+
+        self.cached_data = None
+        if self.cache_manager.is_cached(image_paths, img_size, apply_petri_crop, apply_center_crop):
+            print(f"✅ 发现已有缓存，加载中...")
+            self.cached_data = self.cache_manager.load_cached_data(self.cache_key)
+        else:
+            print(f"🔄 未发现缓存，创建批量缓存...")
+            self.cache_manager.save_batch_cache(
+                image_paths, labels, img_size, apply_petri_crop,
+                apply_center_crop, split, is_training
+            )
+            self.cached_data = self.cache_manager.load_cached_data(self.cache_key)
+
+        if self.cached_data is None:
+            print(f"⚠️ 无法加载缓存数据，创建空数据集")
+            self.images = torch.empty(0, 3, img_size, img_size)
+            self.cached_labels = torch.empty(0, dtype=torch.long)
+            self.cached_paths = []
+        else:
+            self.images, self.cached_labels, self.cached_paths = self.cached_data
+            print(f"✅ 批量缓存数据集初始化完成: {len(self.images)} 张图片")
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        """获取数据项"""
+        image = self.images[idx]  # 已经是预处理过的tensor
+        label = self.cached_labels[idx]
+
+        return image.float(), label.long()
+
+    def get_cache_stats(self):
+        """获取缓存统计信息"""
+        return self.cache_manager.get_cache_stats()
