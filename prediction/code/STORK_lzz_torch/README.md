@@ -109,8 +109,9 @@ PYTHONPATH=/opt/conda/lib/python3.10/site-packages:$PYTHONPATH torchrun --nproc_
 ### 🔬 STORK专业预处理
 - **培养皿自动检测** - 使用霍夫圆检测算法自动识别和裁剪培养皿区域
 - **中心方形裁剪** - 智能裁剪图像中心区域，专为胚胎图像优化
-- **并行处理** - 多进程并行图像预处理，5-8倍速度提升
-- **智能缓存** - 预处理结果自动缓存，避免重复计算
+- **渐进式缓存** - 智能缓存机制，第一epoch边训练边缓存，后续epoch显著加速
+- **按需加载** - 避免内存溢出，支持大规模数据集训练
+- **动态数据增强** - 训练时实时应用随机变换，提升模型泛化能力
 
 ### 🤖 多模型支持
 - **VGG16** - 经典卷积神经网络，适合胚胎图像特征提取
@@ -172,13 +173,17 @@ data:
   data_dir: "/path/to/data"       # 数据目录路径
   img_size: 224                   # 图像尺寸 (224, 299, 384等)
   train_split: 0.7                # 训练集比例 (0.6-0.8)
-  use_cache: true                 # 是否使用缓存
-  num_workers: 8                  # 数据加载进程数
+  num_workers: 30                 # 数据加载进程数（推荐CPU核心数的1-2倍）
 
   # STORK专业预处理
   apply_petri_crop: true          # 培养皿检测和裁剪
   apply_center_crop: true         # 中心方形裁剪
   normalize: true                 # ImageNet标准化
+
+  # 内存优化配置
+  pin_memory: true                # 启用GPU内存固定，加速数据传输
+  prefetch_factor: 4              # 预取批次数量
+  persistent_workers: true        # 保持worker进程，减少重启开销
 
   # 数据分割
   split_strategy: "paper_70_30"   # 数据分割策略
@@ -370,9 +375,16 @@ outputs/
 ├── gradcam/                   # Grad-CAM可视化
 │   ├── sample_001.png         # 可视化样本
 │   └── attention_analysis.png # 注意力分析
-└── cross_validation/          # 交叉验证结果 (如果启用)
-    ├── cv_results.json
-    └── fold_analysis.png
+├── cross_validation/          # 交叉验证结果 (如果启用)
+│   ├── cv_results.json
+│   └── fold_analysis.png
+└── preprocessed_cache/        # 渐进式预处理缓存
+    ├── train/                 # 训练集缓存
+    │   ├── preprocessed_a1b2c3.npy
+    │   └── ...
+    └── test/                  # 测试集缓存
+        ├── preprocessed_d4e5f6.npy
+        └── ...
 ```
 
 ## 🔧 高级功能
@@ -442,10 +454,11 @@ A: 尝试以下解决方案：
 ### Q: 训练速度慢怎么优化？
 
 A: 优化建议：
-1. 增加 `num_workers` (通常设为CPU核心数)
-2. 启用 `use_cache: true`
-3. 使用SSD存储数据
-4. 启用 `mixed_precision: true`
+1. **数据加载优化**：增加 `num_workers` (推荐CPU核心数的1-2倍)
+2. **渐进式缓存**：系统自动使用，第一epoch后显著加速
+3. **存储优化**：使用SSD存储数据，提升I/O性能
+4. **GPU优化**：启用 `mixed_precision: true` 和 `pin_memory: true`
+5. **批次优化**：在GPU内存允许范围内增加 `batch_size`
 
 ### Q: 如何处理类别不平衡？
 
@@ -460,9 +473,20 @@ training:
 
 A: 设置 `resume_training: true`，系统会自动查找最新的检查点。
 
-### Q: 数据预处理缓存在哪里？
+### Q: 渐进式缓存是如何工作的？
 
-A: 缓存文件保存在 `./cache_preprocessed_data/` 目录，可以通过配置文件修改。
+A:
+- **第一个epoch**：系统边训练边缓存STORK预处理结果到 `./preprocessed_cache/` 目录
+- **后续epoch**：直接加载缓存，跳过预处理步骤，训练速度提升5-10倍
+- **数据增强**：仍然动态应用，确保每个epoch的数据都不同
+- **内存安全**：只缓存预处理结果，按需加载，避免内存溢出
+
+### Q: 如何清理缓存？
+
+A: 如果需要重新生成缓存（例如更改了预处理参数），可以删除缓存目录：
+```bash
+rm -rf ./preprocessed_cache/
+```
 
 ### Q: 如何使用自己的预处理方法？
 

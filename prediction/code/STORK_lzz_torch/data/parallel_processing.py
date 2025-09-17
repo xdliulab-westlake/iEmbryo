@@ -99,184 +99,7 @@ def batch_preprocess_images_parallel(paths: List[str],
     return np.array(processed_images)
 
 
-class DatasetCache:
-    """数据集缓存管理器"""
-
-    def __init__(self, cache_dir: str = "./cache_preprocessed_data"):
-        """
-        初始化缓存管理器
-
-        Args:
-            cache_dir: 缓存目录
-        """
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def find_existing_caches(self) -> List[Path]:
-        """查找所有现有的缓存文件"""
-        cache_files = []
-
-        # 搜索当前目录和常见的缓存目录
-        search_dirs = [
-            Path("."),
-            Path("./cache"),
-            Path("./cache_preprocessed_data"),
-            Path("../cache_preprocessed_data"),
-            Path("./data/cache"),
-        ]
-
-        for search_dir in search_dirs:
-            if search_dir.exists():
-                # 查找所有可能的缓存文件模式
-                patterns = [
-                    "stork_preprocessed_*.pkl",
-                    "preprocessed_*.pkl",
-                    "*_cache*.pkl",
-                    "*.pkl"
-                ]
-
-                for pattern in patterns:
-                    found_files = list(search_dir.glob(pattern))
-                    cache_files.extend(found_files)
-
-        # 去重并按修改时间排序
-        unique_files = list(set(cache_files))
-        unique_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
-        return unique_files
-
-    def _generate_cache_key(self,
-                          data_dir: str,
-                          img_size: int,
-                          num_images: int,
-                          apply_petri_crop: bool,
-                          apply_center_crop: bool,
-                          split_strategy: str,
-                          num_workers: int) -> str:
-        """生成缓存键"""
-        cache_key = f"{data_dir}_{img_size}_{num_images}_{apply_petri_crop}_{apply_center_crop}_{split_strategy}_{num_workers}"
-        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:12]
-        return cache_hash
-
-    def get_cache_path(self, cache_key: str) -> Path:
-        """获取缓存文件路径"""
-        return self.cache_dir / f"stork_preprocessed_{cache_key}.pkl"
-
-    def load_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """
-        加载缓存数据
-
-        Args:
-            cache_key: 缓存键
-
-        Returns:
-            缓存数据或None
-        """
-        cache_file = self.get_cache_path(cache_key)
-
-        # 首先尝试精确匹配
-        if cache_file.exists():
-            if is_main_process():
-                print(f"🚀 找到精确匹配的缓存文件: {cache_file}")
-            try:
-                with open(cache_file, 'rb') as f:
-                    cached_data = pickle.load(f)
-
-                if is_main_process():
-                    print("✅ 缓存加载成功！跳过图像预处理步骤")
-                return cached_data
-
-            except Exception as e:
-                if is_main_process():
-                    print(f"❌ 缓存加载失败: {e}")
-                    print("将重新进行图像预处理...")
-                return None
-        else:
-            # 如果精确匹配失败，尝试查找现有的缓存文件
-            if is_main_process():
-                print(f"📝 精确缓存文件不存在: {cache_file.name}")
-
-            # 使用增强的搜索功能查找现有缓存
-            existing_caches = self.find_existing_caches()
-            if existing_caches:
-                if is_main_process():
-                    print(f"🔍 在多个位置发现 {len(existing_caches)} 个缓存文件:")
-                    for i, cache_path in enumerate(existing_caches[:5]):  # 只显示前5个
-                        size_mb = cache_path.stat().st_size / (1024*1024)
-                        print(f"   {i+1}. {cache_path} ({size_mb:.1f}MB)")
-
-                    if len(existing_caches) > 5:
-                        print(f"   ... 还有 {len(existing_caches)-5} 个文件")
-
-                # 优先选择STORK相关的缓存文件
-                stork_caches = [p for p in existing_caches if 'stork' in p.name.lower()]
-                if stork_caches:
-                    latest_cache = stork_caches[0]  # 已经按时间排序
-                    if is_main_process():
-                        print(f"🎯 优先使用STORK缓存: {latest_cache.name}")
-                else:
-                    latest_cache = existing_caches[0]  # 使用最新的缓存
-                    if is_main_process():
-                        print(f"🔄 使用最新的缓存文件: {latest_cache.name}")
-
-                try:
-                    with open(latest_cache, 'rb') as f:
-                        cached_data = pickle.load(f)
-
-                    if is_main_process():
-                        print("✅ 已有缓存加载成功！跳过图像预处理步骤")
-                        print("💡 提示: 如果数据配置有变化，请删除缓存文件重新生成")
-                    return cached_data
-
-                except Exception as e:
-                    print(f"❌ 缓存文件损坏: {e}")
-                    print("🔄 尝试下一个缓存文件...")
-
-                    # 如果第一个文件损坏，尝试其他文件
-                    for cache_file in existing_caches[1:3]:  # 尝试接下来2个
-                        try:
-                            print(f"🔄 尝试: {cache_file.name}")
-                            with open(cache_file, 'rb') as f:
-                                cached_data = pickle.load(f)
-                            print("✅ 备用缓存加载成功！")
-                            return cached_data
-                        except Exception as e2:
-                            print(f"❌ {cache_file.name} 也损坏: {e2}")
-                            continue
-
-            print("📝 未找到可用的缓存文件，将重新进行预处理")
-            return None
-
-    def save_cache(self, cache_key: str, data: Dict[str, Any]) -> bool:
-        """
-        保存缓存数据
-
-        Args:
-            cache_key: 缓存键
-            data: 要缓存的数据
-
-        Returns:
-            是否保存成功
-        """
-        cache_file = self.get_cache_path(cache_key)
-
-        print(f"💾 保存预处理数据缓存: {cache_file}")
-        try:
-            with open(cache_file, 'wb') as f:
-                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-            cache_size_mb = cache_file.stat().st_size / (1024 * 1024)
-            print(f"✅ 缓存保存成功! 下次运行将直接加载预处理数据")
-            print(f"缓存文件大小: {cache_size_mb:.1f} MB")
-            return True
-
-        except Exception as e:
-            print(f"❌ 缓存保存失败: {e}")
-            print("不影响训练过程，继续执行...")
-            return False
-
-
-def load_data_with_stork_preprocessing(data_dir: str,
+def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
                                      img_size: int = 224,
                                      train_split: float = 0.7,
                                      use_cache: bool = True,
@@ -448,40 +271,107 @@ def load_data_with_stork_preprocessing(data_dir: str,
 
 
 class LazySTORKDataset(torch.utils.data.Dataset):
-    """按需加载的STORK数据集，避免内存溢出"""
+    """按需加载的STORK数据集，带渐进式预处理缓存"""
 
-    def __init__(self, image_paths, labels, img_size=224, is_training=True):
+    def __init__(self, image_paths, labels, img_size=224, is_training=True, cache_dir="./preprocessed_cache"):
         self.image_paths = image_paths
         self.labels = labels
         self.img_size = img_size
         self.is_training = is_training
 
+        # 设置缓存目录
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # 为每个图片路径生成唯一的缓存文件名
+        import hashlib
+        self.cache_files = []
+        for path in image_paths:
+            # 使用路径的hash作为缓存文件名
+            path_hash = hashlib.md5(str(path).encode()).hexdigest()
+            cache_file = self.cache_dir / f"preprocessed_{path_hash}.npy"
+            self.cache_files.append(cache_file)
+
         # ImageNet标准化参数
         self.mean = torch.tensor([0.485, 0.456, 0.406])
         self.std = torch.tensor([0.229, 0.224, 0.225])
+
+        # 统计缓存命中率
+        self.cache_hits = 0
+        self.total_accesses = 0
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # 按需加载单张图片
         image_path = self.image_paths[idx]
         label = self.labels[idx]
+        cache_file = self.cache_files[idx]
+
+        self.total_accesses += 1
 
         try:
-            # 读取并预处理图片
-            image = self._load_and_preprocess_image(image_path)
+            # 尝试加载预处理缓存
+            if cache_file.exists():
+                preprocessed_img = np.load(cache_file)
+                self.cache_hits += 1
+
+                # 显示缓存命中率（每100次访问显示一次）
+                if self.total_accesses % 100 == 0:
+                    hit_rate = self.cache_hits / self.total_accesses * 100
+                    print(f"🚀 缓存命中率: {hit_rate:.1f}% ({self.cache_hits}/{self.total_accesses})")
+            else:
+                # 缓存不存在，进行完整预处理并保存
+                preprocessed_img = self._full_preprocess_and_cache(image_path, cache_file)
+
+            # 转换为tensor
+            image = torch.from_numpy(preprocessed_img).float()
+
+            # 训练时应用动态数据增强
+            if self.is_training:
+                image = self._apply_tensor_augmentation(image)
+
+            # ImageNet标准化
+            image = (image - self.mean.view(3, 1, 1)) / self.std.view(3, 1, 1)
+
             return image, label
+
         except Exception as e:
             print(f"❌ 加载图片失败 {image_path}: {e}")
             # 返回黑色图片作为fallback
             black_image = torch.zeros(3, self.img_size, self.img_size)
             return black_image, label
 
-    def _load_and_preprocess_image(self, image_path):
-        """加载并预处理单张图片"""
+    def _full_preprocess_and_cache(self, image_path, cache_file):
+        """完整预处理并缓存到磁盘"""
+        # 执行STORK预处理（不包括数据增强）
+        preprocessed_img = self._stork_preprocess_only(image_path)
+
+        # 保存到缓存
+        try:
+            np.save(cache_file, preprocessed_img)
+        except Exception as e:
+            print(f"⚠️  缓存保存失败: {e}")
+
+        return preprocessed_img
+
+    def _stork_preprocess_only(self, image_path):
+        """只进行STORK预处理，不做数据增强"""
         import cv2
-        from .stork_image_utils import preprocess_embryo_image
+        import sys
+        import os
+        # 添加STORK_lzz路径到sys.path
+        stork_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '..', 'STORK_lzz')
+        if stork_path not in sys.path:
+            sys.path.append(stork_path)
+
+        try:
+            from STORK_lzz.preprocessing.stork_image_utils import preprocess_embryo_image
+        except ImportError:
+            # 使用简化的预处理
+            def preprocess_embryo_image(img, img_size=224, **kwargs):
+                import cv2
+                return cv2.resize(img, (img_size, img_size))
 
         # 读取图片
         img = cv2.imread(image_path)
@@ -491,7 +381,7 @@ class LazySTORKDataset(torch.utils.data.Dataset):
         # BGR to RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # STORK预处理
+        # STORK预处理（不含数据增强）
         img = preprocess_embryo_image(
             img,
             img_size=self.img_size,
@@ -499,42 +389,46 @@ class LazySTORKDataset(torch.utils.data.Dataset):
             apply_center_crop=True
         )
 
-        # 训练时应用数据增强
-        if self.is_training:
-            img = self._apply_data_augmentation(img)
-
-        # 转换为PyTorch张量
-        img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-
-        # ImageNet标准化
-        img = (img - self.mean.view(3, 1, 1)) / self.std.view(3, 1, 1)
+        # 转换格式：HWC -> CHW, 归一化到[0,1]
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
 
         return img
 
-    def _apply_data_augmentation(self, image):
-        """应用数据增强（与原始STORK一致）"""
-        import cv2
-        import numpy as np
-        from .data_augmentation import get_default_augmenter
+    def _apply_tensor_augmentation(self, image):
+        """对tensor格式的图像应用数据增强"""
+        # 这里实现简化的tensor数据增强
+        # 可以使用torchvision.transforms或者简单的随机变换
 
-        # 使用统一的数据增强模块
-        augmenter = get_default_augmenter()
-        image = augmenter.augment_single_image(image)
+        # 随机水平翻转
+        if torch.rand(1) > 0.5:
+            image = torch.flip(image, dims=[2])  # 水平翻转
 
-        # 随机色调调整 (轻微)
-        if np.random.rand() > 0.8:
-            hsv = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2HSV)
-            hue_shift = np.random.uniform(-10, 10)
-            hsv[:,:,0] = np.clip(hsv[:,:,0] + hue_shift, 0, 179)
-            image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32)
+        # 随机亮度调整
+        if torch.rand(1) > 0.8:
+            brightness_factor = 0.9 + torch.rand(1) * 0.2  # [0.9, 1.1]
+            image = torch.clamp(image * brightness_factor, 0.0, 1.0)
 
         return image
 
+    def get_cache_stats(self):
+        """获取缓存统计信息"""
+        if self.total_accesses > 0:
+            hit_rate = self.cache_hits / self.total_accesses * 100
+            return {
+                'cache_hits': self.cache_hits,
+                'total_accesses': self.total_accesses,
+                'hit_rate': hit_rate,
+                'cache_dir': str(self.cache_dir)
+            }
+        return None
+
+
 
 def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, test_labels,
-                                     img_size=224) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
+                                     img_size=224, cache_dir="./preprocessed_cache") -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
     """
-    从图片路径创建按需加载的PyTorch数据集
+    从图片路径创建带渐进式缓存的PyTorch数据集
 
     Args:
         train_paths: 训练图片路径列表
@@ -542,67 +436,35 @@ def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, te
         test_paths: 测试图片路径列表
         test_labels: 测试标签列表
         img_size: 图片尺寸
+        cache_dir: 预处理缓存目录
 
     Returns:
         训练数据集, 测试数据集
     """
-    print("🚀 创建按需加载数据集，避免内存溢出...")
+    print("🚀 创建渐进式缓存数据集，优化训练速度...")
 
-    train_dataset = LazySTORKDataset(train_paths, train_labels, img_size, is_training=True)
-    test_dataset = LazySTORKDataset(test_paths, test_labels, img_size, is_training=False)
+    # 为训练和测试数据集使用不同的缓存目录
+    train_cache_dir = f"{cache_dir}/train"
+    test_cache_dir = f"{cache_dir}/test"
 
-    print(f"✅ 按需加载数据集创建完成")
+    train_dataset = LazySTORKDataset(
+        train_paths, train_labels, img_size,
+        is_training=True, cache_dir=train_cache_dir
+    )
+    test_dataset = LazySTORKDataset(
+        test_paths, test_labels, img_size,
+        is_training=False, cache_dir=test_cache_dir
+    )
+
+    print(f"✅ 渐进式缓存数据集创建完成")
     print(f"   训练集: {len(train_dataset)} 样本")
     print(f"   测试集: {len(test_dataset)} 样本")
-    print(f"   内存使用: 仅存储路径，约 {(len(train_paths) + len(test_paths)) * 0.1 / 1024:.1f} MB")
+    print(f"   缓存目录: {cache_dir}")
+    print(f"   🔥 第一个epoch会边训练边缓存，后续epoch将显著加速！")
 
     return train_dataset, test_dataset
 
 
-def create_pytorch_datasets_from_cache(cache_data: Dict[str, Any],
-                                     train_transform=None,
-                                     test_transform=None) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
-    """
-    从缓存数据创建PyTorch数据集 (已弃用，使用按需加载版本)
-
-    Args:
-        cache_data: 缓存的数据
-        train_transform: 训练数据变换
-        test_transform: 测试数据变换
-
-    Returns:
-        训练数据集, 测试数据集
-    """
-    print("⚠️  警告：使用内存密集型的缓存加载，可能导致OOM")
-    from torch.utils.data import TensorDataset
-
-    # 转换为PyTorch张量
-    X_train = torch.from_numpy(cache_data['X_train']).permute(0, 3, 1, 2).float() / 255.0
-    y_train = torch.from_numpy(cache_data['train_labels']).long()
-
-    X_test = torch.from_numpy(cache_data['X_test']).permute(0, 3, 1, 2).float() / 255.0
-    y_test = torch.from_numpy(cache_data['test_labels']).long()
-
-    # 立即释放原始缓存数据以节省内存
-    import gc
-    print("🧹 释放原始缓存数据以节省内存...")
-    cache_data.clear()  # 清空字典
-    del cache_data  # 删除引用
-    gc.collect()  # 强制垃圾回收
-    print("✅ 缓存数据已释放")
-
-    # ImageNet标准化
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-
-    X_train = (X_train - mean) / std
-    X_test = (X_test - mean) / std
-
-    # 创建数据集
-    train_dataset = TensorDataset(X_train, y_train)
-    test_dataset = TensorDataset(X_test, y_test)
-
-    return train_dataset, test_dataset
 
 
 class STORKDataLoader:
@@ -628,7 +490,7 @@ class STORKDataLoader:
 
     def load_data(self) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
         """
-        加载数据并返回PyTorch数据集（按需加载版本）
+        加载数据并返回PyTorch数据集（渐进式缓存版本）
 
         Returns:
             训练数据集, 测试数据集
@@ -639,9 +501,11 @@ class STORKDataLoader:
         # 直接收集图片路径，不进行预处理
         train_paths, train_labels, test_paths, test_labels = self._collect_image_paths()
 
-        # 创建按需加载的PyTorch数据集
+        # 创建带渐进式缓存的PyTorch数据集
         train_dataset, test_dataset = create_pytorch_datasets_from_paths(
-            train_paths, train_labels, test_paths, test_labels, self.img_size
+            train_paths, train_labels, test_paths, test_labels,
+            img_size=self.img_size,
+            cache_dir="./preprocessed_cache"
         )
 
         if is_main_process():

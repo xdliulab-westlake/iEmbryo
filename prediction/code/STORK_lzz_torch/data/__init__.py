@@ -10,8 +10,7 @@ from .stork_preprocessing import (
     preprocess_image_stork_universal
 )
 from .parallel_processing import (
-    STORKDataLoader, create_stork_data_loader,
-    load_data_with_stork_preprocessing, DatasetCache
+    STORKDataLoader, create_stork_data_loader
 )
 
 __all__ = [
@@ -20,6 +19,5 @@ __all__ = [
     'STORKPreprocessor', 'create_stork_preprocessor',
     'preprocess_embryo_image', 'crop_petri_dish', 'crop_center_square',
     'preprocess_image_stork_universal',
-    'create_stork_data_loader',
-    'load_data_with_stork_preprocessing', 'DatasetCache'
+    'create_stork_data_loader'
 ]
