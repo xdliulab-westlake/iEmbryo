@@ -93,6 +93,9 @@ python main.py --config config/my_config.yaml --debug
 
 # 仅验证配置（不实际训练）
 python main.py --config config/my_config.yaml --dry-run
+
+# 常用多GPU分布式训练命令（推荐用于生产环境）
+PYTHONPATH=/opt/conda/lib/python3.10/site-packages:$PYTHONPATH torchrun --nproc_per_node=2 main.py --config config/my_config.yaml
 ```
 
 **🚀 多GPU自动配置 (v4.0.0新功能)：**
