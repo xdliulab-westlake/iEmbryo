@@ -264,13 +264,6 @@ def build_pretrained_model(model_name='vgg16', input_shape=(224, 224, 3), num_cl
     
     return model
 
-# check gpu availability
-def check_gpu_availability():
-    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
-    
-    # Print detailed information about each device
-    for device in tf.config.list_physical_devices():
-        print(device)
 
 # Training the model with augmentation
 def train_model_with_augmentation(train_images, train_labels, train_ages, train_qualities,
@@ -278,25 +271,10 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
                                 num_epochs=3, global_batch_size=None, img_size=224,
                                 resume_training=True, fine_tune=False, copy_images=False,
                                 model_name='vgg16', use_validation=True):
-    # Set strategy for distributed training with enhanced error handling
-    num_gpus = len(tf.config.list_physical_devices('GPU'))
-
-    if num_gpus > 1:
-        try:
-            strategy = tf.distribute.MirroredStrategy()
-            print(f"🎯 使用多GPU分布式策略: {strategy.num_replicas_in_sync} 个GPU")
-            print(f"   每个GPU批次大小: {global_batch_size // strategy.num_replicas_in_sync}")
-        except Exception as strategy_error:
-            print(f"⚠️ 多GPU策略初始化失败，使用单GPU模式: {strategy_error}")
-            strategy = tf.distribute.get_strategy()
-    else:
-        print(f"🔧 单GPU模式")
-        strategy = tf.distribute.get_strategy()
+    # GPU策略已由优化模块处理
 
     start_time = time.time()
     
-    # Check GPU availability
-    check_gpu_availability()
     
     # 🎯 支持论文级70/30分割：可选验证集模式
     X_train, y_train, age_train, quality_train = train_images, train_labels, train_ages, train_qualities
@@ -393,20 +371,20 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
     # 🚀 优化的数据流水线 - CPU预处理 + GPU计算分离
     print("🚀 构建优化的数据流水线...")
     
-    # 在CPU上构建数据集，避免大tensor在GPU内存中
+    # 🚀 简洁数据流水线 - CPU预处理 + GPU按需传输
     with tf.device('/CPU:0'):
-        # 构建训练数据集 - 使用CPU内存
+        # 构建训练数据集 - 保持在CPU
         train_dataset = tf.data.Dataset.from_tensor_slices((X_train_cpu, y_train_cpu))
-        
-        # 数据流水线优化
+
+        # 数据流水线优化 - 专注内存效率
         train_dataset = (train_dataset
-                        .shuffle(buffer_size=min(1024, len(X_train_cpu)))  # 适应性缓冲区
+                        .shuffle(buffer_size=min(1024, len(X_train_cpu)))
                         .batch(global_batch_size)
-                        .map(lambda x, y: (tf.cast(x, tf.float32), tf.cast(y, tf.float32)), 
-                             num_parallel_calls=tf.data.AUTOTUNE)  # 动态类型转换
+                        .map(lambda x, y: (tf.cast(x, tf.float32), tf.cast(y, tf.float32)),
+                             num_parallel_calls=tf.data.AUTOTUNE)
                         .repeat()
                         .prefetch(buffer_size=tf.data.AUTOTUNE))
-        
+
         # 验证数据集（可选）
         if X_val_cpu is not None:
             val_dataset = tf.data.Dataset.from_tensor_slices((X_val_cpu, y_val_cpu))
@@ -429,44 +407,45 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
     print(f"      数据类型: CPU(float16) -> GPU(float32)自动转换")
     print(f"      内存策略: CPU预处理 + GPU计算分离")
 
+    # 🚀 使用优化策略创建模型
     with strategy.scope():
         model = build_pretrained_model(model_name, (img_size, img_size, 3), num_classes=1, fine_tune=fine_tune)
 
-        # 🎯 获取类别权重用于训练
-        class_weight_for_training = {
-            0: 0.669,  # Class 0 (多数类)
-            1: 1.978   # Class 1 (少数类)
-        }
+    # 🎯 获取类别权重用于训练
+    class_weight_for_training = {
+        0: 0.669,  # Class 0 (多数类)
+        1: 1.978   # Class 1 (少数类)
+    }
 
-        if resume_training and os.path.exists(model_path):
-            print("Loading existing model from", model_path)
-            model = tf.keras.models.load_model(model_path)
+    if resume_training and os.path.exists(model_path):
+        print("Loading existing model from", model_path)
+        model = tf.keras.models.load_model(model_path)
 
-            # if fine_tune:
-            #     print("Fine-tuning enabled: Unfreezing layers starting from", fine_tune_at)
-            #     for layer in model.layers[:fine_tune_at]:
-            #         layer.trainable = False
-            #     for layer in model.layers[fine_tune_at:]:
-            #         layer.trainable = True
-            # else:
-            #     print("Fine-tuning disabled: Keeping all previously frozen layers.")
+        # if fine_tune:
+        #     print("Fine-tuning enabled: Unfreezing layers starting from", fine_tune_at)
+        #     for layer in model.layers[:fine_tune_at]:
+        #         layer.trainable = False
+        #     for layer in model.layers[fine_tune_at:]:
+        #         layer.trainable = True
+        # else:
+        #     print("Fine-tuning disabled: Keeping all previously frozen layers.")
 
-            if os.path.exists('training.log'):
-                with open('training.log', 'r') as f:
-                    lines = f.readlines()
-                    if lines:
-                        last_line = lines[-1]
-                        initial_epoch = int(last_line.split(',')[0]) + 1
-            else:
-                print("Training log not found. Setting initial epoch to 0.")
-                initial_epoch = 0
+        if os.path.exists('training.log'):
+            with open('training.log', 'r') as f:
+                lines = f.readlines()
+                if lines:
+                    last_line = lines[-1]
+                    initial_epoch = int(last_line.split(',')[0]) + 1
         else:
-            print("Building new model from scratch.")
+            print("Training log not found. Setting initial epoch to 0.")
+            initial_epoch = 0
+    else:
+        print("Building new model from scratch.")
 
         # 🎯 优化的训练过程 - 内存管理
         try:
             print(f"🎯 开始优化训练过程:")
-            print(f"   批处理配置: 总大小{global_batch_size} ({global_batch_size // strategy.num_replicas_in_sync} per GPU)")
+            print(f"   批处理配置: 总大小{global_batch_size}")
             if y_val_cpu is not None:
                 print(f"   训练样本: {len(y_train_cpu)} | 验证样本: {len(y_val_cpu)}")
             else:
@@ -490,9 +469,7 @@ def train_model_with_augmentation(train_images, train_labels, train_ages, train_
             class MemoryMonitor(tf.keras.callbacks.Callback):
                 def on_epoch_end(self, epoch, logs=None):
                     if epoch % 10 == 0:  # 每10个epoch监控一次
-                        print(f"   📊 Epoch {epoch}: GPU内存使用情况")
-                        for gpu in tf.config.list_physical_devices('GPU'):
-                            print(f"      {gpu.name}: 训练中...")
+                        print(f"   📊 Epoch {epoch}: 训练中...")
 
                         # 手动垃圾回收
                         import gc
@@ -1538,8 +1515,8 @@ def parse_arguments():
     parser.add_argument('--epochs', '-e', type=int, default=2000,
                        help='训练轮数 (默认: 2000)')
     
-    parser.add_argument('--batch-size', '-b', type=int, default=16,
-                       help='每个GPU的批处理大小 (默认: 16, 减小以避免GPU OOM)')
+    parser.add_argument('--batch-size', '-b', type=int, default=8,
+                       help='每个GPU的批处理大小 (默认: 8, 降低以避免GPU OOM)')
     
     parser.add_argument('--img-size', type=int, default=224,
                        help='输入图像尺寸 (默认: 224)')
@@ -1678,7 +1655,7 @@ if __name__ == "__main__":
         print(f"💾 缓存模式: {'启用' if args.cache else '禁用'}")
         print(f"📁 数据目录: {args.data_dir}")
         print(f"🔄 训练轮数: {args.epochs}")
-        print(f"📦 批处理大小: {args.batch_size} (每GPU)")
+        print(f"📦 批处理大小: {args.batch_size}")
         print(f"🖼️  图像尺寸: {args.img_size}x{args.img_size}")
         print(f"⚙️  微调模式: {'启用' if args.fine_tune else '禁用'}")
         print(f"🔄 恢复训练: {'是' if args.resume else '否'}")
@@ -1687,33 +1664,11 @@ if __name__ == "__main__":
         print("⚡ 优化特性: 并行预处理 + NumPy增强 + 详细统计")
         print("=" * 70)
 
-    # Get all available GPUs
-    gpus = tf.config.list_physical_devices('GPU')
-
-    if gpus:
-        try:
-            # Set memory growth to avoid TensorFlow allocating all GPU memory at once
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
-                print(f"GPU {gpu} is set to memory growth.")
-        except RuntimeError as e:
-            print(f"Error in setting memory growth: {e}")
-
-    # Define the strategy for multi-GPU training
-    num_gpus = len(tf.config.list_physical_devices('GPU'))
-    print(f"🔍 检测到 {num_gpus} 个GPU设备")
-
-    # 优化多GPU批次大小策略 - 避免过大导致OOM
-    if num_gpus > 1:
-        # 多GPU时：每个GPU的批次大小保持较小，总批次才是目标大小
-        batch_size_per_replica = args.batch_size  # 每个GPU的批次大小
-        global_batch_size = batch_size_per_replica * num_gpus
-        print(f"🚀 多GPU模式: {batch_size_per_replica} per GPU × {num_gpus} GPUs = {global_batch_size} total")
-    else:
-        # 单GPU时：直接使用设定的批次大小
-        batch_size_per_replica = args.batch_size
-        global_batch_size = batch_size_per_replica
-        print(f"🔧 单GPU模式: {global_batch_size} batch size")
+    # 🚀 一键初始化所有优化设置
+    from optimization.deepspeed_config import initialize_optimization
+    strategy, deepspeed_mgr, deepspeed_config, global_batch_size = initialize_optimization(
+        args.batch_size, learning_rate=1e-4
+    )
 
     # 🎯 使用论文级70/30数据分割策略
     preprocessing_start = time.time()
@@ -1779,16 +1734,7 @@ if __name__ == "__main__":
         print(f"   测试集: {len(X_test)} 样本 (30%总数据，完全隔离)")
         print(f"   🔑 策略: 最大化训练数据使用，符合论文标准")
 
-        # 🎯 设置分布式策略
-        if num_gpus > 1:
-            try:
-                strategy = tf.distribute.MirroredStrategy()
-                print(f"🎯 主训练使用多GPU策略: {strategy.num_replicas_in_sync} 个GPU")
-            except Exception as e:
-                print(f"⚠️ 多GPU策略初始化失败，使用单GPU: {e}")
-                strategy = tf.distribute.get_strategy()
-        else:
-            strategy = tf.distribute.get_strategy()
+        # 🎯 使用优化模块提供的策略（已初始化）
 
         # 🎯 使用无验证集模式训练（包装TF分布式策略错误处理）
         try:
