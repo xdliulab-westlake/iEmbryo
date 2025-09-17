@@ -18,6 +18,11 @@ from sklearn.model_selection import train_test_split
 from .stork_preprocessing import preprocess_embryo_image
 
 
+def is_main_process() -> bool:
+    """检查当前进程是否为主进程"""
+    return not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+
+
 def optimized_preprocess_single_image(args: Tuple) -> np.ndarray:
     """
     优化的单图像预处理函数（专为多进程设计）
@@ -80,7 +85,8 @@ def batch_preprocess_images_parallel(paths: List[str],
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 8)  # 限制进程数避免系统过载
 
-    print(f"🚀 使用 {num_workers} 个进程并行处理 {len(paths)} 张图像...")
+    if is_main_process():
+        print(f"🚀 使用 {num_workers} 个进程并行处理 {len(paths)} 张图像...")
 
     # 准备多进程参数
     args_list = [(path, img_size, is_training, apply_petri_crop, apply_center_crop)
@@ -170,48 +176,56 @@ class DatasetCache:
 
         # 首先尝试精确匹配
         if cache_file.exists():
-            print(f"🚀 找到精确匹配的缓存文件: {cache_file}")
+            if is_main_process():
+                print(f"🚀 找到精确匹配的缓存文件: {cache_file}")
             try:
                 with open(cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
 
-                print("✅ 缓存加载成功！跳过图像预处理步骤")
+                if is_main_process():
+                    print("✅ 缓存加载成功！跳过图像预处理步骤")
                 return cached_data
 
             except Exception as e:
-                print(f"❌ 缓存加载失败: {e}")
-                print("将重新进行图像预处理...")
+                if is_main_process():
+                    print(f"❌ 缓存加载失败: {e}")
+                    print("将重新进行图像预处理...")
                 return None
         else:
             # 如果精确匹配失败，尝试查找现有的缓存文件
-            print(f"📝 精确缓存文件不存在: {cache_file.name}")
+            if is_main_process():
+                print(f"📝 精确缓存文件不存在: {cache_file.name}")
 
             # 使用增强的搜索功能查找现有缓存
             existing_caches = self.find_existing_caches()
             if existing_caches:
-                print(f"🔍 在多个位置发现 {len(existing_caches)} 个缓存文件:")
-                for i, cache_path in enumerate(existing_caches[:5]):  # 只显示前5个
-                    size_mb = cache_path.stat().st_size / (1024*1024)
-                    print(f"   {i+1}. {cache_path} ({size_mb:.1f}MB)")
+                if is_main_process():
+                    print(f"🔍 在多个位置发现 {len(existing_caches)} 个缓存文件:")
+                    for i, cache_path in enumerate(existing_caches[:5]):  # 只显示前5个
+                        size_mb = cache_path.stat().st_size / (1024*1024)
+                        print(f"   {i+1}. {cache_path} ({size_mb:.1f}MB)")
 
-                if len(existing_caches) > 5:
-                    print(f"   ... 还有 {len(existing_caches)-5} 个文件")
+                    if len(existing_caches) > 5:
+                        print(f"   ... 还有 {len(existing_caches)-5} 个文件")
 
                 # 优先选择STORK相关的缓存文件
                 stork_caches = [p for p in existing_caches if 'stork' in p.name.lower()]
                 if stork_caches:
                     latest_cache = stork_caches[0]  # 已经按时间排序
-                    print(f"🎯 优先使用STORK缓存: {latest_cache.name}")
+                    if is_main_process():
+                        print(f"🎯 优先使用STORK缓存: {latest_cache.name}")
                 else:
                     latest_cache = existing_caches[0]  # 使用最新的缓存
-                    print(f"🔄 使用最新的缓存文件: {latest_cache.name}")
+                    if is_main_process():
+                        print(f"🔄 使用最新的缓存文件: {latest_cache.name}")
 
                 try:
                     with open(latest_cache, 'rb') as f:
                         cached_data = pickle.load(f)
 
-                    print("✅ 已有缓存加载成功！跳过图像预处理步骤")
-                    print("💡 提示: 如果数据配置有变化，请删除缓存文件重新生成")
+                    if is_main_process():
+                        print("✅ 已有缓存加载成功！跳过图像预处理步骤")
+                        print("💡 提示: 如果数据配置有变化，请删除缓存文件重新生成")
                     return cached_data
 
                 except Exception as e:
@@ -298,11 +312,13 @@ def load_data_with_stork_preprocessing(data_dir: str,
     labels = []
     qualities = []
 
-    print("=== 使用优化的STORK胚胎图像预处理加载数据 ===")
-    print(f"🚀 并行处理模式：{'启用' if num_workers != 1 else '禁用'}")
+    if is_main_process():
+        print("=== 使用优化的STORK胚胎图像预处理加载数据 ===")
+        print(f"🚀 并行处理模式：{'启用' if num_workers != 1 else '禁用'}")
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 8)
-        print(f"🔧 自动检测到 {num_workers} 个工作进程")
+        if is_main_process():
+            print(f"🔧 自动检测到 {num_workers} 个工作进程")
 
     # 收集所有图像路径和标签
     data_path = Path(data_dir)
@@ -329,13 +345,15 @@ def load_data_with_stork_preprocessing(data_dir: str,
     labels = np.array(labels)
     qualities = np.array(qualities)
 
-    print(f"找到 {len(image_paths)} 张图像")
-    print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
+    if is_main_process():
+        print(f"找到 {len(image_paths)} 张图像")
+        print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
 
     # 数据分割策略
     test_size = 1.0 - train_split
     split_strategy = f"{int(train_split*100)}_{int(test_size*100)}_split"
-    print(f"🎯 采用 {int(train_split*100)}/{int(test_size*100)} 数据分割策略...")
+    if is_main_process():
+        print(f"🎯 采用 {int(train_split*100)}/{int(test_size*100)} 数据分割策略...")
 
     # 直接进行分割，避免数据泄漏
     train_paths, test_paths, train_labels, test_labels, train_quals, test_quals = train_test_split(
@@ -348,10 +366,11 @@ def load_data_with_stork_preprocessing(data_dir: str,
     train_samples = len(train_paths)
     test_samples = len(test_paths)
 
-    print(f"📊 数据分割完成:")
-    print(f"  总样本数: {total_samples}")
-    print(f"  训练集: {train_samples} ({train_samples/total_samples*100:.1f}%)")
-    print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%)")
+    if is_main_process():
+        print(f"📊 数据分割完成:")
+        print(f"  总样本数: {total_samples}")
+        print(f"  训练集: {train_samples} ({train_samples/total_samples*100:.1f}%)")
+        print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%)")
 
     # 缓存机制
     cache_manager = DatasetCache() if use_cache else None
@@ -365,13 +384,15 @@ def load_data_with_stork_preprocessing(data_dir: str,
         cached_data = cache_manager.load_cache(cache_key)
 
         if cached_data:
-            print(f"训练集形状: {cached_data['X_train'].shape}")
-            print(f"测试集形状: {cached_data['X_test'].shape}")
+            if is_main_process():
+                print(f"训练集形状: {cached_data['X_train'].shape}")
+                print(f"测试集形状: {cached_data['X_test'].shape}")
             return (cached_data['X_train'], cached_data['train_labels'], cached_data['train_quals'],
                     cached_data['X_test'], cached_data['test_labels'], cached_data['test_quals'])
 
     # 使用优化的并行处理
-    print(f"=== 🎯 并行预处理训练集（{int(train_split*100)}%）===")
+    if is_main_process():
+        print(f"=== 🎯 并行预处理训练集（{int(train_split*100)}%）===")
     start_time = time.time()
     X_train = batch_preprocess_images_parallel(
         train_paths, img_size, is_training=True,
@@ -380,9 +401,11 @@ def load_data_with_stork_preprocessing(data_dir: str,
         num_workers=num_workers
     )
     train_time = time.time() - start_time
-    print(f"✅ 训练集预处理完成，耗时: {train_time:.2f} 秒")
+    if is_main_process():
+        print(f"✅ 训练集预处理完成，耗时: {train_time:.2f} 秒")
 
-    print(f"=== 🔒 并行预处理测试集（{int(test_size*100)}%）===")
+    if is_main_process():
+        print(f"=== 🔒 并行预处理测试集（{int(test_size*100)}%）===")
     start_time = time.time()
     X_test = batch_preprocess_images_parallel(
         test_paths, img_size, is_training=False,
@@ -391,14 +414,16 @@ def load_data_with_stork_preprocessing(data_dir: str,
         num_workers=num_workers
     )
     test_time = time.time() - start_time
-    print(f"✅ 测试集预处理完成，耗时: {test_time:.2f} 秒")
+    if is_main_process():
+        print(f"✅ 测试集预处理完成，耗时: {test_time:.2f} 秒")
 
     total_time = train_time + test_time
-    print(f"=== 📊 数据预处理完成 ===")
-    print(f"训练集形状: {X_train.shape}")
-    print(f"测试集形状: {X_test.shape}")
-    print(f"⏱️  总预处理时间: {total_time:.2f} 秒 (并行优化版)")
-    print(f"📊 平均每张图像: {total_time/len(image_paths)*1000:.2f} 毫秒")
+    if is_main_process():
+        print(f"=== 📊 数据预处理完成 ===")
+        print(f"训练集形状: {X_train.shape}")
+        print(f"测试集形状: {X_test.shape}")
+        print(f"⏱️  总预处理时间: {total_time:.2f} 秒 (并行优化版)")
+        print(f"📊 平均每张图像: {total_time/len(image_paths)*1000:.2f} 毫秒")
 
     # 保存缓存
     if use_cache:
@@ -487,7 +512,8 @@ class STORKDataLoader:
         Returns:
             训练数据集, 测试数据集
         """
-        print("🔄 开始加载STORK预处理数据...")
+        if is_main_process():
+            print("🔄 开始加载STORK预处理数据...")
 
         # 加载预处理数据
         X_train, train_labels, train_quals, X_test, test_labels, test_quals = \
@@ -509,9 +535,10 @@ class STORKDataLoader:
 
         train_dataset, test_dataset = create_pytorch_datasets_from_cache(cache_data)
 
-        print(f"✅ 数据加载完成")
-        print(f"   训练集: {len(train_dataset)} 样本")
-        print(f"   测试集: {len(test_dataset)} 样本")
+        if is_main_process():
+            print(f"✅ 数据加载完成")
+            print(f"   训练集: {len(train_dataset)} 样本")
+            print(f"   测试集: {len(test_dataset)} 样本")
 
         return train_dataset, test_dataset
 

@@ -32,15 +32,19 @@ class STORKApplication:
 
     def __init__(self, args):
         """初始化应用"""
-        print("🧬 STORK PyTorch 胚胎分类系统")
-        print("=" * 50)
+        # 检查是否为主进程
+        self.is_main_process = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+
+        if self.is_main_process:
+            print("🧬 STORK PyTorch 胚胎分类系统")
+            print("=" * 50)
 
         # 加载配置
         self.config_manager = load_config(args.config, args)
         self.config = self.config_manager.config
 
         # 打印配置（调试模式）
-        if args.debug:
+        if args.debug and self.is_main_process:
             self.config_manager.print_config()
 
         # 创建输出目录
@@ -72,7 +76,8 @@ class STORKApplication:
 
     def setup_data(self):
         """设置数据加载器"""
-        print("\n📊 设置STORK数据加载器...")
+        if self.is_main_process:
+            print("\n📊 设置STORK数据加载器...")
 
         # 创建STORK数据加载器
         self.data_loader = create_stork_data_loader(self.config)
@@ -97,7 +102,8 @@ class STORKApplication:
         if self.optimization_setup['is_distributed'] and torch.distributed.is_initialized():
             from torch.utils.data.distributed import DistributedSampler
             train_sampler = DistributedSampler(train_subset)
-            print("🔄 使用分布式采样器")
+            if self.is_main_process:
+                print("🔄 使用分布式采样器")
 
         self.train_loader = DataLoader(
             train_subset,
@@ -116,18 +122,21 @@ class STORKApplication:
             num_workers=num_workers, pin_memory=True
         )
 
-        print(f"✅ STORK数据加载器设置完成")
-        print(f"   训练集: {len(train_subset)} 样本")
-        print(f"   验证集: {len(val_subset)} 样本")
-        print(f"   测试集: {len(self.test_dataset)} 样本")
+        if self.is_main_process:
+            print(f"✅ STORK数据加载器设置完成")
+            print(f"   训练集: {len(train_subset)} 样本")
+            print(f"   验证集: {len(val_subset)} 样本")
+            print(f"   测试集: {len(self.test_dataset)} 样本")
 
     def setup_model(self):
         """设置模型"""
-        print("\n🤖 设置模型...")
+        if self.is_main_process:
+            print("\n🤖 设置模型...")
 
         # 创建模型
         self.model = create_model(self.config['model'])
-        self.model.print_model_info()
+        if self.is_main_process:
+            self.model.print_model_info()
 
         # 移动到设备
         self.model = self.model.to(self.device)
@@ -136,13 +145,16 @@ class STORKApplication:
         if torch.cuda.device_count() > 1 and not self.optimization_setup['is_distributed']:
             # 使用DataParallel进行多GPU训练
             self.model = torch.nn.DataParallel(self.model)
-            print(f"🚀 启用DataParallel多GPU训练: {torch.cuda.device_count()} 块GPU")
+            if self.is_main_process:
+                print(f"🚀 启用DataParallel多GPU训练: {torch.cuda.device_count()} 块GPU")
 
-        print("✅ 模型设置完成")
+        if self.is_main_process:
+            print("✅ 模型设置完成")
 
     def setup_trainer(self):
         """设置训练器"""
-        print("\n🎯 设置训练器...")
+        if self.is_main_process:
+            print("\n🎯 设置训练器...")
 
         # 创建模型管理器
         self.model_manager = create_model_manager(
@@ -168,24 +180,28 @@ class STORKApplication:
             logger=self.logger
         )
 
-        print("✅ 训练器设置完成")
+        if self.is_main_process:
+            print("✅ 训练器设置完成")
 
     def train(self):
         """执行训练"""
-        print("\n🚀 开始训练...")
+        if self.is_main_process:
+            print("\n🚀 开始训练...")
 
         # 检查是否恢复训练
         if self.config['training']['resume_training']:
             checkpoint_path = Path('checkpoints/best_model.pth')
             if checkpoint_path.exists():
-                print(f"📂 恢复训练: {checkpoint_path}")
+                if self.is_main_process:
+                    print(f"📂 恢复训练: {checkpoint_path}")
                 self.trainer.load_checkpoint(str(checkpoint_path))
 
         # 执行训练
         num_epochs = self.config['training']['epochs']
         history = self.trainer.train(num_epochs)
 
-        print("✅ 训练完成")
+        if self.is_main_process:
+            print("✅ 训练完成")
         return history
 
     def evaluate(self):

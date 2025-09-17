@@ -9,6 +9,11 @@ import torch.distributed as dist
 from typing import Dict, Any, Optional, Tuple
 
 
+def is_main_process() -> bool:
+    """检查当前进程是否为主进程"""
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
 try:
     import deepspeed
     DEEPSPEED_AVAILABLE = True
@@ -31,12 +36,14 @@ class DeepSpeedOptimizer:
         self.available = DEEPSPEED_AVAILABLE and self.opt_config.get('use_deepspeed', False)
 
         if self.available:
-            print("🚀 DeepSpeed可用，将启用ZeRO内存优化")
+            if is_main_process():
+                print("🚀 DeepSpeed可用，将启用ZeRO内存优化")
         else:
-            if not DEEPSPEED_AVAILABLE:
-                print("⚠️  DeepSpeed未安装，使用标准PyTorch优化")
-            else:
-                print("🔧 使用标准PyTorch优化（DeepSpeed已禁用）")
+            if is_main_process():
+                if not DEEPSPEED_AVAILABLE:
+                    print("⚠️  DeepSpeed未安装，使用标准PyTorch优化")
+                else:
+                    print("🔧 使用标准PyTorch优化（DeepSpeed已禁用）")
 
     def is_available(self) -> bool:
         """检查DeepSpeed是否可用"""
@@ -53,8 +60,11 @@ class DeepSpeedOptimizer:
         weight_decay = train_config.get('weight_decay', 0.01)
         epochs = train_config.get('epochs', 2000)
 
-        # 计算总批次大小（所有GPU）
-        world_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        # 计算总批次大小（所有GPU） - 修复分布式环境
+        if 'WORLD_SIZE' in os.environ:
+            world_size = int(os.environ['WORLD_SIZE'])
+        else:
+            world_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
         global_batch_size = batch_size * world_size
 
         ds_config = {
@@ -72,25 +82,24 @@ class DeepSpeedOptimizer:
                 }
             },
 
-            # 学习率调度器
+            # 学习率调度器 - 简化配置避免步数计算错误
             "scheduler": {
-                "type": "WarmupCosineLR",
+                "type": "WarmupLR",
                 "params": {
                     "warmup_min_lr": 0,
                     "warmup_max_lr": learning_rate,
-                    "warmup_num_steps": train_config.get('warmup_epochs', 10) * 100,  # 估计步数
-                    "total_num_steps": epochs * 100  # 估计总步数
+                    "warmup_num_steps": 1000  # 固定warmup步数
                 }
             },
 
-            # ZeRO优化配置
+            # ZeRO优化配置 - 减小bucket_size避免内存问题
             "zero_optimization": {
                 "stage": self.opt_config.get('zero_stage', 2),
                 "allgather_partitions": True,
-                "allgather_bucket_size": 200000000,
+                "allgather_bucket_size": 50000000,  # 减小到50MB
                 "overlap_comm": True,
                 "reduce_scatter": True,
-                "reduce_bucket_size": 200000000,
+                "reduce_bucket_size": 50000000,     # 减小到50MB
                 "contiguous_gradients": True,
                 "cpu_offload": self.opt_config.get('offload_optimizer', True)
             },
@@ -118,7 +127,17 @@ class DeepSpeedOptimizer:
             # 调试和日志
             "steps_per_print": 100,
             "wall_clock_breakdown": False,
-            "dump_state": False
+            "dump_state": False,
+
+            # 稳定性配置 - 防止死锁和SIGKILL
+            "communication_data_type": "fp16",
+            "prescale_gradients": False,
+            "gradient_predivide_factor": 1.0,
+            "sparse_gradients": False,
+
+            # 内存和性能优化
+            "max_live_parameters": 1000000000,
+            "max_reuse_distance": 1000000000
         }
 
         # ZeRO-3特殊配置
@@ -190,13 +209,15 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
             # PyTorch默认就是按需分配，无需特殊设置
             pass
 
-        print(f"🔧 CUDA设备数量: {torch.cuda.device_count()}")
-        for i in range(torch.cuda.device_count()):
-            print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
+        if is_main_process():
+            print(f"🔧 CUDA设备数量: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
 
     else:
         device = torch.device('cpu')
-        print("⚠️  未检测到CUDA设备，使用CPU训练")
+        if is_main_process():
+            print("⚠️  未检测到CUDA设备，使用CPU训练")
 
     # 分布式训练设置
     is_distributed = False
@@ -207,13 +228,16 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
                 # 检查是否通过torchrun或launch启动
                 if 'WORLD_SIZE' in os.environ and 'RANK' in os.environ:
                     # 已经通过分布式启动器启动，直接初始化
-                    print(f"🚀 检测到分布式环境，初始化 {os.environ.get('WORLD_SIZE')} 块GPU")
+                    if is_main_process():
+                        print(f"🚀 检测到分布式环境，初始化 {os.environ.get('WORLD_SIZE')} 块GPU")
                     try:
                         dist.init_process_group(backend='nccl')
                         is_distributed = True
-                        print(f"✅ 分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
+                        if is_main_process():
+                            print(f"✅ 分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
                     except Exception as e:
-                        print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
+                        if is_main_process():
+                            print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
                         is_distributed = False
                 else:
                     # 检查是否要使用DeepSpeed
@@ -238,19 +262,23 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
                         is_distributed = False
             else:
                 is_distributed = True
-                print("✅ 分布式训练已初始化")
+                if is_main_process():
+                    print("✅ 分布式训练已初始化")
         except Exception as e:
-            print(f"⚠️  分布式训练初始化失败: {e}")
+            if is_main_process():
+                print(f"⚠️  分布式训练初始化失败: {e}")
             is_distributed = False
 
     # 混合精度设置
     if opt_config.get('mixed_precision', True) and device.type == 'cuda':
         # PyTorch AMP会自动处理
-        print("🎯 启用混合精度训练(AMP)")
+        if is_main_process():
+            print("🎯 启用混合精度训练(AMP)")
 
     # 编译优化（PyTorch 2.0+）
     if hasattr(torch, 'compile') and opt_config.get('torch_compile', False):
-        print("⚡ 启用torch.compile优化")
+        if is_main_process():
+            print("⚡ 启用torch.compile优化")
 
     return device, is_distributed
 
