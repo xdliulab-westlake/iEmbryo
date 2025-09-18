@@ -1,11 +1,12 @@
 """
 数据集类定义
-支持胚胎图像分类和缓存机制
+支持胚胎图像分类和特征缓存机制
 """
 
 import os
 import pickle
 import hashlib
+import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Callable
 from PIL import Image

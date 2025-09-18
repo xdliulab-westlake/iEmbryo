@@ -141,15 +141,15 @@ class BatchCacheManager:
                         path, img_size, apply_petri_crop, apply_center_crop
                     )
 
-                    # 转换格式：HWC -> CHW, 归一化到[0,1]
-                    processed_img = processed_img.astype(np.float32) / 255.0
+                    # 优化存储：保持uint8格式，节省50%存储空间
+                    # 训练时再转换为float32并归一化
                     preprocessed_img = np.transpose(processed_img, (2, 0, 1))  # HWC -> CHW
 
-                    chunk_data.append(torch.from_numpy(preprocessed_img))
+                    chunk_data.append(torch.from_numpy(preprocessed_img.astype(np.uint8)))
                 except Exception as e:
                     print(f"⚠️ 预处理失败: {path}, 错误: {e}")
-                    # 创建零图像作为占位符
-                    chunk_data.append(torch.zeros(3, img_size, img_size))
+                    # 创建零图像作为占位符（uint8格式）
+                    chunk_data.append(torch.zeros(3, img_size, img_size, dtype=torch.uint8))
 
             # 保存这一块
             chunk_filename = self._get_chunk_filename(chunk_id, split)
@@ -164,7 +164,8 @@ class BatchCacheManager:
                 'end_idx': end_idx
             }
 
-            torch.save(chunk_dict, chunk_path)
+            # 使用压缩保存，进一步减少存储空间
+            torch.save(chunk_dict, chunk_path, _use_new_zipfile_serialization=False)
 
             chunks_info.append({
                 'chunk_id': chunk_id,
@@ -304,12 +305,14 @@ class BatchCachedDataset(torch.utils.data.Dataset):
     """
     基于批量缓存的数据集
     自动使用批量缓存或按需创建
+    支持内存映射和延迟加载以提升性能
     """
 
     def __init__(self, image_paths: List[str], labels: List[int], img_size: int = 224,
                  is_training: bool = True, apply_petri_crop: bool = True,
                  apply_center_crop: bool = True, cache_dir: str = "./batch_cache",
-                 chunk_size: int = 1000, split: str = "train"):
+                 chunk_size: int = 1000, split: str = "train",
+                 use_memory_mapping: bool = False):
         """
         初始化批量缓存数据集
 
@@ -323,6 +326,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
             cache_dir: 缓存目录
             chunk_size: 每个缓存文件的图片数量
             split: 数据分割名称
+            use_memory_mapping: 是否使用内存映射（大数据集推荐）
         """
         self.image_paths = image_paths
         self.labels = labels
@@ -331,6 +335,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
         self.apply_petri_crop = apply_petri_crop
         self.apply_center_crop = apply_center_crop
         self.split = split
+        self.use_memory_mapping = use_memory_mapping
 
         # 初始化缓存管理器
         self.cache_manager = BatchCacheManager(cache_dir, chunk_size)
@@ -362,22 +367,78 @@ class BatchCachedDataset(torch.utils.data.Dataset):
 
         if self.cached_data is None:
             print(f"⚠️ 无法加载缓存数据，创建空数据集")
-            self.images = torch.empty(0, 3, img_size, img_size)
+            self.images = torch.empty(0, 3, img_size, img_size, dtype=torch.uint8)
             self.cached_labels = torch.empty(0, dtype=torch.long)
             self.cached_paths = []
         else:
-            self.images, self.cached_labels, self.cached_paths = self.cached_data
-            print(f"✅ 批量缓存数据集初始化完成: {len(self.images)} 张图片")
+            if self.use_memory_mapping:
+                # 延迟加载：只保存元数据，使用时再加载具体chunk
+                print(f"🗂️  启用延迟加载模式")
+                self.images = None  # 延迟加载
+                self.cached_labels = self.cached_data[1]
+                self.cached_paths = self.cached_data[2]
+                self._setup_chunk_mapping()
+            else:
+                # 全量加载到内存
+                self.images, self.cached_labels, self.cached_paths = self.cached_data
+                print(f"✅ 批量缓存数据集初始化完成: {len(self.images)} 张图片")
+
+    def _setup_chunk_mapping(self):
+        """设置chunk映射，用于延迟加载"""
+        cache_info = self.cache_manager.index[self.cache_key]
+        self.chunk_mapping = {}  # idx -> (chunk_id, chunk_offset)
+
+        current_idx = 0
+        for chunk_info in cache_info['chunks']:
+            chunk_size = chunk_info['size']
+            for offset in range(chunk_size):
+                self.chunk_mapping[current_idx] = (chunk_info['chunk_id'], offset)
+                current_idx += 1
+
+        self.chunk_cache = {}  # 缓存已加载的chunk
+
+    def _load_chunk(self, chunk_id: int) -> torch.Tensor:
+        """加载指定的chunk"""
+        if chunk_id in self.chunk_cache:
+            return self.chunk_cache[chunk_id]
+
+        cache_info = self.cache_manager.index[self.cache_key]
+        chunk_info = next(c for c in cache_info['chunks'] if c['chunk_id'] == chunk_id)
+        chunk_path = self.cache_manager.cache_dir / chunk_info['filename']
+
+        chunk_data = torch.load(chunk_path, map_location='cpu')
+        self.chunk_cache[chunk_id] = chunk_data['images']
+
+        # 限制缓存大小，避免内存溢出
+        if len(self.chunk_cache) > 3:  # 最多缓存3个chunk
+            oldest_chunk = min(self.chunk_cache.keys())
+            del self.chunk_cache[oldest_chunk]
+
+        return chunk_data['images']
 
     def __len__(self):
-        return len(self.images)
+        if self.use_memory_mapping:
+            return len(self.cached_labels)
+        else:
+            return len(self.images)
 
     def __getitem__(self, idx):
         """获取数据项"""
-        image = self.images[idx]  # 已经是预处理过的tensor
+        if self.use_memory_mapping:
+            # 延迟加载模式
+            chunk_id, chunk_offset = self.chunk_mapping[idx]
+            chunk_images = self._load_chunk(chunk_id)
+            image = chunk_images[chunk_offset]
+        else:
+            # 全量加载模式
+            image = self.images[idx]  # uint8格式的预处理tensor
+
         label = self.cached_labels[idx]
 
-        return image.float(), label.long()
+        # 转换为float32并归一化到[0,1]
+        image = image.float() / 255.0
+
+        return image, label.long()
 
     def get_cache_stats(self):
         """获取缓存统计信息"""

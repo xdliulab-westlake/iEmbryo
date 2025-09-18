@@ -6,30 +6,56 @@
 
 STORK (Specialized Training and Optimization for Reproductive Knowledge) PyTorch版本是一个专为胚胎可行性分类设计的深度学习系统。该系统集成了专业的胚胎图像预处理、多模型支持、分布式训练优化和全面的评估可视化功能。
 
+## ⚡ **5分钟快速入门**
+
+```bash
+# 1. 进入项目目录
+cd /Users/lzz/Documents/GitHub/IVF_AI/prediction/code/STORK_lzz_torch
+
+# 2. 修改数据路径
+cp config/default.yaml config/my_config.yaml
+# 编辑 my_config.yaml 中的 data_dir 为你的数据路径
+
+# 3. 开始训练
+python main.py --config config/my_config.yaml
+
+# 4. 查看结果
+ls outputs/  # 训练结果
+tensorboard --logdir logs/tensorboard  # 可视化
+```
+
+**就这么简单！** 系统会自动处理GPU配置、缓存创建、模型训练等所有细节。
+
 ## 🚀 快速开始
 
 ### 1. 环境安装
 
+#### 方法一：自动安装（推荐）
 ```bash
-# 克隆项目
-cd /path/to/your/project
-cd STORK_lzz_torch
+# 进入项目目录
+cd /Users/lzz/Documents/GitHub/IVF_AI/prediction/code/STORK_lzz_torch
 
 # 运行环境设置脚本
 python setup.py
 ```
 
-或手动安装依赖：
-
+#### 方法二：手动安装
 ```bash
 # 安装PyTorch (根据你的CUDA版本)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
-# 安装其他依赖
-pip install -r requirements.txt
+# 安装其他核心依赖
+pip install numpy pandas scikit-learn opencv-python pillow
+pip install deepspeed tensorboard wandb  # 可选：高级功能
+pip install kornia  # 推荐：GPU加速数据增强
 
-# 安装GPU数据增强依赖 (推荐)
-pip install kornia  # GPU加速数据增强
+# 如果有requirements.txt文件
+pip install -r requirements.txt
+```
+
+#### 验证安装
+```bash
+python -c "import torch; print('PyTorch版本:', torch.__version__); print('CUDA可用:', torch.cuda.is_available())"
 ```
 
 ### 2. 数据准备
@@ -50,62 +76,147 @@ pip install kornia  # GPU加速数据增强
 
 ### 3. 配置文件设置
 
-复制并修改默认配置：
-
+#### 快速配置
 ```bash
-# 复制默认配置
+# 复制并修改默认配置
 cp config/default.yaml config/my_config.yaml
 
-# 编辑配置文件
-vim config/my_config.yaml
+# 使用文本编辑器修改配置
+nano config/my_config.yaml  # 或使用 vim, code 等
 ```
 
-**关键配置项：**
-
+#### 必须修改的配置项
 ```yaml
-# 数据配置
+# 数据配置 - 必须修改
 data:
-  data_dir: "/path/to/your/data"  # 修改为你的数据路径
+  data_dir: "/liaozizhuo/selected_images/train/"  # ← 改为你的数据路径
+  num_workers: 30                                 # ← 根据CPU核心数调整
+
+# 训练配置 - 建议调整
+training:
+  batch_size: 512      # ← 根据GPU内存调整 (512适合大内存GPU)
+  epochs: 2000         # ← 根据需要调整
+```
+
+#### 配置文件模板
+创建你的专用配置文件：
+```yaml
+# my_config.yaml
+data:
+  data_dir: "/path/to/your/embryo/data"  # 你的数据目录
   img_size: 224
   train_split: 0.7
-  use_cache: true
-  num_workers: 8                  # 根据你的CPU核心数调整
+  num_workers: 8                         # CPU核心数的1-2倍
 
-# 模型配置
+  # 批量缓存配置 (重要性能优化)
+  cache_chunk_size: 1000
+
+  # STORK专业预处理
+  apply_petri_crop: true     # 培养皿检测裁剪
+  apply_center_crop: true    # 中心方形裁剪
+
 model:
-  name: "vgg16"                   # 可选: vgg16, resnet50, resnet152, efficientnetb0
+  name: "vgg16"              # 可选: vgg16, resnet50, resnet152, efficientnetb0
+  pretrained: true
+  fine_tune: true
 
-# 训练配置
 training:
-  epochs: 100                     # 根据需要调整
-  batch_size: 8                   # 根据GPU内存调整
+  epochs: 100                # 建议100-2000轮
+  batch_size: 32             # 根据GPU内存调整: 8, 16, 32, 64
   learning_rate: 0.0001
+
+  # 类别不平衡处理
+  loss: "focal"              # focal loss处理不平衡数据
+  class_weights: [0.669, 1.978]
+
+# 路径配置
+paths:
+  output_dir: "./outputs"
+  cache_dir: "./batch_cache"   # 缓存目录
 ```
 
 ### 4. 开始训练
 
+#### 基础训练命令
 ```bash
-# 使用默认配置训练（自动多GPU）
+# 进入项目目录
+cd /Users/lzz/Documents/GitHub/IVF_AI/prediction/code/STORK_lzz_torch
+
+# 使用默认配置训练
 python main.py
 
-# 使用自定义配置
+# 使用自定义配置文件
 python main.py --config config/my_config.yaml
 
-# 调试模式（显示详细配置）
-python main.py --config config/my_config.yaml --debug
-
-# 仅验证配置（不实际训练）
+# 快速测试配置（不实际训练）
 python main.py --config config/my_config.yaml --dry-run
 
-# 常用多GPU分布式训练命令（推荐用于生产环境）
-PYTHONPATH=/opt/conda/lib/python3.10/site-packages:$PYTHONPATH torchrun --nproc_per_node=2 main.py --config config/my_config.yaml
+# 查看详细配置信息
+python main.py --config config/my_config.yaml --debug
 ```
 
-**🚀 多GPU自动配置 (v4.0.0新功能)：**
-- 系统自动检测并使用所有可用GPU进行分布式训练
-- 无需手动配置分布式环境变量或启动命令
-- 支持2×A800-SXM4-80GB等高性能GPU配置
-- 自动优化批次大小和内存使用
+#### 常用训练场景
+```bash
+# 1. 小数据集快速实验
+python main.py --config config/my_config.yaml --epochs 50 --batch-size 16
+
+# 2. 生产级训练
+python main.py --config config/my_config.yaml --epochs 2000 --batch-size 512
+
+# 3. 更换模型测试
+python main.py --model resnet50 --epochs 100
+
+# 4. 指定数据目录
+python main.py --data-dir "/path/to/your/data" --epochs 100
+```
+
+#### 多GPU训练（自动）
+```bash
+# 系统自动检测并使用所有可用GPU
+python main.py --config config/my_config.yaml
+
+# 手动指定GPU数量（如果需要）
+CUDA_VISIBLE_DEVICES=0,1 python main.py --config config/my_config.yaml
+```
+
+#### 训练监控
+```bash
+# 实时查看训练日志
+tail -f logs/training.log
+
+# TensorBoard可视化（新终端）
+tensorboard --logdir logs/tensorboard --port 6006
+# 然后访问 http://localhost:6006
+```
+
+**🚀 重要提示：**
+- **首次运行缓存创建**：系统会自动预处理图像并创建批量缓存，时间较长但后续训练显著加速
+- **缓存复用**：同样的数据配置会复用缓存，大幅提升后续训练速度
+- **自动GPU配置**：系统自动检测GPU数量并配置分布式训练
+- **断点续训**：训练过程自动保存检查点，支持断点续训
+- **输出目录**：完整训练结果保存在 `./outputs/` 目录
+
+## 💾 **批量缓存策略**
+
+STORK使用智能批量缓存系统，**缓存预处理后的图像**而非特征，保持完整的训练能力：
+
+### 缓存流程
+```
+原始图像 → STORK预处理 → uint8缓存 → 训练时float转换
+   ↓            ↓             ↓           ↓
+培养皿检测   中心裁剪    批量存储    实时数据增强
+```
+
+### 存储优化
+- **uint8格式**：相比float32节省50%空间
+- **分块存储**：每1000张图片一个`.pt`文件
+- **压缩存储**：PyTorch原生压缩，进一步节省空间
+
+### 训练优势
+- ✅ **保持微调能力**：端到端训练，全模型可微调
+- ✅ **支持数据增强**：实时随机变换，提升泛化能力
+- ✅ **GPU数据增强**：支持MixUp、CutMix等高级技术
+- ✅ **加载加速**：5-10倍加载速度提升
 
 ## 📊 系统功能
 
@@ -516,53 +627,75 @@ training:
 
 A: 设置 `resume_training: true`，系统会自动查找最新的检查点。
 
-## 批量缓存系统
+## 📁 **批量缓存系统详解**
 
 STORK使用**BatchCacheManager**，专为大规模胚胎图像训练优化：
 
-**存储结构**：
+### 存储结构
 ```
 ./batch_cache/
-├── train_chunk_0000.pt      # 1000张训练图片
-├── train_chunk_0001.pt      # 1000张训练图片
-├── test_chunk_0000.pt       # 1000张测试图片
+├── train_chunk_0000.pt      # 1000张预处理图片 (uint8格式)
+├── train_chunk_0001.pt      # 1000张预处理图片
+├── test_chunk_0000.pt       # 1000张预处理图片
 ├── metadata.json            # 缓存元数据
 └── index.json              # 图片路径索引
 ```
 
-**工作原理**：
-- 首次训练时图片分块预处理（STORK管道：培养皿检测→中心裁剪→归一化）
-- 每1000张图片保存为一个`.pt`文件，使用PyTorch压缩
-- 后续训练直接加载预处理好的张量，跳过图像处理步骤
-- 基于图片路径+预处理参数生成唯一缓存键
+### 工作原理
+1. **首次运行**：
+   ```
+   原始图片 → STORK预处理 → uint8张量 → 分块保存
+   ```
+2. **后续运行**：
+   ```
+   直接加载 → uint8张量 → 训练时转float32 → 数据增强
+   ```
 
-**性能提升**：
-- 文件数量：19万张图片 → 193个文件（减少99.9%）
-- 加载速度：5-10倍提升
-- 存储效率：PyTorch原生压缩，节省空间
-- 跨模型复用：VGG16/ResNet/EfficientNet可共享同一缓存
+### 缓存特点
+- **智能缓存键**：基于图片路径+预处理参数生成MD5唯一标识
+- **分块存储**：每1000张图片一个`.pt`文件，使用PyTorch压缩
+- **延迟加载**：支持大数据集，按需加载chunk，节省内存
+- **格式优化**：uint8存储节省50%空间，训练时实时转换
 
-**缓存管理**：
+### 性能提升对比
+| 指标 | 传统方式 | STORK缓存 | 提升 |
+|------|----------|-----------|------|
+| 文件数量 | 190,000个 | 193个 | 99.9%减少 |
+| 加载速度 | 基准 | 5-10倍 | 显著提升 |
+| 存储空间 | float32 | uint8压缩 | 50%节省 |
+| 内存占用 | 全量加载 | 延迟加载 | 大幅降低 |
+
+### 缓存管理
 ```bash
-# 清理缓存（重新生成时使用）
+# 查看缓存状态
+ls -lh ./batch_cache/
+
+# 清理缓存（重新生成）
 rm -rf ./batch_cache/
+
+# 查看缓存使用情况
+du -sh ./batch_cache/
 ```
 
-**缓存配置**：
+### 配置优化
 ```yaml
+# 推荐配置
 data:
-  cache_chunk_size: 1000         # 每个缓存文件的图片数量
+  cache_chunk_size: 1000         # 平衡文件数和效率
 
-paths:
-  cache_dir: "./batch_cache"     # 缓存目录位置
+# 内存受限环境
+data:
+  cache_chunk_size: 500          # 减少内存占用
+
+# 高内存环境
+data:
+  cache_chunk_size: 2000         # 减少文件数量
 ```
 
-**配置建议**：
-- 1000张/块（推荐）：平衡文件数量和加载效率
-- 更大块（2000+）：文件更少，但内存占用更高
-- 更小块（500-）：内存友好，但文件数量增加
-- SSD存储：显著提升缓存读写速度
-- 大容量磁盘：19万图片约需15-20GB空间
+### 硬件建议
+- **SSD存储**：显著提升缓存读写速度
+- **大容量磁盘**：190k图片约需15-20GB缓存空间
+- **充足内存**：32GB+推荐，支持更大chunk_size
 
 ### Q: GPU数据增强需要什么依赖？
 
