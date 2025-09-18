@@ -865,19 +865,10 @@ def stratified_cross_validation_with_cache(
             
             # 再次分割训练和验证
             from sklearn.model_selection import train_test_split
-            X_train, X_val, y_bs_train, y_bs_val = train_test_split(
-                X_train_val, y_bs_train_val, test_size=0.2, random_state=random_state
+            X_train, X_val, y_bs_train, y_bs_val, y_quality_train, y_quality_val, ages_train, ages_val = train_test_split(
+                X_train_val, y_bs_train_val, y_quality_train_val, ages_train_val,
+                test_size=0.2, random_state=random_state
             )
-            y_quality_train, y_quality_val = train_test_split(
-                y_quality_train_val, test_size=0.2, random_state=random_state
-            )[1], train_test_split(
-                y_quality_train_val, test_size=0.2, random_state=random_state
-            )[0]
-            ages_train, ages_val = train_test_split(
-                ages_train_val, test_size=0.2, random_state=random_state
-            )[1], train_test_split(
-                ages_train_val, test_size=0.2, random_state=random_state
-            )[0]
             
             print(f"📊 训练集: {len(X_train)}, 验证集: {len(X_val)}, 测试集: {len(X_test)}")
             
