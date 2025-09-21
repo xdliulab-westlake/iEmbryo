@@ -180,20 +180,20 @@ class BatchCacheManager:
         # 更新索引
         self.index[cache_key] = {
             'image_paths': image_paths,
-            'labels': labels,
-            'img_size': img_size,
-            'apply_petri_crop': apply_petri_crop,
-            'apply_center_crop': apply_center_crop,
+            'labels': [int(label) for label in labels],  # 确保转换为Python int
+            'img_size': int(img_size),
+            'apply_petri_crop': bool(apply_petri_crop),
+            'apply_center_crop': bool(apply_center_crop),
             'split': split,
             'chunks': chunks_info,
             'total_images': len(image_paths),
-            'created_time': time.time()
+            'created_time': float(time.time())
         }
 
         # 更新元数据
         self.metadata['total_chunks'] += total_chunks
         self.metadata['total_images'] += len(image_paths)
-        self.metadata['img_size'] = img_size
+        self.metadata['img_size'] = int(img_size)
 
         # 保存索引和元数据
         self._save_index()
