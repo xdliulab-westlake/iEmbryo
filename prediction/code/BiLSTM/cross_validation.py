@@ -493,7 +493,7 @@ def create_cv_summary_report(cv_results, save_path=None):
     return report_text
 
 def stratified_cross_validation_with_cache(
-    cache, n_folds=4, test_ratio=0.3, feature_dim=512, lstm_units=128, 
+    cache, n_folds=4, test_ratio=0.3, feature_dim=None, lstm_units=128, 
     dropout_rate=0.3, learning_rate=0.001, epochs=100, batch_size=32, 
     patience=15, use_cache=True, use_augmentation=True, verbose=1, random_state=42,
     score_dict_path=None, embryo_info_path=None,  # 保持向后兼容
@@ -840,7 +840,17 @@ def stratified_cross_validation_with_cache(
         print(f"  特征矩阵: {X.shape}")
         print(f"  BS分数范围: {y_bs.min():.2f} - {y_bs.max():.2f}")
         print(f"  高质量胚胎: {np.sum(y_quality)} / {len(y_quality)} ({np.mean(y_quality)*100:.1f}%)")
-        
+
+        # 🔥 自动检测特征维度
+        if feature_dim is None:
+            feature_dim = X.shape[1]
+            print(f"🔧 自动检测特征维度: {feature_dim}")
+        else:
+            if feature_dim != X.shape[1]:
+                print(f"⚠️ 特征维度不匹配! 参数: {feature_dim}, 实际: {X.shape[1]}")
+                feature_dim = X.shape[1]
+                print(f"🔧 使用实际特征维度: {feature_dim}")
+
         # 验证数据
         if len(X) < n_folds:
             raise ValueError(f"样本数({len(X)})少于折数({n_folds})")

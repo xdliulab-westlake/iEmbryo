@@ -23,10 +23,10 @@ class MultiModelFeatureExtractor:
 
         Args:
             model_name (str): 模型选择
-                - 'all': 使用所有模型融合特征 (1536维)
-                - 'efficientnet': 仅使用EfficientNetV2M (512维)
-                - 'resnet': 仅使用ResNet152V2 (512维)
-                - 'densenet': 仅使用DenseNet201 (512维)
+                - 'all': 使用所有模型融合特征 (5760维: 1280+2048+1920+512)
+                - 'efficientnet': 仅使用EfficientNetV2M (1280维)
+                - 'resnet': 仅使用ResNet152V2 (2048维)
+                - 'densenet': 仅使用DenseNet201 (1920维)
                 - 'vgg16': 仅使用VGG16 (512维)
             use_multi_gpu (bool): 是否使用多GPU加速
             batch_size (int): 批次大小，建议根据GPU内存调整
@@ -220,7 +220,12 @@ class MultiModelFeatureExtractor:
         base_model = EfficientNetV2M(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         output = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
         self.models['efficientnet'] = Model(inputs=base_model.input, outputs=output)
-        self.models['efficientnet'].trainable = False
+        # 🔥 启用微调：冻结前1/3的层，微调后2/3的层
+        self.models['efficientnet'].trainable = True
+        total_layers = len(self.models['efficientnet'].layers)
+        freeze_layers = int(total_layers / 3)
+        for layer in self.models['efficientnet'].layers[:freeze_layers]:
+            layer.trainable = False
         self.feature_dims['efficientnet'] = 1280
         
     def _build_resnet(self):
@@ -228,7 +233,12 @@ class MultiModelFeatureExtractor:
         base_model = ResNet152V2(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         output = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
         self.models['resnet'] = Model(inputs=base_model.input, outputs=output)
-        self.models['resnet'].trainable = False
+        # 🔥 启用微调：冻结前1/3的层，微调后2/3的层
+        self.models['resnet'].trainable = True
+        total_layers = len(self.models['resnet'].layers)
+        freeze_layers = int(total_layers / 3)
+        for layer in self.models['resnet'].layers[:freeze_layers]:
+            layer.trainable = False
         self.feature_dims['resnet'] = 2048
         
     def _build_densenet(self):
@@ -236,7 +246,12 @@ class MultiModelFeatureExtractor:
         base_model = DenseNet201(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         output = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
         self.models['densenet'] = Model(inputs=base_model.input, outputs=output)
-        self.models['densenet'].trainable = False
+        # 🔥 启用微调：冻结前1/3的层，微调后2/3的层
+        self.models['densenet'].trainable = True
+        total_layers = len(self.models['densenet'].layers)
+        freeze_layers = int(total_layers / 3)
+        for layer in self.models['densenet'].layers[:freeze_layers]:
+            layer.trainable = False
         self.feature_dims['densenet'] = 1920
         
     def _build_vgg16(self):
@@ -244,7 +259,12 @@ class MultiModelFeatureExtractor:
         base_model = VGG16(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
         output = tf.keras.layers.GlobalAveragePooling2D()(base_model.output)
         self.models['vgg16'] = Model(inputs=base_model.input, outputs=output)
-        self.models['vgg16'].trainable = False
+        # 🔥 启用微调：冻结前1/3的层，微调后2/3的层
+        self.models['vgg16'].trainable = True
+        total_layers = len(self.models['vgg16'].layers)
+        freeze_layers = int(total_layers / 3)
+        for layer in self.models['vgg16'].layers[:freeze_layers]:
+            layer.trainable = False
         self.feature_dims['vgg16'] = 512
         
     def extract_features(self, images):

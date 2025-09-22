@@ -67,18 +67,17 @@ def build_feature_extractor(img_size: int, model_name: str = 'efficientnet'):
     
     return keras.Model(inputs, outputs, name=f"{model_name}_feature_extractor")
 
-def preprocess_image_bilstm_universal(image, img_size=224, is_training=True, model_name='efficientnet'):
+def preprocess_image_bilstm_universal(image, img_size=224, is_training=True):
     """
-    BiLSTM胚胎图像预处理 + 多模型预处理管道
-    
+    BiLSTM胚胎图像预处理 + 统一ImageNet标准化
+
     Args:
         image: 输入图像 (tensor或numpy array)
         img_size: 目标图像尺寸
         is_training: 是否为训练模式（影响数据增强）
-        model_name: 预训练模型名称 ('efficientnet', 'resnet', 'densenet', 'vgg16')
-    
+
     Returns:
-        预处理后的图像
+        预处理后的图像 (统一ImageNet标准化)
     """
     # 转换为numpy array以便STORK处理
     if isinstance(image, tf.Tensor):
@@ -113,35 +112,29 @@ def preprocess_image_bilstm_universal(image, img_size=224, is_training=True, mod
         if np.random.random() > 0.8:
             image = tf.image.random_saturation(image, lower=0.9, upper=1.1)
     
-    # 根据模型类型应用对应的预处理
-    if model_name == 'efficientnet':
-        image = efficientnet_preprocess(image)
-    elif model_name == 'resnet':
-        image = resnet_preprocess(image)
-    elif model_name == 'densenet':
-        image = densenet_preprocess(image)
-    elif model_name == 'vgg16':
-        image = vgg16_preprocess(image)
-    else:
-        # 默认标准化到[-1, 1]
-        image = (image / 127.5) - 1.0
+    # 🔥 统一使用ImageNet标准化 (所有模型)
+    # ImageNet均值和标准差 (RGB格式)
+    mean = np.array([0.485, 0.456, 0.406]) * 255.0
+    std = np.array([0.229, 0.224, 0.225]) * 255.0
+
+    # 应用ImageNet标准化
+    image = (image - mean) / std
     
     return image
 
-def load_and_preprocess_images_for_bilstm(image_paths, img_size=224, is_training=True, 
-                                         model_name='efficientnet', batch_size=32):
+def load_and_preprocess_images_for_bilstm(image_paths, img_size=224, is_training=True,
+                                         batch_size=32):
     """
     为BiLSTM加载和预处理批量图像
-    
+
     Args:
         image_paths: 图像路径列表
         img_size: 目标图像尺寸
         is_training: 是否为训练模式
-        model_name: 预训练模型名称
         batch_size: 批量大小
-    
+
     Returns:
-        预处理后的图像数据集
+        预处理后的图像数据集 (统一ImageNet标准化)
     """
     def load_and_preprocess_fn(path):
         # 读取图像
@@ -151,7 +144,7 @@ def load_and_preprocess_images_for_bilstm(image_paths, img_size=224, is_training
         
         # 应用BiLSTM预处理
         img = tf.py_function(
-            lambda x: preprocess_image_bilstm_universal(x, img_size, is_training, model_name),
+            lambda x: preprocess_image_bilstm_universal(x, img_size, is_training),
             [img],
             tf.float32
         )
