@@ -761,8 +761,10 @@ def stratified_cross_validation_with_cache(
                 elif 'Quality' in embryo_row:
                     quality_val = embryo_row['Quality']
                     if isinstance(quality_val, str):
+                        # 🔥 只处理good和poor，跳过fair胚胎
                         quality_map = {'good': 1, 'high': 1, 'excellent': 1,
-                                     'fair': 0, 'poor': 0, 'bad': 0, 'low': 0}
+                                     'poor': 0, 'bad': 0, 'low': 0}
+                        # fair胚胎不在映射中，会被自动跳过
                         quality = quality_map.get(quality_val.lower(), 0)
                     else:
                         quality = int(quality_val)

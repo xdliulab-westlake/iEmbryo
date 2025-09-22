@@ -480,6 +480,7 @@ def auto_generate_score_dict_if_needed(config):
             generate_score_dict_from_csv(
                 maindb_path=maindb_path,
                 filtered_path=filtered_path if filtered_path and filtered_path.strip() else None,
+                slide_info_path="/liaozizhuo/scripts/SlidePatientBirthDates.csv",
                 output_path=score_dict_path
             )
             print(f"✅ 自动生成评分字典完成: {score_dict_path}")
@@ -593,6 +594,7 @@ def main():
             generate_score_dict_from_csv(
                 maindb_path=maindb_path,
                 filtered_path=filtered_path,
+                slide_info_path="/liaozizhuo/scripts/SlidePatientBirthDates.csv",
                 output_path=output_path
             )
             print(f"✅ 评分字典生成完成: {output_path}")
