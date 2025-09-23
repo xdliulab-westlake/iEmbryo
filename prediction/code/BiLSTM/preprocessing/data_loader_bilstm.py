@@ -112,14 +112,10 @@ def preprocess_image_bilstm_universal(image, img_size=224, is_training=True):
         if np.random.random() > 0.8:
             image = tf.image.random_saturation(image, lower=0.9, upper=1.1)
     
-    # 🔥 统一使用ImageNet标准化 (所有模型)
-    # ImageNet均值和标准差 (RGB格式)
-    mean = np.array([0.485, 0.456, 0.406]) * 255.0
-    std = np.array([0.229, 0.224, 0.225]) * 255.0
+    # 🔥 不在这里应用ImageNet标准化，留给各模型特定的预处理函数
+    # 确保图像在 [0, 255] 范围内，以uint8格式返回
+    image = np.clip(image, 0, 255).astype(np.uint8)
 
-    # 应用ImageNet标准化
-    image = (image - mean) / std
-    
     return image
 
 def load_and_preprocess_images_for_bilstm(image_paths, img_size=224, is_training=True,

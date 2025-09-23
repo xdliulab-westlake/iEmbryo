@@ -10,8 +10,9 @@ from tensorflow.keras.applications.vgg16 import preprocess_input as preprocess_v
 from tensorflow.keras.applications.resnet_v2 import preprocess_input as preprocess_resnet
 from tensorflow.keras.applications.densenet import preprocess_input as preprocess_densenet
 from tensorflow.keras.applications.efficientnet_v2 import EfficientNetV2M, preprocess_input as preprocess_efficientnet
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, Input
 from tensorflow.keras.models import Model
+from tensorflow.keras.regularizers import l2
 
 
 class MultiModelFeatureExtractor:
@@ -53,7 +54,6 @@ class MultiModelFeatureExtractor:
             self._build_models()
         except Exception as e:
             if "out of memory" in str(e).lower():
-                print("🔄 GPU显存不足，自动切换到CPU模式...")
                 self.gpu_devices = ['/CPU:0']
                 self.use_multi_gpu = False
                 self.force_cpu = True
@@ -268,13 +268,14 @@ class MultiModelFeatureExtractor:
         self.feature_dims['vgg16'] = 512
         
     def extract_features(self, images):
-        """简单高效的特征提取 - 强制GPU加速"""
+        """简单高效的特征提取 - 每个模型使用自己的预处理函数"""
         features_list = []
 
+        # 确保输入是正确的uint8格式
         if images.dtype != np.uint8:
             images = tf.cast(images, tf.uint8)
 
-        # 预处理函数映射
+        # 预处理函数映射 - 每个模型使用自己的ImageNet标准化
         preprocess_map = {
             'efficientnet': preprocess_efficientnet,
             'resnet': preprocess_resnet,
@@ -291,6 +292,7 @@ class MultiModelFeatureExtractor:
         with tf.device(gpu_device):
             for model_name in self.selected_models:
                 if model_name in self.models:
+                    # 应用模型特定的ImageNet预处理
                     preprocess_func = preprocess_map[model_name]
                     processed_imgs = preprocess_func(images.copy())
 
