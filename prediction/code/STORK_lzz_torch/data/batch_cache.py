@@ -14,6 +14,18 @@ import time
 # 预处理函数在需要时动态导入
 
 
+class NumpyEncoder(json.JSONEncoder):
+    """处理numpy类型的JSON编码器"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
 class BatchCacheManager:
     """
     批量缓存管理器
@@ -64,12 +76,12 @@ class BatchCacheManager:
     def _save_metadata(self):
         """保存元数据"""
         with open(self.metadata_file, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
+            json.dump(self.metadata, f, indent=2, cls=NumpyEncoder)
 
     def _save_index(self):
         """保存索引"""
         with open(self.index_file, 'w') as f:
-            json.dump(self.index, f, indent=2)
+            json.dump(self.index, f, indent=2, cls=NumpyEncoder)
 
     def _get_cache_key(self, image_paths: List[str], img_size: int,
                       apply_petri_crop: bool, apply_center_crop: bool) -> str:
@@ -179,7 +191,7 @@ class BatchCacheManager:
 
         # 更新索引
         self.index[cache_key] = {
-            'image_paths': image_paths,
+            'image_paths': list(image_paths) if hasattr(image_paths, '__iter__') else image_paths,  # 确保转换为list
             'labels': [int(label) for label in labels],  # 确保转换为Python int
             'img_size': int(img_size),
             'apply_petri_crop': bool(apply_petri_crop),
