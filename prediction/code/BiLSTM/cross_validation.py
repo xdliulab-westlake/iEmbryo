@@ -492,6 +492,149 @@ def create_cv_summary_report(cv_results, save_path=None):
     
     return report_text
 
+def stratified_cross_validation_multi_focal(
+    cache, multi_focal_df, score_dict, n_folds=4, test_ratio=0.3, feature_dim=None,
+    lstm_units=128, dropout_rate=0.3, learning_rate=0.001, epochs=100, batch_size=32,
+    patience=15, use_cache=True, use_augmentation=True, verbose=1, random_state=42
+):
+    """
+    针对多焦距数据的简化交叉验证
+
+    Args:
+        cache: BiLSTMFeatureCache实例
+        multi_focal_df: 多焦距数据DataFrame
+        score_dict: 评分字典
+        其他参数同原函数
+
+    Returns:
+        dict: 交叉验证结果
+    """
+    print("🔄 开始多焦距深度交叉验证...")
+
+    # 按胚胎分组，为每个胚胎提取融合特征
+    embryo_features = {}
+    embryo_labels = {}
+    embryo_quality_labels = {}
+
+    for embryo_id, embryo_df in multi_focal_df.groupby('EmbryoID'):
+        if embryo_id in score_dict:
+            # 使用process_multi_focal_data处理该胚胎的所有时间点
+            try:
+                sequence_features = cache.process_multi_focal_data(
+                    embryo_df,
+                    use_cache=use_cache,
+                    training=True,
+                    use_augmentation=use_augmentation
+                )
+                embryo_features[embryo_id] = sequence_features
+
+                # 获取标签 - 使用BS分数作为回归目标
+                bs_score = score_dict[embryo_id]['bs_score'] if isinstance(score_dict[embryo_id], dict) else score_dict[embryo_id]
+                embryo_labels[embryo_id] = float(bs_score)
+
+                # 🔧 直接使用score_dict中的quality标签（无需推断）
+                embryo_quality_labels[embryo_id] = score_dict[embryo_id]['quality']
+
+            except Exception as e:
+                print(f"⚠️ 胚胎 {embryo_id} 处理失败: {e}")
+                continue
+
+    print(f"✅ 成功处理 {len(embryo_features)} 个胚胎")
+
+    if len(embryo_features) == 0:
+        raise ValueError("没有成功处理的胚胎数据")
+
+    # 准备数据用于交叉验证
+    X = np.array(list(embryo_features.values()))
+    y = np.array(list(embryo_labels.values()))
+    quality_labels = np.array(list(embryo_quality_labels.values()))
+    embryo_ids = list(embryo_features.keys())
+
+    print(f"📊 数据维度: X={X.shape}, y={y.shape}")
+    print(f"📊 质量标签分布: 高质量={np.sum(quality_labels)}/{len(quality_labels)} ({np.mean(quality_labels)*100:.1f}%)")
+
+    # 使用原有的交叉验证逻辑
+    from sklearn.model_selection import StratifiedKFold
+
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    fold_results = []
+
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X, quality_labels)):
+        print(f"\n--- 第 {fold_idx + 1} 折验证 ---")
+
+        X_train, X_val = X[train_idx], X[val_idx]
+        y_train, y_val = y[train_idx], y[val_idx]
+
+        # 训练模型
+        from BiLSTM.model import create_bilstm_model_simple
+
+        # 自动确定特征维度
+        if feature_dim is None:
+            feature_dim = X_train.shape[2]
+
+        model = create_bilstm_model_simple(
+            sequence_length=X_train.shape[1],
+            feature_dim=feature_dim,
+            lstm_units=lstm_units,
+            dropout_rate=dropout_rate
+        )
+
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+            loss='mse',
+            metrics=['mae']
+        )
+
+        # 训练
+        history = model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=epochs,
+            batch_size=batch_size,
+            verbose=0 if verbose < 2 else 1,
+            callbacks=[
+                tf.keras.callbacks.EarlyStopping(
+                    patience=patience,
+                    restore_best_weights=True,
+                    monitor='val_loss'
+                )
+            ]
+        )
+
+        # 评估
+        val_predictions = model.predict(X_val, verbose=0).flatten()
+        val_mae = np.mean(np.abs(val_predictions - y_val))
+        val_rmse = np.sqrt(np.mean((val_predictions - y_val) ** 2))
+
+        fold_result = {
+            'fold': fold_idx + 1,
+            'val_mae': val_mae,
+            'val_rmse': val_rmse,
+            'train_samples': len(X_train),
+            'val_samples': len(X_val)
+        }
+
+        fold_results.append(fold_result)
+        print(f"验证MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}")
+
+    # 计算平均结果
+    avg_mae = np.mean([r['val_mae'] for r in fold_results])
+    avg_rmse = np.mean([r['val_rmse'] for r in fold_results])
+
+    results = {
+        'cv_mae_mean': avg_mae,
+        'cv_rmse_mean': avg_rmse,
+        'fold_results': fold_results,
+        'total_embryos': len(embryo_features)
+    }
+
+    print(f"\n🎯 多焦距深度交叉验证完成")
+    print(f"平均MAE: {avg_mae:.4f}")
+    print(f"平均RMSE: {avg_rmse:.4f}")
+
+    return results
+
+
 def stratified_cross_validation_with_cache(
     cache, n_folds=4, test_ratio=0.3, feature_dim=None, lstm_units=128, 
     dropout_rate=0.3, learning_rate=0.001, epochs=100, batch_size=32, 
@@ -755,23 +898,8 @@ def stratified_cross_validation_with_cache(
             valid_images = embryo_to_images.get(embryo_id, [])
 
             if len(valid_images) > 0:
-                # 获取质量标签
-                if 'EmbryoQuality' in embryo_row:
-                    quality = 1 if embryo_row['EmbryoQuality'] == "good" else 0
-                elif 'Quality' in embryo_row:
-                    quality_val = embryo_row['Quality']
-                    if isinstance(quality_val, str):
-                        # 🔥 只处理good和poor，跳过fair胚胎
-                        quality_map = {'good': 1, 'high': 1, 'excellent': 1,
-                                     'poor': 0, 'bad': 0, 'low': 0}
-                        # fair胚胎不在映射中，会被自动跳过
-                        quality = quality_map.get(quality_val.lower(), 0)
-                    else:
-                        quality = int(quality_val)
-                else:
-                    # 根据BS分数推断质量
-                    bs_score = score_data[embryo_id]['bs_score'] if isinstance(score_data[embryo_id], dict) else score_data[embryo_id]
-                    quality = 1 if bs_score <= 4 else 0
+                # 🔧 直接使用score_dict中的quality标签（无需推断）
+                quality = score_data[embryo_id]['quality']
                 
                 # 获取年龄
                 age = embryo_row.get('Age', 30.0)
@@ -806,7 +934,7 @@ def stratified_cross_validation_with_cache(
                 return embryo_metadata.get(embryo_id)
             return None
         
-        # 提取特征
+        # 提取特征 - 使用传统单张图片处理
         print(f"🔄 开始特征提取...")
         features_dict = cache.get_or_compute_features(
             image_paths=image_paths,
@@ -997,3 +1125,4 @@ def stratified_cross_validation_with_cache(
         import traceback
         traceback.print_exc()
         raise
+

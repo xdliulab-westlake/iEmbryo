@@ -11,6 +11,7 @@ import numpy as np
 import tensorflow as tf
 import cv2
 from tqdm import tqdm
+import pandas as pd
 
 from .preprocessing.bilstm_image_utils import preprocess_embryo_image
 
@@ -367,3 +368,43 @@ class BiLSTMFeatureCache:
                     features.append(zero_feature)
                     
         return np.array(features) if features else np.array([])
+
+    def process_multi_focal_data(self, embryo_df, use_cache=True, training=False, use_augmentation=False):
+        """
+        处理多焦距深度数据 - 简单平均融合
+        """
+        if self.multi_extractor is None:
+            raise ValueError("请先调用 set_extractor() 设置特征提取器")
+
+        print(f"🔄 处理多焦距深度数据: {len(embryo_df)} 张图像")
+
+        # 获取所有图像的特征
+        all_image_paths = embryo_df['FullPath'].tolist()
+        cached_features = self.get_or_compute_features(
+            all_image_paths,
+            use_cache=use_cache,
+            training=training,
+            use_augmentation=use_augmentation
+        )
+
+        # 按时间点分组并融合
+        time_groups = embryo_df.groupby('TargetHour')
+        sequence_features = []
+
+        for target_hour, time_df in sorted(time_groups, key=lambda x: x[0]):
+            focal_features = []
+
+            for _, row in time_df.iterrows():
+                path = row['FullPath']
+                if path in cached_features:
+                    focal_features.append(cached_features[path])
+
+            if focal_features:
+                # 简单平均融合
+                if len(focal_features) > 1:
+                    fused_feature = np.mean(focal_features, axis=0)
+                else:
+                    fused_feature = focal_features[0]
+                sequence_features.append(fused_feature)
+
+        return np.array(sequence_features)

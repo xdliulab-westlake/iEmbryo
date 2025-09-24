@@ -5,240 +5,14 @@ import copy
 import os
 import glob
 
-def find_embryo_image(embryo_path, preferred_focal_depth="F0"):
-    """
-    在胚胎目录中查找图像文件
-    
-    Args:
-        embryo_path: 胚胎目录路径 (如: /liaozizhuo/image/D2023.09.04_S00918_I4425_P_10)
-        preferred_focal_depth: 首选的focal depth目录 (默认: F0)
-        
-    Returns:
-        str: 找到的第一个图像文件路径，如果没找到则返回None
-    """
-    
-    # 构建images目录路径
-    images_dir = os.path.join(embryo_path, "images")
-    
-    if not os.path.exists(images_dir):
-        print(f"❌ images目录不存在: {images_dir}")
-        return None
-    
-    # 首先尝试首选的focal depth
-    preferred_dir = os.path.join(images_dir, preferred_focal_depth)
-    if os.path.exists(preferred_dir):
-        # 在首选目录中查找图像文件
-        image_files = find_image_files_in_directory(preferred_dir)
-        if image_files:
-            print(f"✅ 在{preferred_focal_depth}目录找到图像: {os.path.basename(image_files[0])}")
-            return image_files[0]
-    
-    # 如果首选目录没有找到，搜索所有focal depth目录
-    focal_dirs = [d for d in os.listdir(images_dir) 
-                  if os.path.isdir(os.path.join(images_dir, d)) and d.startswith('F')]
-    
-    # 按照focal depth排序 (F0, F15, F30, ...)
-    def sort_focal_depth(dirname):
-        try:
-            if dirname == "F0":
-                return 0
-            return int(dirname.replace('F', '').replace('-', ''))
-        except:
-            return 999
-    
-    focal_dirs.sort(key=sort_focal_depth)
-    
-    for focal_dir in focal_dirs:
-        full_dir = os.path.join(images_dir, focal_dir)
-        image_files = find_image_files_in_directory(full_dir)
-        if image_files:
-            print(f"✅ 在{focal_dir}目录找到图像: {os.path.basename(image_files[0])}")
-            return image_files[0]
-    
-    print(f"❌ 在胚胎目录中未找到任何图像文件: {embryo_path}")
-    return None
-
-
-def find_image_files_in_directory(directory):
-    """
-    在指定目录中查找所有图像文件
-    
-    Args:
-        directory: 目录路径
-        
-    Returns:
-        list: 图像文件路径列表
-    """
-    if not os.path.exists(directory):
-        return []
-    
-    image_files = []
-    
-    # 常见图像扩展名
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
-    
-    # 搜索有扩展名的图像文件
-    for ext in image_extensions:
-        pattern = os.path.join(directory, ext)
-        image_files.extend(glob.glob(pattern, recursive=False))
-        # 也搜索大写扩展名
-        pattern_upper = os.path.join(directory, ext.upper())
-        image_files.extend(glob.glob(pattern_upper, recursive=False))
-    
-    if image_files:
-        return sorted(image_files)
-    
-    # 如果没有找到有扩展名的文件，检查所有文件
-    try:
-        all_files = [os.path.join(directory, f) for f in os.listdir(directory)
-                     if os.path.isfile(os.path.join(directory, f))]
-        
-        # 尝试通过文件头检测图像文件
-        for file_path in all_files:
-            if is_image_file(file_path):
-                image_files.append(file_path)
-        
-        return sorted(image_files)
-    except:
-        return []
-
-
-def is_image_file(file_path):
-    """
-    通过文件头检测是否为图像文件
-    
-    Args:
-        file_path: 文件路径
-        
-    Returns:
-        bool: 是否为图像文件
-    """
-    try:
-        with open(file_path, 'rb') as f:
-            header = f.read(16)
-        
-        # 检测常见图像格式的文件头
-        image_signatures = [
-            b'\xff\xd8\xff',  # JPEG
-            b'\x89PNG\r\n\x1a\n',  # PNG
-            b'GIF87a',  # GIF87a
-            b'GIF89a',  # GIF89a
-            b'BM',  # BMP
-            b'II*\x00',  # TIFF little-endian
-            b'MM\x00*',  # TIFF big-endian
-        ]
-        
-        for sig in image_signatures:
-            if header.startswith(sig):
-                return True
-        
-        # 检测WebP
-        if header.startswith(b'RIFF') and b'WEBP' in header:
-            return True
-        
-        return False
-    except:
-        return False
-
-
-def read_image_with_format_detection(file_path):
-    """
-    读取图像文件，自动检测格式（支持无扩展名文件）
-    
-    Args:
-        file_path: 图像文件路径
-        
-    Returns:
-        numpy.ndarray: 图像数组，BGR格式
-    """
-    # 首先尝试直接读取
-    img = cv2.imread(file_path)
-    if img is not None:
-        return img
-    
-    # 如果失败，检测文件格式并尝试其他方法
-    try:
-        with open(file_path, 'rb') as f:
-            header = f.read(16)
-        
-        # 根据文件头确定格式
-        detected_format = None
-        if header.startswith(b'\xff\xd8\xff'):
-            detected_format = 'JPEG'
-            extensions_to_try = ['.jpg', '.jpeg']
-        elif header.startswith(b'\x89PNG\r\n\x1a\n'):
-            detected_format = 'PNG'
-            extensions_to_try = ['.png']
-        elif header.startswith(b'II*\x00') or header.startswith(b'MM\x00*'):
-            detected_format = 'TIFF'
-            extensions_to_try = ['.tiff', '.tif']
-        elif header.startswith(b'BM'):
-            detected_format = 'BMP'
-            extensions_to_try = ['.bmp']
-        elif header.startswith(b'RIFF') and b'WEBP' in header:
-            detected_format = 'WEBP'
-            extensions_to_try = ['.webp']
-        else:
-            # 默认尝试常见格式
-            extensions_to_try = ['.jpg', '.jpeg', '.png', '.tiff', '.bmp']
-        
-        print(f"🔍 检测到图像格式: {detected_format or 'Unknown'}")
-        
-        # 尝试通过添加扩展名来读取
-        import tempfile
-        import shutil
-        
-        for ext in extensions_to_try:
-            try:
-                # 创建临时文件
-                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp_file:
-                    temp_path = temp_file.name
-                
-                # 复制原文件到临时文件
-                shutil.copy2(file_path, temp_path)
-                
-                # 尝试读取临时文件
-                img = cv2.imread(temp_path)
-                
-                # 清理临时文件
-                try:
-                    os.unlink(temp_path)
-                except:
-                    pass
-                
-                if img is not None:
-                    print(f"✅ 通过格式 {ext} 成功读取图像")
-                    return img
-                    
-            except Exception as e:
-                print(f"⚠️ 尝试格式 {ext} 失败: {e}")
-                continue
-        
-        # 如果所有方法都失败，尝试使用PIL
-        try:
-            from PIL import Image
-            import numpy as np
-            
-            pil_img = Image.open(file_path)
-            # 转换为RGB格式
-            if pil_img.mode != 'RGB':
-                pil_img = pil_img.convert('RGB')
-            
-            # 转换为numpy数组并改为BGR格式 (OpenCV使用BGR)
-            img_array = np.array(pil_img)
-            img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-            
-            print("✅ 通过PIL成功读取图像")
-            return img
-            
-        except Exception as e:
-            print(f"⚠️ PIL读取也失败: {e}")
-        
-        return None
-        
-    except Exception as e:
-        print(f"❌ 图像格式检测失败: {e}")
-        return None
+# 已删除冗余的多焦距深度处理函数:
+# - find_embryo_image()
+# - find_image_files_in_directory()
+# - is_image_file()
+# - read_image_with_format_detection()
+#
+# 这些函数在当前时间序列图像处理流程中不会被使用，
+# 因为图像路径直接从CSV文件的FullPath列获取。
 
 def crop_center_square(frame):
     """
@@ -374,58 +148,51 @@ def crop_petri_dish(frame):
         # Return original frame if no circle detected
         return frame
 
-def preprocess_embryo_image(image, img_size=224, apply_petri_crop=True, apply_center_crop=True):
+def preprocess_embryo_image(image_path, img_size=224, apply_petri_crop=True, apply_center_crop=True):
     """
-    Complete preprocessing pipeline for embryo images
-    
+    简化的胚胎图像预处理管道 - 直接从文件路径加载
+
     Args:
-        image: Input image (numpy array or path)
-        img_size: Target image size
-        apply_petri_crop: Whether to apply Petri dish detection and cropping
-        apply_center_crop: Whether to apply center square cropping
-    
+        image_path: 图像文件路径 (str)
+        img_size: 目标图像尺寸
+        apply_petri_crop: 是否应用培养皿检测和裁剪
+        apply_center_crop: 是否应用中心方形裁剪
+
     Returns:
-        Preprocessed image ready for model input
+        预处理后的图像，准备用于模型输入
     """
-    # Load image if path is provided
-    if isinstance(image, str):
-        # 检查路径是否存在
-        if not os.path.exists(image):
-            raise FileNotFoundError(f"路径不存在: {image}")
-        
-        # 检查是目录还是文件
-        if os.path.isdir(image):
-            # 如果是目录，尝试找到胚胎图像文件
-            print(f"🔍 检测到胚胎目录，搜索图像文件: {os.path.basename(image)}")
-            actual_image_path = find_embryo_image(image, preferred_focal_depth="F0")
-            if actual_image_path is None:
-                raise ValueError(f"在胚胎目录中未找到图像文件: {image}")
-            image = actual_image_path
-        
-        # 尝试读取图像 (支持无扩展名文件)
-        loaded_image = read_image_with_format_detection(image)
-        if loaded_image is None:
-            raise ValueError(f"无法读取图像文件: {image}。请检查文件是否损坏或格式是否支持。")
-        
-        image = cv2.cvtColor(loaded_image, cv2.COLOR_BGR2RGB)
-    
-    # Apply Petri dish cropping if enabled
+    # 直接加载图像文件
+    if not isinstance(image_path, str):
+        raise ValueError(f"预期图像路径为字符串，获得: {type(image_path)}")
+
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"图像文件不存在: {image_path}")
+
+    # 使用标准OpenCV加载图像
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"无法读取图像文件: {image_path}")
+
+    # 转换为RGB格式
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # 应用培养皿裁剪（如果启用）
     if apply_petri_crop:
         image = crop_petri_dish(image)
-    
-    # Apply center cropping if enabled
+
+    # 应用中心方形裁剪（如果启用）
     if apply_center_crop:
         image = crop_center_square(image)
-    
-    # Resize to target size
+
+    # 缩放到目标尺寸
     image = cv2.resize(image, (img_size, img_size))
-    
-    # Ensure RGB format (3 channels)
+
+    # 确保RGB格式（3通道）
     if len(image.shape) == 2:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
     elif len(image.shape) == 3 and image.shape[2] == 1:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-    
+
     return image
 
 def batch_process_images(image_paths, img_size=224, apply_petri_crop=True, apply_center_crop=True):

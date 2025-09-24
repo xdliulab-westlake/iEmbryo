@@ -17,13 +17,59 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 # 匹配backup_final.py策略的数据加载函数
 # ======================================================================
 
+def load_and_prepare_multi_focal_data(config, multi_focal_csv_path="/liaozizhuo/selected_image_paths.csv"):
+    """
+    加载和准备多焦距深度胚胎数据
+
+    Args:
+        config: BiLSTMConfig配置对象
+        multi_focal_csv_path: 多焦距数据CSV路径
+
+    Returns:
+        tuple: (root_dir, score_dict, multi_focal_df)
+    """
+    print("=== 多焦距深度数据加载和准备 ===")
+
+    # 检查多焦距数据文件
+    if not os.path.exists(multi_focal_csv_path):
+        raise FileNotFoundError(f"多焦距数据文件不存在: {multi_focal_csv_path}")
+
+    # 加载多焦距数据
+    import pandas as pd
+    multi_focal_df = pd.read_csv(multi_focal_csv_path)
+    print(f"✅ 成功加载多焦距数据: {len(multi_focal_df)} 张图像")
+
+    # 构建胚胎ID映射
+    multi_focal_df['EmbryoID'] = multi_focal_df['PatientID'] + '_' + multi_focal_df['EmbryoNumber'].astype(str)
+
+    # 获取基础配置
+    root_dir = "/liaozizhuo/image"
+    maindb_csv_path = config.get('maindb_csv_path') or "/liaozizhuo/scripts/MainDB.csv"
+    filtered_csv_path = config.get('filtered_csv_path') or "/liaozizhuo/scripts/filtered_clean_embryos.csv"
+    slide_info_path = config.get('slide_info_path') or "/liaozizhuo/scripts/SlidePatientBirthDates.csv"
+
+    # 加载年龄映射
+    age_map = {}
+    if os.path.exists(slide_info_path):
+        print(f"📊 加载年龄信息: {slide_info_path}")
+        slide_df = pd.read_csv(slide_info_path)
+        age_map = dict(zip(slide_df['PatientID'], slide_df['Age']))
+        print(f"✅ 成功加载 {len(age_map)} 个患者的年龄信息")
+
+    # 加载评分信息
+    print("📋 加载评分信息...")
+    score_dict = load_score_dict_backup_style(maindb_csv_path, filtered_csv_path, age_map)
+
+    return root_dir, score_dict, multi_focal_df
+
+
 def load_and_prepare_embryo_data(config):
     """
     加载和准备胚胎数据，完全匹配原backup_final.py的策略
-    
+
     Args:
         config: BiLSTMConfig配置对象
-        
+
     Returns:
         tuple: (root_dir, score_dict, valid_embryo_df)
     """
@@ -184,7 +230,7 @@ def load_score_dict_backup_style(maindb_csv_path, filtered_csv_path, age_map=Non
     df["TE_score"] = df["TE"].map(te_map)
     df["BS_prime"] = df["ICM_score"] + df["TE_score"]
 
-    # 🔧 创建包含年龄信息的评分字典
+    # 🔧 创建包含年龄信息的评分字典（包含所有质量类型）
     score_dict = {}
     for _, row in df.iterrows():
         embryo_id = str(row[embryo_id_col])
@@ -197,10 +243,12 @@ def load_score_dict_backup_style(maindb_csv_path, filtered_csv_path, age_map=Non
             if patient_id_prefix and patient_id_prefix in age_map:
                 age = float(age_map[patient_id_prefix])
 
+        quality = row.get("Quality")
         score_dict[embryo_id] = {
             "bs_score": bs_score,
             "age": age,
-            "quality": 1 if row.get("Quality") == "good" else 0  # good=1, fair=0
+            "quality": 1 if quality == "good" else 0,  # good=1, fair/other=0
+            "original_quality": quality  # 保留原始质量标签用于后续过滤
         }
 
     print(f"✅ MainDB评分加载完成: {len(score_dict)} 个胚胎")
@@ -226,7 +274,8 @@ def load_score_dict_backup_style(maindb_csv_path, filtered_csv_path, age_map=Non
                     score_dict[emb_id] = {
                         "bs_score": 6.0 + random.uniform(0, 0.5),
                         "age": age,
-                        "quality": 0  # poor=0
+                        "quality": 0,  # poor=0
+                        "original_quality": "poor"  # 保留原始质量标签
                     }
                     poor_count += 1
 
@@ -234,6 +283,32 @@ def load_score_dict_backup_style(maindb_csv_path, filtered_csv_path, age_map=Non
                 print(f"   补充了 {poor_count} 个poor胚胎的评分")
 
     print(f"✅ 总计加载了 {len(score_dict)} 个胚胎的评分信息")
+
+    # 🔧 最后一步：删除fair胚胎，只保留good和poor
+    original_count = len(score_dict)
+    fair_embryos = [eid for eid, data in score_dict.items()
+                   if data.get("original_quality") == "fair"]
+
+    for embryo_id in fair_embryos:
+        del score_dict[embryo_id]
+
+    final_count = len(score_dict)
+    fair_removed_count = original_count - final_count
+
+    if fair_removed_count > 0:
+        print(f"🗑️  已删除 {fair_removed_count} 个fair胚胎")
+
+    # 统计最终质量分布
+    final_quality_counts = {'good': 0, 'poor': 0}
+    for data in score_dict.values():
+        if data.get("original_quality") == "good":
+            final_quality_counts['good'] += 1
+        elif data.get("original_quality") == "poor":
+            final_quality_counts['poor'] += 1
+
+    print(f"📊 最终数据分布: good={final_quality_counts['good']}, poor={final_quality_counts['poor']}")
+    print(f"✅ 最终加载了 {final_count} 个胚胎用于训练 (已排除fair胚胎)")
+
     return score_dict
 
 def ensure_float32(*arrays):

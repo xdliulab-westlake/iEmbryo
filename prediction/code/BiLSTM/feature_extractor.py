@@ -312,6 +312,8 @@ class MultiModelFeatureExtractor:
         else:
             return np.concatenate(features_list, axis=1)
 
+
+
     
     def get_model_info(self):
         """获取模型信息"""

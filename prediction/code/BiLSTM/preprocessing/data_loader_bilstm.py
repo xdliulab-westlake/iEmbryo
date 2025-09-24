@@ -67,42 +67,31 @@ def build_feature_extractor(img_size: int, model_name: str = 'efficientnet'):
     
     return keras.Model(inputs, outputs, name=f"{model_name}_feature_extractor")
 
-def preprocess_image_bilstm_universal(image, img_size=224, is_training=True):
+def preprocess_image_bilstm_universal(image_path, img_size=224, is_training=True):
     """
-    BiLSTM胚胎图像预处理 + 统一ImageNet标准化
+    BiLSTM胚胎图像预处理 + 统一ImageNet标准化 (简化版)
 
     Args:
-        image: 输入图像 (tensor或numpy array)
+        image_path: 图像文件路径 (str)
         img_size: 目标图像尺寸
         is_training: 是否为训练模式（影响数据增强）
 
     Returns:
         预处理后的图像 (统一ImageNet标准化)
     """
-    # 转换为numpy array以便STORK处理
-    if isinstance(image, tf.Tensor):
-        image = image.numpy()
-    
-    # 确保图像在[0, 255]范围内
-    if image.dtype != np.uint8:
-        if np.max(image) <= 1.0:
-            image = (image * 255.0).astype(np.uint8)
-        else:
-            image = image.astype(np.uint8)
-    
-    # 使用BiLSTM预处理管道
+    # 使用简化的BiLSTM预处理管道
     image = preprocess_embryo_image(
-        image, 
-        img_size=img_size, 
+        image_path,
+        img_size=img_size,
         apply_petri_crop=True,  # 启用培养皿检测
         apply_center_crop=True  # 启用中心裁剪
     )
-    
+
     # 转换为float32以便后续处理
     image = image.astype(np.float32)
-    
+
     if is_training:
-        # 训练时的轻量级数据增强 (在Hough预处理基础上)
+        # 训练时的轻量级数据增强 (在STORK预处理基础上)
         if np.random.random() > 0.5:
             image = tf.image.random_flip_left_right(image)
         if np.random.random() > 0.7:
@@ -111,7 +100,7 @@ def preprocess_image_bilstm_universal(image, img_size=224, is_training=True):
             image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
         if np.random.random() > 0.8:
             image = tf.image.random_saturation(image, lower=0.9, upper=1.1)
-    
+
     # 🔥 不在这里应用ImageNet标准化，留给各模型特定的预处理函数
     # 确保图像在 [0, 255] 范围内，以uint8格式返回
     image = np.clip(image, 0, 255).astype(np.uint8)
@@ -121,7 +110,7 @@ def preprocess_image_bilstm_universal(image, img_size=224, is_training=True):
 def load_and_preprocess_images_for_bilstm(image_paths, img_size=224, is_training=True,
                                          batch_size=32):
     """
-    为BiLSTM加载和预处理批量图像
+    为BiLSTM加载和预处理批量图像 (简化版)
 
     Args:
         image_paths: 图像路径列表
@@ -133,30 +122,25 @@ def load_and_preprocess_images_for_bilstm(image_paths, img_size=224, is_training
         预处理后的图像数据集 (统一ImageNet标准化)
     """
     def load_and_preprocess_fn(path):
-        # 读取图像
-        img = tf.io.read_file(path)
-        img = tf.image.decode_image(img, channels=3, expand_animations=False)
-        img = tf.cast(img, tf.uint8)
-        
-        # 应用BiLSTM预处理
+        # 应用简化的BiLSTM预处理
         img = tf.py_function(
-            lambda x: preprocess_image_bilstm_universal(x, img_size, is_training),
-            [img],
-            tf.float32
+            lambda x: preprocess_image_bilstm_universal(x.numpy().decode('utf-8'), img_size, is_training),
+            [path],
+            tf.uint8
         )
         img.set_shape([img_size, img_size, 3])
-        
+
         return img
-    
+
     # 构建数据集
     dataset = tf.data.Dataset.from_tensor_slices(image_paths)
     dataset = dataset.map(load_and_preprocess_fn, num_parallel_calls=tf.data.AUTOTUNE)
-    
+
     if batch_size:
         dataset = dataset.batch(batch_size)
-    
+
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    
+
     return dataset
 
 def get_embryo_images_by_class(data_root, valid_embryo_ids=None):

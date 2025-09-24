@@ -18,7 +18,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from BiLSTM import (
-    configure_gpu, 
+    configure_gpu,
     check_required_paths,
     BiLSTMFeatureCache,
     create_model,
@@ -235,33 +235,63 @@ def run_training(config):
         extractor = MultiModelFeatureExtractor(model_name=model_name)
         cache.set_extractor(extractor)
         
-        # 加载数据（使用backup策略）
-        print("\n--- 加载数据（匹配backup策略）---")
-        from BiLSTM.utils import load_and_prepare_embryo_data
-        root_dir, score_dict, valid_embryo_df = load_and_prepare_embryo_data(config)
-        
-        # 执行交叉验证训练
-        print("\n--- 开始交叉验证训练 ---")
-        cv_results = stratified_cross_validation_with_cache(
-            cache=cache,
-            n_folds=config.get("n_folds"),
-            test_ratio=config.get("test_ratio"),
-            feature_dim=config.get("feature_dim"),
-            lstm_units=config.get("lstm_units"),
-            dropout_rate=config.get("dropout_rate"),
-            learning_rate=config.get("learning_rate"),
-            epochs=config.get("epochs"),
-            batch_size=config.get("batch_size"),
-            patience=config.get("patience"),
-            use_cache=config.get("use_cache"),
-            use_augmentation=config.get("use_augmentation"),
-            verbose=config.get("verbose"),
-            random_state=config.get("random_state"),
-            # 使用新的数据加载策略参数
-            root_dir=root_dir,
-            score_dict=score_dict,
-            valid_embryo_df=valid_embryo_df
-        )
+        # 检查是否使用多焦距数据模式
+        use_multi_focal = config.get("use_multi_focal", False)
+        multi_focal_csv = config.get("multi_focal_csv", "/liaozizhuo/selected_image_paths.csv")
+
+        if use_multi_focal and os.path.exists(multi_focal_csv):
+            print("\n--- 加载多焦距深度数据 ---")
+            from BiLSTM.utils import load_and_prepare_multi_focal_data
+            root_dir, score_dict, multi_focal_df = load_and_prepare_multi_focal_data(config, multi_focal_csv)
+
+            print("\n--- 开始多焦距深度交叉验证训练 ---")
+            from BiLSTM.cross_validation import stratified_cross_validation_multi_focal
+            cv_results = stratified_cross_validation_multi_focal(
+                cache=cache,
+                multi_focal_df=multi_focal_df,
+                score_dict=score_dict,
+                n_folds=config.get("n_folds"),
+                test_ratio=config.get("test_ratio"),
+                feature_dim=config.get("feature_dim"),
+                lstm_units=config.get("lstm_units"),
+                dropout_rate=config.get("dropout_rate"),
+                learning_rate=config.get("learning_rate"),
+                epochs=config.get("epochs"),
+                batch_size=config.get("batch_size"),
+                patience=config.get("patience"),
+                use_cache=config.get("use_cache"),
+                use_augmentation=config.get("use_augmentation"),
+                verbose=config.get("verbose"),
+                random_state=config.get("random_state")
+            )
+        else:
+            # 加载数据（使用backup策略）
+            print("\n--- 加载数据（匹配backup策略）---")
+            from BiLSTM.utils import load_and_prepare_embryo_data
+            root_dir, score_dict, valid_embryo_df = load_and_prepare_embryo_data(config)
+
+            # 执行交叉验证训练
+            print("\n--- 开始交叉验证训练 ---")
+            cv_results = stratified_cross_validation_with_cache(
+                cache=cache,
+                n_folds=config.get("n_folds"),
+                test_ratio=config.get("test_ratio"),
+                feature_dim=config.get("feature_dim"),
+                lstm_units=config.get("lstm_units"),
+                dropout_rate=config.get("dropout_rate"),
+                learning_rate=config.get("learning_rate"),
+                epochs=config.get("epochs"),
+                batch_size=config.get("batch_size"),
+                patience=config.get("patience"),
+                use_cache=config.get("use_cache"),
+                use_augmentation=config.get("use_augmentation"),
+                verbose=config.get("verbose"),
+                random_state=config.get("random_state"),
+                # 使用新的数据加载策略参数
+                root_dir=root_dir,
+                score_dict=score_dict,
+                valid_embryo_df=valid_embryo_df
+            )
         
         # 创建可视化结果
         print("\n--- 生成可视化结果 ---")
