@@ -355,10 +355,66 @@ class STORKTrainer:
             # 保存最佳模型
             if val_acc > self.best_val_acc:
                 self.best_val_acc = val_acc
-                self.save_checkpoint('best_model.pth')
 
-            # 定期保存
-            if epoch % 50 == 0:
+                # 使用ModelManager保存最佳模型（如果可用）
+                if self.model_manager:
+                    metrics = {
+                        'val_accuracy': val_acc / 100.0,  # 转换为0-1范围
+                        'val_loss': val_loss,
+                        'train_accuracy': train_acc / 100.0,  # 转换为0-1范围
+                        'train_loss': train_loss,
+                        'epoch': self.current_epoch
+                    }
+
+                    # 获取要保存的模型
+                    model_to_save = self.model
+                    if self.use_deepspeed:
+                        model_to_save = self.model_engine.module
+                    elif hasattr(self.model, 'module'):  # DataParallel情况
+                        model_to_save = self.model.module
+
+                    is_best = self.model_manager.save_best_model(
+                        model=model_to_save,
+                        metrics=metrics,
+                        metric_name='val_accuracy',
+                        mode='max',
+                        config=self.config
+                    )
+
+                    if is_best:
+                        print(f"🏆 新的最佳模型已保存! 验证准确率: {val_acc:.2f}%")
+                else:
+                    # 后备保存方式
+                    self.save_checkpoint('best_model.pth')
+                    print(f"💾 最佳模型已保存到checkpoints/best_model.pth (准确率: {val_acc:.2f}%)")
+
+            # 使用ModelManager定期保存检查点
+            if self.model_manager and (epoch % self.config.get('logging', {}).get('save_model_every_n_epochs', 50) == 0):
+                metrics = {
+                    'val_accuracy': val_acc / 100.0,
+                    'val_loss': val_loss,
+                    'train_accuracy': train_acc / 100.0,
+                    'train_loss': train_loss,
+                    'epoch': self.current_epoch
+                }
+
+                # 获取要保存的模型
+                model_to_save = self.model
+                if self.use_deepspeed:
+                    model_to_save = self.model_engine.module
+                elif hasattr(self.model, 'module'):
+                    model_to_save = self.model.module
+
+                checkpoint_path = self.model_manager.save_checkpoint(
+                    model=model_to_save,
+                    optimizer=self.optimizer if not self.use_deepspeed else None,
+                    epoch=self.current_epoch,
+                    metrics=metrics,
+                    config=self.config,
+                    scheduler=self.lr_scheduler if hasattr(self, 'lr_scheduler') else None
+                )
+            elif epoch % 50 == 0:
+                # 后备保存方式
                 self.save_checkpoint(f'checkpoint_epoch_{epoch}.pth')
 
             epoch_time = time.time() - start_time

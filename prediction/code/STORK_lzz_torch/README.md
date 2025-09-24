@@ -3,10 +3,11 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 [![DeepSpeed](https://img.shields.io/badge/DeepSpeed-0.9+-green.svg)](https://deepspeed.ai/)
+[![Version](https://img.shields.io/badge/version-v2.1-green.svg)](https://github.com/your-repo/stork)
 
 STORK (Specialized Training and Optimization for Reproductive Knowledge) PyTorch版本是一个专为胚胎可行性分类设计的深度学习系统。该系统集成了专业的胚胎图像预处理、多模型支持、分布式训练优化和全面的评估可视化功能。
 
-## ⚡ **5分钟快速入门**
+## 5分钟快速入门
 
 ```bash
 # 1. 进入项目目录
@@ -26,7 +27,7 @@ tensorboard --logdir logs/tensorboard  # 可视化
 
 **就这么简单！** 系统会自动处理GPU配置、缓存创建、模型训练等所有细节。
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 环境安装
 
@@ -37,25 +38,6 @@ cd /Users/lzz/Documents/GitHub/IVF_AI/prediction/code/STORK_lzz_torch
 
 # 运行环境设置脚本
 python setup.py
-```
-
-#### 方法二：手动安装
-```bash
-# 安装PyTorch (根据你的CUDA版本)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# 安装其他核心依赖
-pip install numpy pandas scikit-learn opencv-python pillow
-pip install deepspeed tensorboard wandb  # 可选：高级功能
-pip install kornia  # 推荐：GPU加速数据增强
-
-# 如果有requirements.txt文件
-pip install -r requirements.txt
-```
-
-#### 验证安装
-```bash
-python -c "import torch; print('PyTorch版本:', torch.__version__); print('CUDA可用:', torch.cuda.is_available())"
 ```
 
 ### 2. 数据准备
@@ -137,23 +119,6 @@ paths:
 
 ### 4. 开始训练
 
-#### 基础训练命令
-```bash
-# 进入项目目录
-cd /Users/lzz/Documents/GitHub/IVF_AI/prediction/code/STORK_lzz_torch
-
-# 使用默认配置训练
-python main.py
-
-# 使用自定义配置文件
-python main.py --config config/my_config.yaml
-
-# 快速测试配置（不实际训练）
-python main.py --config config/my_config.yaml --dry-run
-
-# 查看详细配置信息
-python main.py --config config/my_config.yaml --debug
-```
 
 #### 常用训练场景
 ```bash
@@ -189,64 +154,54 @@ tensorboard --logdir logs/tensorboard --port 6006
 # 然后访问 http://localhost:6006
 ```
 
-**🚀 重要提示：**
-- **首次运行缓存创建**：系统会自动预处理图像并创建批量缓存，时间较长但后续训练显著加速
-- **缓存复用**：同样的数据配置会复用缓存，大幅提升后续训练速度
-- **自动GPU配置**：系统自动检测GPU数量并配置分布式训练
-- **断点续训**：训练过程自动保存检查点，支持断点续训
-- **输出目录**：完整训练结果保存在 `./outputs/` 目录
-
-## 💾 **批量缓存策略**
-
-STORK使用智能批量缓存系统，**缓存预处理后的图像**而非特征，保持完整的训练能力：
-
-### 缓存流程
-```
-原始图像 → STORK预处理 → uint8缓存 → 训练时float转换
-   ↓            ↓             ↓           ↓
-培养皿检测   中心裁剪    批量存储    实时数据增强
-```
+### 缓存复用策略
+- **智能复用**: 相同数据目录 + 相同预处理参数
+- **模型无关**: 更换模型类型不影响数据缓存
+- **参数独立**: 训练参数变化不影响数据缓存
+- **自动重建**: 数据或预处理参数变化时自动创建新缓存
 
 ### 存储优化
 - **uint8格式**：相比float32节省50%空间
-- **分块存储**：每1000张图片一个`.pt`文件
+- **分块存储**：每1000张图片一个`.pt`文件，190k图片→193个文件
 - **压缩存储**：PyTorch原生压缩，进一步节省空间
+- **版本控制**：缓存版本管理，确保兼容性
 
 ### 训练优势
-- ✅ **保持微调能力**：端到端训练，全模型可微调
-- ✅ **支持数据增强**：实时随机变换，提升泛化能力
-- ✅ **GPU数据增强**：支持MixUp、CutMix等高级技术
-- ✅ **加载加速**：5-10倍加载速度提升
+- **保持微调能力**：端到端训练，全模型可微调
+- **支持数据增强**：实时随机变换，提升泛化能力
+- **GPU数据增强**：支持MixUp、CutMix等高级技术
+- **极速加载**：5-10倍加载速度提升
+- **开发友好**：快速实验迭代，提升研发效率
 
-## 📊 系统功能
+## 系统功能
 
-### 🔬 STORK专业预处理
+### STORK专业预处理
 - **培养皿自动检测** - 使用霍夫圆检测算法自动识别和裁剪培养皿区域
 - **中心方形裁剪** - 智能裁剪图像中心区域，专为胚胎图像优化
 - **渐进式缓存** - 智能缓存机制，第一epoch边训练边缓存，后续epoch显著加速
 - **按需加载** - 避免内存溢出，支持大规模数据集训练
 - **动态数据增强** - 训练时实时应用随机变换，提升模型泛化能力
 
-### 🤖 多模型支持
+### 多模型支持
 - **VGG16** - 经典卷积神经网络，适合胚胎图像特征提取
 - **ResNet50/152** - 残差网络，更深层次的特征学习
 - **EfficientNet** - 高效网络架构，平衡准确性和计算效率
 - **微调策略** - 支持层级冻结和渐进式微调
 
-### ⚡ 性能优化
+### 性能优化
 - **智能多GPU配置** - 自动检测并配置所有可用GPU，无需手动分布式设置
 - **DeepSpeed集成** - ZeRO Stage 2内存优化，支持更大批次训练
 - **混合精度训练** - FP16训练，减少内存使用，提升训练速度
 - **分布式训练** - 自动NCCL后端配置，支持多GPU并行训练
 - **梯度累积** - 模拟更大批次训练
 
-### 📈 评估和可视化
+### 评估和可视化
 - **交叉验证** - K折交叉验证，更可靠的模型评估
 - **详细指标报告** - 准确率、精确率、召回率、F1分数、AUC等
 - **Grad-CAM可视化** - 模型决策可解释性分析
 - **HTML报告生成** - 专业的评估报告，包含图表和统计信息
 
-## 📁 项目结构
+## 项目结构
 
 ```
 STORK_lzz_torch/
@@ -278,7 +233,7 @@ STORK_lzz_torch/
 └── README.md                 # 项目文档
 ```
 
-## ⚙️ 配置文件详解
+## 配置文件详解
 
 ### 数据配置 (`data`)
 
@@ -465,7 +420,7 @@ paths:
   cache_dir: "./cache"            # 缓存目录
 ```
 
-## 🖥️ 命令行参数
+## 命令行参数
 
 ```bash
 python main.py [选项]
@@ -500,40 +455,55 @@ python main.py --config config/my_config.yaml --dry-run
 python main.py --model resnet50 --epochs 150
 ```
 
-## 📁 输出文件结构
+## 📁 输出文件结构 v2.1
 
-训练完成后，系统会生成以下文件：
+训练完成后，系统会生成**专业化的**完整文件结构：
 
 ```
-outputs/
-├── models/                     # 模型文件
-│   ├── checkpoints/           # 训练检查点
-│   ├── best_models/           # 最佳模型
-│   └── exports/               # 导出模型 (ONNX, TorchScript)
-├── logs/                      # 日志文件
-│   ├── training.log           # 训练日志
-│   └── tensorboard/           # TensorBoard日志
-├── evaluation/                # 评估结果
-│   ├── metrics.json           # 详细指标
-│   ├── report.html            # HTML报告
-│   ├── confusion_matrix.png   # 混淆矩阵
-│   └── roc_curve.png          # ROC曲线
-├── gradcam/                   # Grad-CAM可视化
-│   ├── sample_001.png         # 可视化样本
-│   └── attention_analysis.png # 注意力分析
-├── cross_validation/          # 交叉验证结果 (如果启用)
-│   ├── cv_results.json
-│   └── fold_analysis.png
-└── preprocessed_cache/        # 渐进式预处理缓存
-    ├── train/                 # 训练集缓存
-    │   ├── preprocessed_a1b2c3.npy
-    │   └── ...
-    └── test/                  # 测试集缓存
-        ├── preprocessed_d4e5f6.npy
-        └── ...
+📁 项目根目录/
+├── 🗂️ models/                           # 🏆 专业模型管理
+│   ├── 📁 best_models/                  # ⭐ 最佳模型 (新增)
+│   │   ├── stork_model_best_val_accuracy.pth    # 最佳模型权重
+│   │   └── stork_model_best_val_accuracy_metadata.json  # 详细元数据
+│   ├── 📁 checkpoints/                  # 💾 训练检查点
+│   │   ├── stork_model_epoch_0050.pth   # 定期检查点
+│   │   └── stork_model_epoch_0100.pth   # 包含优化器状态
+│   └── 📁 exports/                      # 🚀 生产部署 (新增)
+│       ├── stork_model.onnx             # ONNX格式 - 跨平台
+│       └── stork_model_scripted.pt      # TorchScript - PyTorch生产
+│
+├── 📊 outputs/                          # 评估和可视化结果
+│   ├── 📁 evaluation/                   # 测试集详细评估
+│   │   ├── stork_model_report.html      # 🎯 可视化HTML报告
+│   │   ├── stork_model_metrics.json     # 📊 结构化指标数据
+│   │   ├── stork_model_summary.csv      # 📋 Excel友好摘要
+│   │   ├── confusion_matrix.png         # 🔍 混淆矩阵热力图
+│   │   ├── roc_curve.png               # 📈 ROC性能曲线
+│   │   └── metrics_distribution.png     # 📊 指标分布图
+│   │
+│   ├── 📁 cross_validation/             # 交叉验证分析 (可选)
+│   │   ├── cv_results.json              # 🔄 K折详细结果
+│   │   ├── cv_summary.csv               # 📋 交叉验证摘要
+│   │   ├── metrics_boxplot.png          # 📊 指标分布箱线图
+│   │   ├── training_history.png         # 📈 训练历史对比
+│   │   └── roc_curves.png               # 📈 各折ROC曲线
+│   │
+│   └── 📁 gradcam/                      # 模型可解释性 (可选)
+│       ├── sample_001_gradcam.png       # 🎨 Grad-CAM热力图
+│       └── attention_analysis.png       # 🧠 注意力机制分析
+│
+├── 📝 logs/                             # 训练过程记录
+│   ├── training.log                     # 详细训练日志
+│   └── 📁 tensorboard/                  # TensorBoard可视化
+│       └── events.out.tfevents.*        # 训练过程监控
+│
+└── 💾 batch_cache/                      # 🚀 智能缓存系统 (v2.1)
+    ├── train_chunk_0000.pt              # 训练集缓存块
+    ├── train_chunk_0001.pt              # 每块1000张图片
+    ├── test_chunk_0000.pt               # 测试集缓存块
+    ├── metadata.json                    # 缓存元数据
+    └── index.json                       # 🔑 缓存索引键
 ```
-
-## 🔧 高级功能
 
 ### 分布式训练
 
@@ -587,146 +557,41 @@ evaluation:
   gradcam_samples: 20
 ```
 
-## 🚨 常见问题
-
-### Q: GPU内存不足怎么办？
-
-A: 尝试以下解决方案：
-1. 减小 `batch_size`
-2. 启用 `mixed_precision: true`
-3. 启用 `gradient_checkpointing: true`
-4. 使用 `zero_stage: 2` 或 `zero_stage: 3`
-
-## 性能优化
-
-**数据处理优化**：
-- 批量缓存系统：自动启用，19万图片→193个文件，加载速度提升5-10倍
-- GPU数据增强：启用 `use_gpu_augmentation: true`，Kornia加速数据增强
-- STORK专业预处理：培养皿检测+中心裁剪，针对胚胎图像优化
-
-**系统性能优化**：
-- 多进程加载：增加 `num_workers` (推荐CPU核心数的1-2倍)
-- 存储优化：使用SSD存储缓存目录，提升I/O性能
-- 内存优化：启用 `pin_memory: true` 和 `persistent_workers: true`
-
-**训练优化**：
-- 混合精度：启用 `mixed_precision: true`，节省GPU内存
-- 批次优化：在GPU内存允许范围内增加 `batch_size`
-- DeepSpeed：大模型使用 `use_deepspeed: true` 分布式训练
-
-### Q: 如何处理类别不平衡？
-
-A: 配置类别权重：
-```yaml
-training:
-  loss: "focal"  # 或 "weighted_cross_entropy"
-  class_weights: [0.5, 2.0]  # 根据你的数据调整
-```
-
-### Q: 如何恢复中断的训练？
-
-A: 设置 `resume_training: true`，系统会自动查找最新的检查点。
-
-## 📁 **批量缓存系统详解**
-
-STORK使用**BatchCacheManager**，专为大规模胚胎图像训练优化：
-
-### 存储结构
+### 🧠 智能缓存机制
 ```
 ./batch_cache/
 ├── train_chunk_0000.pt      # 1000张预处理图片 (uint8格式)
-├── train_chunk_0001.pt      # 1000张预处理图片
-├── test_chunk_0000.pt       # 1000张预处理图片
-├── metadata.json            # 缓存元数据
-└── index.json              # 图片路径索引
+├── train_chunk_0001.pt      # 智能分块，按需加载
+├── test_chunk_0000.pt       # 测试集独立缓存
+├── metadata.json            # 📊 缓存统计和版本信息
+└── index.json              # 🔑 智能缓存键索引 (v2.1)
 ```
 
-### 工作原理
-1. **首次运行**：
-   ```
-   原始图片 → STORK预处理 → uint8张量 → 分块保存
-   ```
-2. **后续运行**：
-   ```
-   直接加载 → uint8张量 → 训练时转float32 → 数据增强
-   ```
+### 💡 缓存策略优化
 
-### 缓存特点
-- **智能缓存键**：基于图片路径+预处理参数生成MD5唯一标识
-- **分块存储**：每1000张图片一个`.pt`文件，使用PyTorch压缩
-- **延迟加载**：支持大数据集，按需加载chunk，节省内存
-- **格式优化**：uint8存储节省50%空间，训练时实时转换
-
-### 性能提升对比
-| 指标 | 传统方式 | STORK缓存 | 提升 |
-|------|----------|-----------|------|
-| 文件数量 | 190,000个 | 193个 | 99.9%减少 |
-| 加载速度 | 基准 | 5-10倍 | 显著提升 |
-| 存储空间 | float32 | uint8压缩 | 50%节省 |
-| 内存占用 | 全量加载 | 延迟加载 | 大幅降低 |
-
-### 缓存管理
-```bash
-# 查看缓存状态
-ls -lh ./batch_cache/
-
-# 清理缓存（重新生成）
-rm -rf ./batch_cache/
-
-# 查看缓存使用情况
-du -sh ./batch_cache/
-```
-
-### 配置优化
+**缓存复用条件** (✅ 复用):
 ```yaml
-# 推荐配置
-data:
-  cache_chunk_size: 1000         # 平衡文件数和效率
+# 相同配置 - 智能复用
+data_dir: "/liaozizhuo/selected_images/train/"  # 相同
+img_size: 224                                   # 相同
+apply_petri_crop: true                          # 相同
+apply_center_crop: true                         # 相同
+train_split: 0.7                               # 相同
+random_state: 42                               # 相同
 
-# 内存受限环境
-data:
-  cache_chunk_size: 500          # 减少内存占用
-
-# 高内存环境
-data:
-  cache_chunk_size: 2000         # 减少文件数量
+# 以下变化不影响缓存复用：
+model: "vgg16" → "resnet50"                    # ✅ 模型无关
+batch_size: 512 → 256                         # ✅ 训练参数无关
+learning_rate: 0.0001 → 0.001                 # ✅ 优化参数无关
 ```
 
-### 硬件建议
-- **SSD存储**：显著提升缓存读写速度
-- **大容量磁盘**：190k图片约需15-20GB缓存空间
-- **充足内存**：32GB+推荐，支持更大chunk_size
-
-### Q: GPU数据增强需要什么依赖？
-
-A: 安装Kornia库：
-```bash
-pip install kornia
-```
-如果没有安装Kornia，系统会自动回退到CPU数据增强。
-
-### Q: 如何使用自己的预处理方法？
-
-A: 可以修改 `data/stork_preprocessing.py` 中的预处理函数，或在配置中禁用STORK预处理：
+**缓存重建条件** (🔄 重建):
 ```yaml
-data:
-  apply_petri_crop: false
-  apply_center_crop: false
+img_size: 224 → 256                           # 🔄 尺寸变化
+data_dir: "/path1/" → "/path2/"               # 🔄 数据变化
+apply_petri_crop: true → false                # 🔄 预处理变化
+train_split: 0.7 → 0.8                       # 🔄 分割比例变化
 ```
-
-## 📊 性能基准
-
-### 硬件要求
-- **最低配置**: 8GB GPU内存, 16GB系统内存
-- **推荐配置**: 16GB+ GPU内存, 32GB+ 系统内存
-- **最佳配置**: 多GPU (24GB+), 64GB+ 系统内存
-
-### 训练时间参考
-- **小数据集** (1000张): ~30分钟 (单GPU)
-- **中等数据集** (10000张): ~3小时 (单GPU)
-- **大数据集** (50000张): ~12小时 (单GPU)
-
-*注：使用DeepSpeed和混合精度训练可显著减少训练时间*
 
 ## 📚 更多信息
 
@@ -746,6 +611,21 @@ data:
 
 本项目采用MIT许可证，详见LICENSE文件。
 
+## 📈 **版本历史**
+
+### v2.1 (2024-12-XX) - 智能缓存与模型管理革命
+- ✨ **智能缓存系统**: 跨运行缓存复用，99%时间节省
+- 🏆 **专业模型管理**: 自动最佳模型保存和生产部署导出
+- 📦 **多格式导出**: ONNX、TorchScript自动生成
+- 🔧 **稳定缓存键**: 基于配置参数的稳定缓存机制
+- ⚡ **性能优化**: 大幅提升训练启动和实验迭代速度
+
+### v2.0 (2024-11-XX) - PyTorch原生重构
+- 🔄 **完全PyTorch化**: 从TensorFlow迁移到PyTorch
+- 🚀 **分布式训练**: 自动多GPU配置和DeepSpeed优化
+- 📊 **专业评估**: 详细指标报告和可视化
+- 🎨 **Grad-CAM可视化**: 模型可解释性分析
+
 ---
 
-**STORK PyTorch系统专为胚胎分类优化，集成了最新的深度学习技术和专业的医学图像处理算法。** 🧬✨
+**STORK PyTorch v2.1 系统专为胚胎分类优化，集成了最新的深度学习技术、智能缓存系统和专业的医学图像处理算法。现在支持极速实验迭代和生产级部署。** 🧬✨🚀

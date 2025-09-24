@@ -300,15 +300,25 @@ def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, te
     print(f"   测试集: {len(test_paths)} 样本")
     print(f"   缓存块大小: {chunk_size} 张/文件")
 
+    # 需要从配置中获取这些参数以确保缓存键一致
+    # 这里使用默认值，实际应该从上级传入
+    data_dir = str(Path(train_paths[0]).parents[1]) if train_paths else "./data"
+    train_split = 0.7  # 应该从配置传入
+    random_state = 42  # 应该从配置传入
+
     train_dataset = BatchCachedDataset(
         train_paths, train_labels, img_size,
         is_training=True, cache_dir=cache_dir,
-        chunk_size=chunk_size, split="train"
+        chunk_size=chunk_size, split="train",
+        data_dir=data_dir, train_split=train_split,
+        random_state=random_state
     )
     test_dataset = BatchCachedDataset(
         test_paths, test_labels, img_size,
         is_training=False, cache_dir=cache_dir,
-        chunk_size=chunk_size, split="test"
+        chunk_size=chunk_size, split="test",
+        data_dir=data_dir, train_split=train_split,
+        random_state=random_state
     )
 
     print(f"✅ 批量缓存数据集创建完成")
@@ -363,12 +373,10 @@ class STORKDataLoader:
         cache_dir = self.config.get('paths', {}).get('cache_dir', './batch_cache')
         chunk_size = self.config.get('data', {}).get('cache_chunk_size', 1000)
 
-        # 创建批量缓存PyTorch数据集
-        train_dataset, test_dataset = create_pytorch_datasets_from_paths(
+        # 创建批量缓存PyTorch数据集，传递完整配置参数
+        train_dataset, test_dataset = self._create_cached_datasets(
             train_paths, train_labels, test_paths, test_labels,
-            img_size=self.img_size,
-            cache_dir=cache_dir,
-            chunk_size=chunk_size
+            cache_dir, chunk_size
         )
 
         if is_main_process():
@@ -433,6 +441,56 @@ class STORKDataLoader:
             print(f"  测试集: {len(test_paths)} ({len(test_paths)/len(image_paths)*100:.1f}%)")
 
         return train_paths, train_labels, test_paths, test_labels
+
+    def _create_cached_datasets(self, train_paths, train_labels, test_paths, test_labels,
+                              cache_dir, chunk_size):
+        """创建缓存数据集，确保参数一致性"""
+        try:
+            from .batch_cache import BatchCachedDataset
+        except ImportError:
+            from batch_cache import BatchCachedDataset
+
+        print(f"🔄 创建批量缓存数据集...")
+        print(f"   图片尺寸: {self.img_size}×{self.img_size}")
+        print(f"   训练集: {len(train_paths)} 样本")
+        print(f"   测试集: {len(test_paths)} 样本")
+        print(f"   缓存块大小: {chunk_size} 张/文件")
+
+        # 从配置中获取随机种子
+        random_state = self.config.get('data', {}).get('random_state', 42)
+
+        train_dataset = BatchCachedDataset(
+            train_paths, train_labels, self.img_size,
+            is_training=True, cache_dir=cache_dir,
+            chunk_size=chunk_size, split="train",
+            data_dir=self.data_dir, train_split=self.train_split,
+            random_state=random_state,
+            apply_petri_crop=self.apply_petri_crop,
+            apply_center_crop=self.apply_center_crop
+        )
+        test_dataset = BatchCachedDataset(
+            test_paths, test_labels, self.img_size,
+            is_training=False, cache_dir=cache_dir,
+            chunk_size=chunk_size, split="test",
+            data_dir=self.data_dir, train_split=self.train_split,
+            random_state=random_state,
+            apply_petri_crop=self.apply_petri_crop,
+            apply_center_crop=self.apply_center_crop
+        )
+
+        print(f"✅ 批量缓存数据集创建完成")
+        print(f"   训练集: {len(train_dataset)} 样本")
+        print(f"   测试集: {len(test_dataset)} 样本")
+        print(f"   缓存目录: {cache_dir}")
+
+        # 显示缓存统计
+        try:
+            stats = train_dataset.get_cache_stats()
+            print(f"   📊 缓存统计: {stats['total_chunks']} 个文件, {stats['total_size_mb']:.1f}MB")
+        except Exception as e:
+            print(f"   ⚠️ 无法获取缓存统计: {e}")
+
+        return train_dataset, test_dataset
 
 
 def create_stork_data_loader(config: Dict[str, Any]) -> STORKDataLoader:

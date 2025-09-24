@@ -209,12 +209,43 @@ class STORKApplication:
         print("\n📈 开始全面评估...")
 
         # 加载最佳模型
+        model_loaded = False
         try:
-            self.model_manager.load_best_model(self.model, 'val_accuracy', self.device)
+            # 获取要加载的模型对象
+            model_to_load = self.model
+            if hasattr(self.model, 'module'):  # DataParallel情况
+                model_to_load = self.model.module
+
+            model_data = self.model_manager.load_best_model(model_to_load, 'val_accuracy', self.device)
             print("📂 已加载最佳模型")
+            print(f"   验证准确率: {model_data['best_metric']['value']:.4f}")
+            print(f"   训练轮数: {model_data.get('metrics', {}).get('epoch', 'Unknown')}")
+            model_loaded = True
         except Exception as e:
             print(f"⚠️  无法加载最佳模型: {e}")
-            print("使用当前模型进行评估")
+            print("使用当前训练模型进行评估")
+
+        # 如果成功加载了最佳模型，导出生产模型
+        if model_loaded:
+            try:
+                print("\n📦 导出生产模型...")
+                # 导出ONNX格式
+                onnx_path = self.model_manager.export_model(
+                    model=model_to_load if model_loaded else self.model,
+                    input_shape=(3, self.config['data']['img_size'], self.config['data']['img_size']),
+                    export_format='onnx'
+                )
+
+                # 导出TorchScript格式
+                torchscript_path = self.model_manager.export_model(
+                    model=model_to_load if model_loaded else self.model,
+                    input_shape=(3, self.config['data']['img_size'], self.config['data']['img_size']),
+                    export_format='torchscript'
+                )
+
+                print("✅ 模型导出完成")
+            except Exception as e:
+                print(f"⚠️  模型导出失败: {e}")
 
         # 在测试集上进行详细评估
         output_dir = self.config['paths']['output_dir']
