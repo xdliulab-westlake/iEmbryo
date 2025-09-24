@@ -4,25 +4,54 @@
 1. **BiLSTM回归**：预测囊胚评分（BS Score）
 2. **逻辑回归**：最终质量分类
 
-## ⚠️ 最新修复
+## 🔥 最新更新 (v2.0)
 
-- ✅ **预处理冲突**：移除双重ImageNet标准化，每个模型使用自己的预处理
-- ✅ **特征维度匹配**：统一配置文件与实际输出维度
-- ⚠️ **配置路径**：需更新硬编码服务器路径为本地路径
+### ✅ **重大修复**
+- **标签分配问题**：修复交叉验证中重新推断标签导致的AUC性能问题
+- **Fair胚胎处理**：完全排除fair胚胎，只使用good和poor胚胎训练
+- **多焦距深度融合**：支持每个时间点多焦距图像的平均特征融合
+- **预处理冲突**：移除双重ImageNet标准化，每个模型使用自己的预处理
+
+### 🚀 **新功能**
+- **多焦距模式**：`use_multi_focal=true`启用多焦距深度处理
+- **评分字典生成**：`--generate-score-dict`命令行工具
+- **智能缓存系统**：自动特征缓存和验证
+- **完整数据管道**：从原始图像到最终分类的端到端流程
 
 ## 🚀 快速开始
 
+### 📋 **步骤1: 生成评分字典**
+```bash
+# 使用MainDB.csv和过滤文件生成评分字典
+python main.py --generate-score-dict --config bilstm_config.json
+
+# 或直接指定文件路径
+python main.py --generate-score-dict \
+    --maindb /path/to/MainDB.csv \
+    --filtered /path/to/filtered_clean_embryos.csv
+```
+
+### 🖼️ **步骤2: 生成多焦距图像路径 (可选)**
+```bash
+# 如果使用多焦距深度模式，先生成图像路径CSV
+python select_TimePoint_time_lapse.py
+```
+
+### 🏋️ **步骤3: 训练模型**
 ```bash
 # 1. 安装依赖
 pip install tensorflow>=2.8.0 opencv-python scikit-learn pandas numpy matplotlib
 
-# 2. 创建配置文件
+# 2. 创建配置文件（如果不存在）
 python main.py --create-config
 
 # 3. 编辑配置文件（修改数据路径）
 vim bilstm_config.json
 
-# 4. 开始训练
+# 4. 传统单焦距训练
+python main.py --mode train --config bilstm_config.json
+
+# 5. 多焦距深度训练（修改配置文件中use_multi_focal=true）
 python main.py --mode train --config bilstm_config.json
 ```
 
@@ -30,16 +59,20 @@ python main.py --mode train --config bilstm_config.json
 
 ```
 BiLSTM/
-├── main.py                       # 🚀 主程序
+├── main.py                       # 🚀 主程序入口
 ├── bilstm_config.json            # ⚙️ 配置文件
+├── utils.py                      # 🛠️ 工具函数（数据加载、评分字典生成）
 ├── feature_extractor.py          # 🔍 多模型特征提取器
-├── model.py                      # 🧠 BiLSTM模型
-├── preprocessing/                # 🖼️ 图像预处理
-│   ├── bilstm_image_utils.py     # Hough圆检测
-│   └── data_loader_bilstm.py     # 数据加载
-├── bilstm_feature_cache/         # 💾 特征缓存
-├── bilstm_results/               # 📊 输出结果
-└── [其他模块...]
+├── feature_cache.py              # 💾 智能特征缓存系统
+├── model.py                      # 🧠 BiLSTM模型定义
+├── cross_validation.py           # 📊 交叉验证和训练流程
+├── select_TimePoint_time_lapse.py # 🖼️ 多焦距图像路径生成
+├── preprocessing/                # 🖼️ 图像预处理模块
+│   ├── bilstm_image_utils.py     # Hough圆检测与裁剪
+│   └── data_loader_bilstm.py     # 数据加载器
+├── bilstm_feature_cache/         # 💾 特征缓存存储
+├── bilstm_results/               # 📊 训练结果和可视化
+└── visualization.py              # 📈 结果可视化
 ```
 
 ## 🔄 训练流程
@@ -161,6 +194,49 @@ BiLSTM/
                           ✨ 训练完成！系统准备用于胚胎质量预测 ✨
 ```
 
+## 🔑 核心概念
+
+### 📊 **BS分数计算**
+```python
+# MainDB.csv中的胚胎
+ICM_map = {'A': 1, 'B': 2, 'C': 4}
+TE_map = {'A': 1, 'B': 3, 'C': 4}
+BS_score = ICM_score + TE_score  # 范围: 2-8
+
+# Poor胚胎 (filtered_clean_embryos.csv)
+BS_score = 6.0 + random(0, 2.0)  # 范围: 6-8
+```
+
+### 🏷️ **质量标签策略**
+```python
+# 数据加载阶段
+good胚胎 → quality = 1    # 来自MainDB.csv
+poor胚胎 → quality = 0    # 来自filtered_clean_embryos.csv
+fair胚胎 → 完全排除       # 不参与训练
+
+# 最终训练数据: 只有good和poor胚胎
+```
+
+### 🖼️ **多焦距深度处理**
+```python
+# 传统模式: 每个时间点选择一张图片
+image_per_timepoint = 1
+
+# 多焦距模式: 每个时间点收集所有焦距深度
+images_per_timepoint = [F0, F15, F30, F-15, ...]
+fused_feature = np.mean(all_focal_features, axis=0)
+```
+
+### 💾 **智能缓存系统**
+```python
+# 特征缓存键: MD5(图像路径 + 模型配置 + 预处理参数)
+cache_key = md5(image_path + model_name + preprocessing_config)
+
+# 自动验证: 配置变更时重新计算特征
+if config_changed:
+    recompute_features()
+```
+
 ## ⚙️ 配置文件
 
 ### 完整配置模板 (bilstm_config.json)
@@ -192,8 +268,13 @@ BiLSTM/
   "apply_petri_crop": true,   // Hough圆检测
   "use_augmentation": true,
 
+  // 🔍 多焦距深度设置 (v2.0新功能)
+  "use_multi_focal": false,   // 启用多焦距深度处理
+  "multi_focal_csv": "/path/to/selected_image_paths.csv",
+
   // 💾 缓存设置
   "use_cache": true,
+  "cache_dir": "bilstm_feature_cache",
   "results_save_dir": "bilstm_results"
 }
 ```
@@ -269,6 +350,44 @@ model = create_model(feature_dim=5760, lstm_units=128, dropout_rate=0.3)
 trained_model, history = train_model(X_train, y_train, X_val, y_val)
 ```
 
+## 🛠️ 命令行工具
+
+### 📋 **评分字典生成**
+```bash
+# 方法1: 使用配置文件
+python main.py --generate-score-dict --config bilstm_config.json
+
+# 方法2: 指定文件路径
+python main.py --generate-score-dict \
+    --maindb /path/to/MainDB.csv \
+    --filtered /path/to/filtered_clean_embryos.csv \
+    --output-score-dict my_scores.json
+
+# 方法3: 只使用主数据库
+python main.py --generate-score-dict --maindb /path/to/MainDB.csv
+```
+
+### 🏋️ **训练和推理**
+```bash
+# 训练模式
+python main.py --mode train --config bilstm_config.json
+
+# 推理模式
+python main.py --mode inference --config bilstm_config.json
+
+# 覆盖配置参数
+python main.py --mode train --epochs 50 --batch-size 16 --feature-model vgg16
+```
+
+### 🖼️ **多焦距图像处理**
+```bash
+# 生成多焦距图像路径
+python select_TimePoint_time_lapse.py
+
+# 多焦距训练 (先设置配置文件中use_multi_focal=true)
+python main.py --mode train --config bilstm_config.json
+```
+
 ## 🐛 常见问题
 
 | 问题 | 解决方案 |
@@ -277,14 +396,25 @@ trained_model, history = train_model(X_train, y_train, X_val, y_val)
 | 训练速度慢 | 启用缓存，增大batch_size(64) |
 | 精度不够 | 使用all模型，增加epochs(200) |
 | 路径错误 | 检查配置文件中的绝对路径 |
+| AUC性能差 | 检查评分字典质量标签，确保fair胚胎被排除 |
+| 平均BS分数为NaN | 检查MainDB.csv中ICM/TE列是否有非标准值 |
+| 过滤文件未识别 | 使用`--config`参数或`--filtered`参数 |
 
 ## 📝 更新日志
 
-### v2.5.0 (当前)
+### v2.0.0 (当前) - 重大更新 🔥
+- ✅ **标签分配修复**：解决AUC性能问题，排除fair胚胎
+- ✅ **多焦距深度融合**：支持每个时间点多焦距图像处理
+- ✅ **评分字典工具**：命令行生成评分字典
+- ✅ **BS分数优化**：Poor胚胎使用6-8范围随机分数
+- ✅ **智能缓存升级**：MD5验证和自动重计算
+- 🔧 修复预处理冲突和特征维度匹配问题
+
+### v1.5.0 (历史)
 - 🔧 修复预处理冲突问题
 - 🔧 修复特征维度匹配问题
 - 📋 项目结构优化建议
 
 ---
 
-**🎯 核心优势**：模块化设计 + 智能缓存 + Hough圆检测 + 严格验证
+**🎯 核心优势**：完整数据管道 + 多焦距融合 + 智能缓存 + 严格质量控制 + 端到端训练

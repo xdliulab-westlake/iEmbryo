@@ -272,7 +272,7 @@ def load_score_dict_backup_style(maindb_csv_path, filtered_csv_path, age_map=Non
                             age = float(age_map[patient_id_prefix])
 
                     score_dict[emb_id] = {
-                        "bs_score": 6.0 + random.uniform(0, 0.5),
+                        "bs_score": 6.0 + random.uniform(0, 2.0),
                         "age": age,
                         "quality": 0,  # poor=0
                         "original_quality": "poor"  # 保留原始质量标签
@@ -872,6 +872,19 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, slide_info_pat
         df["ICM_score"] = df["ICM"].map(icm_map)
         df["TE_score"] = df["TE"].map(te_map)
         df["BS_prime"] = df["ICM_score"] + df["TE_score"]
+
+        # 检查是否有NaN的BS分数
+        nan_bs_count = df["BS_prime"].isna().sum()
+        if nan_bs_count > 0:
+            print(f"⚠️ 发现 {nan_bs_count} 个NaN的BS_prime分数")
+            # 查看导致NaN的ICM/TE值
+            nan_rows = df[df["BS_prime"].isna()]
+            if len(nan_rows) > 0:
+                print("   导致NaN的ICM/TE值:")
+                for idx, row in nan_rows.head().iterrows():
+                    print(f"     胚胎 {row.get('EmbryoID', 'Unknown')}: ICM={row.get('ICM')}, TE={row.get('TE')}")
+        else:
+            print("✅ 所有BS_prime分数计算正常")
         
         # 创建评分字典
         embryo_sample_count = 0
@@ -991,8 +1004,8 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, slide_info_pat
             for emb_id in poor_embryos["EmbryoID"].unique():
                 emb_id_str = str(emb_id)
                 if emb_id_str not in score_dict:
-                    # 为低质量胚胎分配较高的BS分数 (6.0-6.5)
-                    bs_score = 6.0 + random.uniform(0, 0.5)
+                    # 为低质量胚胎分配较高的BS分数 (6.0-8.0)
+                    bs_score = 6.0 + random.uniform(0, 2.0)
                     age = 0.0  # 默认年龄0，后续补充
                     quality = 0  # 低质量
                     
@@ -1044,11 +1057,24 @@ def generate_score_dict_from_csv(maindb_path, filtered_path=None, slide_info_pat
     # 统计信息
     bs_scores = [data["bs_score"] for data in score_dict.values()]
     qualities = [data["quality"] for data in score_dict.values()]
-    
+
+    # 检查NaN值
+    import numpy as np
+    nan_bs_scores = [score for score in bs_scores if pd.isna(score) or np.isnan(score)]
+    valid_bs_scores = [score for score in bs_scores if not (pd.isna(score) or np.isnan(score))]
+
     print(f"\n📊 生成的评分字典统计:")
     print(f"  总胚胎数: {len(score_dict)}")
-    print(f"  BS分数范围: {min(bs_scores):.2f} - {max(bs_scores):.2f}")
-    print(f"  平均BS分数: {sum(bs_scores)/len(bs_scores):.2f}")
+
+    if nan_bs_scores:
+        print(f"  ⚠️ 发现 {len(nan_bs_scores)} 个NaN的BS分数")
+
+    if valid_bs_scores:
+        print(f"  BS分数范围: {min(valid_bs_scores):.2f} - {max(valid_bs_scores):.2f}")
+        print(f"  平均BS分数: {sum(valid_bs_scores)/len(valid_bs_scores):.2f}")
+    else:
+        print(f"  ❌ 所有BS分数都是NaN")
+
     print(f"  高质量胚胎: {sum(qualities)} ({sum(qualities)/len(qualities)*100:.1f}%)")
     print(f"  低质量胚胎: {len(qualities)-sum(qualities)} ({(len(qualities)-sum(qualities))/len(qualities)*100:.1f}%)")
     
