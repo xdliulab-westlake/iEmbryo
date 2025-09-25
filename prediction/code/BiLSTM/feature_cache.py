@@ -112,24 +112,22 @@ class BiLSTMFeatureCache:
         """获取或计算图像特征"""
         if self.multi_extractor is None:
             raise ValueError("请先调用 set_extractor() 设置特征提取器")
-            
+
         cache_file = self.get_cache_path(image_paths, f"features_{training}_{use_augmentation}")
-        
-        # 尝试加载缓存
+
+        # 简化缓存逻辑：如果缓存文件存在就直接使用
         if use_cache and os.path.exists(cache_file):
             try:
-                print(f"🔍 检查特征缓存: {cache_file}")
+                print(f"🔍 发现缓存文件: {cache_file}")
                 with open(cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
-                    
-                if self._validate_cache(cached_data, image_paths):
-                    print("🚀 从缓存加载特征")
-                    return cached_data['features']
-                else:
-                    print("⚠️ 缓存无效，重新提取特征")
-                    
+
+                print("🚀 直接从缓存加载特征，跳过验证")
+                return cached_data['features']
+
             except Exception as e:
                 print(f"❌ 缓存加载失败: {e}")
+                print("⚠️ 重新提取特征")
         
         # 重新提取特征 - 智能选择方法
         print("🔄 开始特征提取...")
