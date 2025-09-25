@@ -524,8 +524,15 @@ def stratified_cross_validation_multi_focal(
                     embryo_df,
                     use_cache=use_cache,
                     training=True,
-                    use_augmentation=use_augmentation
+                    use_augmentation=use_augmentation,
+                    require_complete=True  # 要求完整的33个时间点
                 )
+
+                # 检查是否返回None（胚胎被拒绝）
+                if sequence_features is None:
+                    print(f"⚠️ 胚胎 {embryo_id} 时间点不完整，已跳过")
+                    continue
+
                 embryo_features[embryo_id] = sequence_features
 
                 # 获取标签 - 使用BS分数作为回归目标
@@ -539,7 +546,15 @@ def stratified_cross_validation_multi_focal(
                 print(f"⚠️ 胚胎 {embryo_id} 处理失败: {e}")
                 continue
 
-    print(f"✅ 成功处理 {len(embryo_features)} 个胚胎")
+    total_embryos = len(set(multi_focal_df['EmbryoID']))
+    successful_embryos = len(embryo_features)
+    rejected_embryos = total_embryos - successful_embryos
+
+    print(f"✅ 胚胎处理完成:")
+    print(f"   总胚胎数: {total_embryos}")
+    print(f"   成功处理: {successful_embryos}")
+    print(f"   拒绝胚胎: {rejected_embryos} (时间点不完整)")
+    print(f"   成功率: {successful_embryos/total_embryos*100:.1f}%")
 
     if len(embryo_features) == 0:
         raise ValueError("没有成功处理的胚胎数据")

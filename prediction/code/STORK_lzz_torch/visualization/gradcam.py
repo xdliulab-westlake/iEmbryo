@@ -355,8 +355,8 @@ class GradCAMVisualizer:
     def _denormalize_image(self, tensor: torch.Tensor) -> np.ndarray:
         """反归一化图像"""
         # ImageNet标准化参数
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(tensor.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(tensor.device)
 
         # 反归一化
         denorm = tensor * std + mean

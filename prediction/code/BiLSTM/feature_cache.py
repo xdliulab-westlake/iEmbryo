@@ -369,9 +369,16 @@ class BiLSTMFeatureCache:
                     
         return np.array(features) if features else np.array([])
 
-    def process_multi_focal_data(self, embryo_df, use_cache=True, training=False, use_augmentation=False):
+    def process_multi_focal_data(self, embryo_df, use_cache=True, training=False, use_augmentation=False, require_complete=True):
         """
         处理多焦距深度数据 - 简单平均融合
+
+        Args:
+            embryo_df: 胚胎图像数据框
+            use_cache: 是否使用缓存
+            training: 是否为训练模式
+            use_augmentation: 是否使用数据增强
+            require_complete: 是否要求完整的33个时间点
         """
         if self.multi_extractor is None:
             raise ValueError("请先调用 set_extractor() 设置特征提取器")
@@ -390,6 +397,17 @@ class BiLSTMFeatureCache:
         # 按时间点分组并融合
         time_groups = embryo_df.groupby('TargetHour')
         sequence_features = []
+        expected_timepoints = 33  # 预期的时间点数量
+
+        # 检查时间点完整性
+        if require_complete:
+            unique_timepoints = len(time_groups)
+            if unique_timepoints != expected_timepoints:
+                embryo_id = embryo_df['EmbryoID'].iloc[0] if 'EmbryoID' in embryo_df.columns else 'Unknown'
+                print(f"❌ 胚胎 {embryo_id} 时间点不完整: {unique_timepoints}/{expected_timepoints}")
+                return None  # 返回None表示该胚胎被拒绝
+
+        failed_timepoints = []  # 记录失败的时间点
 
         for target_hour, time_df in sorted(time_groups, key=lambda x: x[0]):
             focal_features = []
@@ -406,5 +424,20 @@ class BiLSTMFeatureCache:
                 else:
                     fused_feature = focal_features[0]
                 sequence_features.append(fused_feature)
+            else:
+                # 记录失败的时间点
+                failed_timepoints.append(target_hour)
+                if require_complete:
+                    embryo_id = embryo_df['EmbryoID'].iloc[0] if 'EmbryoID' in embryo_df.columns else 'Unknown'
+                    print(f"❌ 胚胎 {embryo_id} 时间点 {target_hour} 特征提取失败")
+                    return None  # 特征提取失败，拒绝该胚胎
+
+        # 最终完整性检查
+        if require_complete and len(sequence_features) != expected_timepoints:
+            embryo_id = embryo_df['EmbryoID'].iloc[0] if 'EmbryoID' in embryo_df.columns else 'Unknown'
+            print(f"❌ 胚胎 {embryo_id} 最终时间点不足: {len(sequence_features)}/{expected_timepoints}")
+            if failed_timepoints:
+                print(f"   失败的时间点: {failed_timepoints}")
+            return None
 
         return np.array(sequence_features)

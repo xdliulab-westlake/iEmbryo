@@ -27,7 +27,7 @@ class ModelManager:
             model_dir: 模型保存目录
             model_name: 模型名称前缀
         """
-        self.model_dir = Path(model_dir)
+        self.model_dir = Path(model_dir).resolve()
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.model_name = model_name
 
