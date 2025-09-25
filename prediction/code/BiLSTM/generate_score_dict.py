@@ -39,46 +39,81 @@ def generate_score_dict(maindb_path, filtered_path=None, output_path="score_dict
     # ICM和TE评分映射
     icm_map = {'A': 1, 'B': 2, 'C': 4}
     te_map = {'A': 1, 'B': 3, 'C': 4}
-    
+
+    # 质量标签映射
+    quality_map = {'good': 1, 'poor': 0, 'Good': 1, 'Poor': 0}
+
     score_dict = {}
-    
-    # 计算BS_prime分数
+
+    # 使用ICM/TE评分计算BS_prime
     if 'ICM' in df.columns and 'TE' in df.columns:
         print("📊 使用 ICM/TE 评分计算 BS_prime")
         df["ICM_score"] = df["ICM"].map(icm_map)
         df["TE_score"] = df["TE"].map(te_map)
         df["BS_prime"] = df["ICM_score"] + df["TE_score"]
-        
+
+        # 统计质量标签分布
+        if 'Quality' in df.columns:
+            quality_counts = df['Quality'].value_counts()
+            print(f"📋 质量标签分布: {dict(quality_counts)}")
+
+        # 统计去除情况
+        removed_missing = 0
+        removed_unknown = 0
+
         # 创建评分字典
         for _, row in df.iterrows():
             embryo_id = str(row["EmbryoID"])
+
+            # 检查Quality列是否存在且有效
+            if "Quality" not in df.columns or pd.isna(row["Quality"]):
+                print(f"❌ 缺失质量标签，去除胚胎: {embryo_id}")
+                removed_missing += 1
+                continue
+
+            quality_raw = str(row["Quality"]).strip()
+            if quality_raw not in quality_map:
+                print(f"❌ 未知质量标签 '{quality_raw}'，去除胚胎: {embryo_id}")
+                removed_unknown += 1
+                continue
+
+            # 只有有效的质量标签才会被保留
             bs_score = float(row["BS_prime"])
             age = float(row.get("Age", 30))  # 默认年龄30
-            quality = int(row.get("Quality", 1)) if "Quality" in df.columns else (1 if bs_score <= 4 else 0)
-            
-            score_dict[embryo_id] = {
-                "bs_score": bs_score,
-                "age": age,
-                "quality": quality
-            }
-            
-    elif 'BlastocystScore' in df.columns:
-        print("📊 使用 BlastocystScore 直接评分")
-        for _, row in df.iterrows():
-            embryo_id = str(row["EmbryoID"])
-            bs_score = float(row["BlastocystScore"])
-            age = float(row.get("Age", 30))
-            quality = int(row.get("Quality", 1)) if "Quality" in df.columns else (1 if bs_score <= 4 else 0)
-            
+            quality = quality_map[quality_raw]
+
             score_dict[embryo_id] = {
                 "bs_score": bs_score,
                 "age": age,
                 "quality": quality
             }
     else:
-        raise ValueError("CSV文件必须包含 ICM/TE 列或 BlastocystScore 列")
+        raise ValueError("MainDB.csv必须包含 ICM 和 TE 列")
     
     print(f"✅ 从主数据文件生成 {len(score_dict)} 个胚胎评分")
+    print(f"📊 数据筛选统计:")
+    print(f"   原始胚胎数: {len(df)}")
+    print(f"   缺失质量标签: {removed_missing}")
+    print(f"   未知质量标签: {removed_unknown}")
+    print(f"   最终保留: {len(score_dict)}")
+    print(f"   保留率: {len(score_dict)/len(df)*100:.1f}%")
+
+    # 统计最终的标签分布
+    quality_stats = {'good': 0, 'poor': 0}
+    bs_scores = []
+    for embryo_data in score_dict.values():
+        if embryo_data['quality'] == 1:
+            quality_stats['good'] += 1
+        else:
+            quality_stats['poor'] += 1
+        bs_scores.append(embryo_data['bs_score'])
+
+    print(f"📊 最终质量标签统计:")
+    print(f"   Good: {quality_stats['good']} ({quality_stats['good']/len(score_dict)*100:.1f}%)")
+    print(f"   Poor: {quality_stats['poor']} ({quality_stats['poor']/len(score_dict)*100:.1f}%)")
+    print(f"📊 BS分数统计:")
+    print(f"   范围: {min(bs_scores):.1f} - {max(bs_scores):.1f}")
+    print(f"   平均: {sum(bs_scores)/len(bs_scores):.2f}")
     
     # 处理低质量胚胎数据（如果提供）
     if filtered_path and os.path.exists(filtered_path):
