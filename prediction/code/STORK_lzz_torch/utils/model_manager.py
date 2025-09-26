@@ -129,11 +129,34 @@ class ModelManager:
                 'all_metrics': metrics.copy()
             }
 
-            # 保存最佳模型
+            # 只保存完整模型（包含结构、权重和元信息），用于直接加载
             best_model_path = self.best_models_dir / f"{self.model_name}_best_{metric_name}.pth"
 
-            model_data = {
-                'model_state_dict': model.state_dict(),
+            # 设置模型为评估模式
+            model.eval()
+
+            # 在模型对象上附加元信息
+            model.training_metrics = metrics
+            model.best_metric = {
+                'name': metric_name,
+                'value': current_metric,
+                'mode': mode
+            }
+            model.training_config = config
+            model.save_timestamp = datetime.now().isoformat()
+
+            try:
+                # 保存完整模型
+                torch.save(model, best_model_path)
+                print(f"🏆 完整模型已保存: {best_model_path}")
+                print(f"   {metric_name}: {current_metric:.4f}")
+                print(f"   包含: 模型结构 + 权重 + 训练信息")
+            except Exception as e:
+                print(f"❌ 模型保存失败: {e}")
+                return False
+
+            # 保存独立的元数据文件（可选，用于快速查看信息）
+            metadata = {
                 'metrics': metrics,
                 'best_metric': {
                     'name': metric_name,
@@ -142,17 +165,12 @@ class ModelManager:
                 },
                 'config': config,
                 'timestamp': datetime.now().isoformat(),
+                'model_path': str(best_model_path)
             }
 
-            torch.save(model_data, best_model_path)
-
-            # 保存元数据
-            metadata_path = self.best_models_dir / f"{self.model_name}_best_{metric_name}_metadata.json"
+            metadata_path = self.best_models_dir / f"{self.model_name}_best_{metric_name}_info.json"
             with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(self._make_serializable(model_data), f, indent=2, ensure_ascii=False)
-
-            print(f"🏆 最佳模型已保存: {best_model_path}")
-            print(f"   {metric_name}: {current_metric:.4f}")
+                json.dump(self._make_serializable(metadata), f, indent=2, ensure_ascii=False)
 
         return is_best
 
@@ -279,8 +297,9 @@ class ModelManager:
 
         export_path = self.exports_dir / f"{model_name}.onnx"
 
-        # 创建示例输入
-        dummy_input = torch.randn(1, *input_shape)
+        # 创建示例输入，确保与模型在同一设备
+        device = next(model.parameters()).device
+        dummy_input = torch.randn(1, *input_shape, device=device)
 
         torch.onnx.export(
             model,
@@ -315,8 +334,9 @@ class ModelManager:
         """导出Traced格式"""
         export_path = self.exports_dir / f"{model_name}_traced.pt"
 
-        # 创建示例输入
-        dummy_input = torch.randn(1, *input_shape)
+        # 创建示例输入，确保与模型在同一设备
+        device = next(model.parameters()).device
+        dummy_input = torch.randn(1, *input_shape, device=device)
 
         # 使用追踪导出
         traced_model = torch.jit.trace(model, dummy_input)

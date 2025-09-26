@@ -81,10 +81,12 @@ class GradCAM:
     def _register_hooks(self):
         """注册前向和反向钩子"""
         def forward_hook(module, input, output):
-            self.activations = output
+            # 克隆output避免inplace操作问题
+            self.activations = output.clone()
 
         def backward_hook(module, grad_input, grad_output):
-            self.gradients = grad_output[0]
+            # 克隆梯度避免inplace操作问题
+            self.gradients = grad_output[0].clone()
 
         # 获取目标层
         target_layer = self._get_layer_by_name(self.target_layer_name)
@@ -124,7 +126,15 @@ class GradCAM:
         input_tensor = input_tensor.clone().detach().requires_grad_(True)
 
         # 设置模型为评估模式但启用梯度计算
+        # 临时禁用GPU增强以避免inplace操作
+        was_training = self.model.training
+        gpu_aug_training_mode = None
         self.model.eval()
+
+        # 如果有GPU增强模块，临时禁用它
+        if hasattr(self.model, 'gpu_aug') and self.model.gpu_aug is not None:
+            gpu_aug_training_mode = self.model.gpu_aug.training_mode
+            self.model.gpu_aug.training_mode = False
 
         # 前向传播
         with torch.enable_grad():
@@ -160,6 +170,13 @@ class GradCAM:
             cam = (cam - cam.min()) / (cam.max() - cam.min())
         else:
             cam = torch.zeros_like(cam)
+
+        # 恢复模型状态
+        if hasattr(self.model, 'gpu_aug') and self.model.gpu_aug is not None and gpu_aug_training_mode is not None:
+            self.model.gpu_aug.training_mode = gpu_aug_training_mode
+
+        if was_training:
+            self.model.train()
 
         return cam.detach().cpu().numpy()
 
