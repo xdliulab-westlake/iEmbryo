@@ -120,22 +120,27 @@ class GradCAM:
         if input_tensor.dim() == 3:
             input_tensor = input_tensor.unsqueeze(0)
 
-        input_tensor.requires_grad_(True)
+        # 克隆张量并设置梯度
+        input_tensor = input_tensor.clone().detach().requires_grad_(True)
+
+        # 设置模型为评估模式但启用梯度计算
+        self.model.eval()
 
         # 前向传播
-        output = self.model(input_tensor)
+        with torch.enable_grad():
+            output = self.model(input_tensor)
 
-        # 如果没有指定类别，使用预测的类别
-        if class_idx is None:
-            class_idx = output.argmax(dim=1).item()
+            # 如果没有指定类别，使用预测的类别
+            if class_idx is None:
+                class_idx = output.argmax(dim=1).item()
 
-        # 清零梯度
-        self.model.zero_grad()
+            # 清零梯度
+            self.model.zero_grad()
 
-        # 反向传播
-        one_hot = torch.zeros_like(output)
-        one_hot[0, class_idx] = 1.0
-        output.backward(gradient=one_hot, retain_graph=True)
+            # 反向传播
+            one_hot = torch.zeros_like(output)
+            one_hot[0, class_idx] = 1.0
+            output.backward(gradient=one_hot, retain_graph=True)
 
         # 获取梯度和激活
         gradients = self.gradients  # [1, C, H, W]
@@ -241,50 +246,50 @@ class GradCAMVisualizer:
         sample_count = 0
         class_counts = {0: 0, 1: 0}
 
-        with torch.no_grad():
-            for batch_idx, (images, labels) in enumerate(data_loader):
-                if sample_count >= num_samples:
-                    break
+        for batch_idx, (images, labels) in enumerate(data_loader):
+            if sample_count >= num_samples:
+                break
 
-                images = images.to(self.device)
-                labels = labels.to(self.device)
+            images = images.to(self.device)
+            labels = labels.to(self.device)
 
-                # 获取预测
+            # 获取预测（使用no_grad进行预测）
+            with torch.no_grad():
                 outputs = self.model(images)
                 predictions = torch.argmax(outputs, dim=1)
 
-                # 处理批次中的每个样本
-                for i in range(images.size(0)):
-                    if sample_count >= num_samples:
-                        break
+            # 处理批次中的每个样本
+            for i in range(images.size(0)):
+                if sample_count >= num_samples:
+                    break
 
-                    # 平衡类别采样
-                    true_label = labels[i].item()
-                    if class_counts[true_label] >= num_samples // 2:
-                        continue
+                # 平衡类别采样
+                true_label = labels[i].item()
+                if class_counts[true_label] >= num_samples // 2:
+                    continue
 
-                    image_tensor = images[i:i+1]
-                    true_label = labels[i].item()
-                    pred_label = predictions[i].item()
+                image_tensor = images[i:i+1]
+                true_label = labels[i].item()
+                pred_label = predictions[i].item()
 
-                    # 生成可视化
-                    sample_result = self._visualize_single_sample(
-                        image_tensor, true_label, pred_label, sample_count
+                # 生成可视化
+                sample_result = self._visualize_single_sample(
+                    image_tensor, true_label, pred_label, sample_count
+                )
+
+                if sample_result:
+                    results['samples'].append(sample_result)
+                    results['attention_patterns'][f'class_{true_label}'].append(
+                        sample_result['attention_map']
                     )
 
-                    if sample_result:
-                        results['samples'].append(sample_result)
-                        results['attention_patterns'][f'class_{true_label}'].append(
-                            sample_result['attention_map']
-                        )
+                    # 统计
+                    if true_label == pred_label:
+                        results['class_stats']['correct'] += 1
+                    results['class_stats']['total'] += 1
 
-                        # 统计
-                        if true_label == pred_label:
-                            results['class_stats']['correct'] += 1
-                        results['class_stats']['total'] += 1
-
-                        class_counts[true_label] += 1
-                        sample_count += 1
+                    class_counts[true_label] += 1
+                    sample_count += 1
 
         # 创建汇总可视化
         self._create_summary_visualization(results)

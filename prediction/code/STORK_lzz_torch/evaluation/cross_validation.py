@@ -160,8 +160,17 @@ class CrossValidator:
             # 创建训练器
             trainer = STORKTrainer(model, self.config, train_loader, val_loader, self.device)
 
-            # 训练模型
-            history = trainer.train()
+            # 训练模型 - 使用交叉验证专用轮数或主训练轮数
+            cv_epochs = self.config.get('cross_validation', {}).get('epochs', None)
+            if cv_epochs is None:
+                # 如果没有设置专用轮数，使用主训练轮数
+                num_epochs = self.config['training']['epochs']
+            else:
+                # 使用交叉验证专用轮数
+                num_epochs = cv_epochs
+
+            print(f"   训练 {num_epochs} 轮...")
+            history = trainer.train(num_epochs)
 
             # 评估模型
             metrics = self._evaluate_fold(model, val_loader, fold)
