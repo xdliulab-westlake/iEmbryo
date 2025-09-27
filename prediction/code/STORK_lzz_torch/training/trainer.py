@@ -385,8 +385,10 @@ class STORKTrainer:
                         print(f"🏆 新的最佳模型已保存! 验证准确率: {val_acc:.2f}%")
                 else:
                     # 后备保存方式
-                    self.save_checkpoint('best_model.pth')
-                    print(f"💾 最佳模型已保存到checkpoints/best_model.pth (准确率: {val_acc:.2f}%)")
+                    model_name = self.config.get('model', {}).get('name', 'unknown')
+                    checkpoint_filename = f'{model_name}_best_model.pth'
+                    self.save_checkpoint(checkpoint_filename)
+                    print(f"💾 最佳模型已保存到checkpoints/{checkpoint_filename} (准确率: {val_acc:.2f}%)")
 
             # 使用ModelManager定期保存检查点
             if self.model_manager and (epoch % self.config.get('logging', {}).get('save_model_every_n_epochs', 50) == 0):

@@ -190,11 +190,15 @@ class STORKApplication:
 
         # 检查是否恢复训练
         if self.config['training']['resume_training']:
-            checkpoint_path = Path('checkpoints/best_model.pth')
+            model_name = self.config['model']['name']
+            checkpoint_path = Path(f'checkpoints/{model_name}_best_model.pth')
             if checkpoint_path.exists():
                 if self.is_main_process:
-                    print(f"📂 恢复训练: {checkpoint_path}")
+                    print(f"📂 恢复训练 ({model_name}): {checkpoint_path}")
                 self.trainer.load_checkpoint(str(checkpoint_path))
+            else:
+                if self.is_main_process:
+                    print(f"ℹ️  未找到 {model_name} 的检查点文件，从头开始训练")
 
         # 执行训练
         num_epochs = self.config['training']['epochs']

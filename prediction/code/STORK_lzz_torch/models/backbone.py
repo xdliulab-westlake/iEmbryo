@@ -24,11 +24,11 @@ class BackboneModel(nn.Module):
 
     # 预训练模型路径映射 - 根据您的实际路径修改
     PRETRAINED_PATHS = {
-        'vgg16': "/Users/lzz/Documents/GitHub/IVF_AI/prediction/pretrained_models/vgg16_imagenet.pth",
-        'resnet50': "/Users/lzz/Documents/GitHub/IVF_AI/prediction/pretrained_models/resnet50_imagenet.pth",
-        'resnet152': "/Users/lzz/Documents/GitHub/IVF_AI/prediction/pretrained_models/resnet152_imagenet.pth",
-        'inceptionv3': "/Users/lzz/Documents/GitHub/IVF_AI/prediction/pretrained_models/inceptionv3_imagenet.pth",
-        'efficientnetb0': "/Users/lzz/Documents/GitHub/IVF_AI/prediction/pretrained_models/efficientnetb0_imagenet.pth"
+        'vgg16': "/liaozizhuo/scripts/pretrain_models/vgg16-397923af.pth",
+        'resnet50': "/liaozizhuo/scripts/pretrain_models/resnet50-11ad3fa6.pth",
+        'resnet152': "/liaozizhuo/scripts/pretrain_models/resnet152-394f9c45.pth",
+        'inceptionv3': "/liaozizhuo/scripts/pretrain_models/inception_v3_google-0cc3c7bd.pth",
+        'efficientnetb0': "/liaozizhuo/scripts/pretrain_models/efficientnet-b0-355c32eb.pth"
     }
 
     # 模型配置字典
@@ -142,7 +142,7 @@ class BackboneModel(nn.Module):
             return self._load_local_pretrained(pretrained_path)
         elif pretrained_path and not os.path.exists(pretrained_path):
             print(f"⚠️ 预训练模型文件不存在: {pretrained_path}")
-            print("🔄 回退到在线预训练模型...")
+            print(f"🔄 回退到在线预训练模型 {self.model_name}...")
         # 优先使用timm，回退到torchvision
         try:
             if self.model_config['timm_name']:

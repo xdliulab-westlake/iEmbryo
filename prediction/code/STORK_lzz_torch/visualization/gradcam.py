@@ -36,9 +36,22 @@ class GradCAM:
         self.target_layer_name = target_layer_name
         self.gradients = None
         self.activations = None
+        self.forward_handle = None
+        self.backward_handle = None
 
         # 注册钩子
         self._register_hooks()
+
+    def __del__(self):
+        """析构函数，清理钩子"""
+        self.cleanup()
+
+    def cleanup(self):
+        """清理钩子"""
+        if hasattr(self, 'forward_handle') and self.forward_handle:
+            self.forward_handle.remove()
+        if hasattr(self, 'backward_handle') and self.backward_handle:
+            self.backward_handle.remove()
 
     def _find_target_layer(self) -> str:
         """自动查找合适的目标层"""
@@ -47,17 +60,19 @@ class GradCAM:
 
         # 预定义的层映射
         layer_mapping = {
-            'vgg': 'backbone.features.28',      # VGG最后一个卷积层
-            'resnet': 'backbone.layer4.2.conv2',  # ResNet最后一个卷积层
-            'efficientnet': 'backbone.blocks.6',   # EfficientNet
-            'inception': 'backbone.Mixed_7c',       # InceptionV3
+            'vgg': ['backbone.features.28', 'backbone.0.28', 'backbone.0.21'],  # VGG不同实现的可能层名
+            'resnet': ['backbone.layer4.2.conv2'],  # ResNet最后一个卷积层
+            'efficientnet': ['backbone.blocks.6'],   # EfficientNet
+            'inception': ['backbone.Mixed_7c'],       # InceptionV3
         }
 
         # 查找匹配的层
-        for key, layer_name in layer_mapping.items():
+        for key, layer_names in layer_mapping.items():
             if key in model_name or hasattr(self.model, 'model_name'):
-                if hasattr(self.model, 'model_name'):
-                    if key in self.model.model_name:
+                # 尝试每个可能的层名称
+                for layer_name in layer_names:
+                    if self._get_layer_by_name(layer_name) is not None:
+                        print(f"🎯 找到匹配的层: {layer_name}")
                         return layer_name
 
         # 如果没有找到，尝试查找backbone中的最后一个卷积层
@@ -81,21 +96,33 @@ class GradCAM:
     def _register_hooks(self):
         """注册前向和反向钩子"""
         def forward_hook(module, input, output):
-            # 克隆output避免inplace操作问题
-            self.activations = output.clone()
+            # 安全地保存激活值，避免inplace操作问题
+            if isinstance(output, torch.Tensor):
+                self.activations = output.detach().clone()
+            else:
+                # 如果output是tuple或其他类型，取第一个tensor
+                self.activations = output[0].detach().clone() if isinstance(output, (tuple, list)) else output.detach().clone()
 
         def backward_hook(module, grad_input, grad_output):
-            # 克隆梯度避免inplace操作问题
-            self.gradients = grad_output[0].clone()
+            # 安全地保存梯度，避免inplace操作问题
+            if grad_output and len(grad_output) > 0 and grad_output[0] is not None:
+                self.gradients = grad_output[0].detach().clone()
 
         # 获取目标层
         target_layer = self._get_layer_by_name(self.target_layer_name)
         if target_layer is None:
-            raise ValueError(f"找不到层: {self.target_layer_name}")
+            # 提供详细的错误信息
+            available_layers = [name for name, module in self.model.named_modules()
+                              if isinstance(module, torch.nn.Conv2d)]
+            error_msg = f"找不到层: {self.target_layer_name}\n"
+            error_msg += f"可用的卷积层: {available_layers[:10]}{'...' if len(available_layers) > 10 else ''}"
+            raise ValueError(error_msg)
 
-        # 注册钩子
-        target_layer.register_forward_hook(forward_hook)
-        target_layer.register_full_backward_hook(backward_hook)
+        print(f"✅ 成功注册Grad-CAM钩子到层: {self.target_layer_name}")
+
+        # 注册钩子并保存句柄以便后续清理
+        self.forward_handle = target_layer.register_forward_hook(forward_hook)
+        self.backward_handle = target_layer.register_backward_hook(backward_hook)
 
     def _get_layer_by_name(self, layer_name: str):
         """根据名称获取层"""
@@ -126,59 +153,76 @@ class GradCAM:
         input_tensor = input_tensor.clone().detach().requires_grad_(True)
 
         # 设置模型为评估模式但启用梯度计算
-        # 临时禁用GPU增强以避免inplace操作
         was_training = self.model.training
         gpu_aug_training_mode = None
         self.model.eval()
 
         # 如果有GPU增强模块，临时禁用它
         if hasattr(self.model, 'gpu_aug') and self.model.gpu_aug is not None:
-            gpu_aug_training_mode = self.model.gpu_aug.training_mode
-            self.model.gpu_aug.training_mode = False
+            if hasattr(self.model.gpu_aug, 'training_mode'):
+                gpu_aug_training_mode = self.model.gpu_aug.training_mode
+                self.model.gpu_aug.training_mode = False
+            else:
+                # 尝试其他可能的属性名
+                if hasattr(self.model.gpu_aug, 'training'):
+                    gpu_aug_training_mode = self.model.gpu_aug.training
+                    self.model.gpu_aug.training = False
+                else:
+                    gpu_aug_training_mode = None
 
-        # 前向传播
-        with torch.enable_grad():
+        try:
+            # 重置钩子捕获的值
+            self.gradients = None
+            self.activations = None
+
+            # 前向传播
             output = self.model(input_tensor)
 
             # 如果没有指定类别，使用预测的类别
             if class_idx is None:
                 class_idx = output.argmax(dim=1).item()
 
-            # 清零梯度
+            # 选择目标类别的得分
+            target_score = output[0, class_idx]
+
+            # 反向传播计算梯度
             self.model.zero_grad()
+            target_score.backward()
 
-            # 反向传播
-            one_hot = torch.zeros_like(output)
-            one_hot[0, class_idx] = 1.0
-            output.backward(gradient=one_hot, retain_graph=True)
+            # 检查是否成功捕获了梯度和激活
+            if self.gradients is None or self.activations is None:
+                raise RuntimeError("传统Grad-CAM失败，梯度或激活值未正确捕获")
 
-        # 获取梯度和激活
-        gradients = self.gradients  # [1, C, H, W]
-        activations = self.activations  # [1, C, H, W]
+            gradients = self.gradients.detach().clone()  # [1, C, H, W]
+            activations = self.activations.detach().clone()  # [1, C, H, W]
 
-        # 计算权重（全局平均池化）
-        weights = torch.mean(gradients, dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
+            # 计算权重（全局平均池化）
+            weights = torch.mean(gradients, dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
 
-        # 生成CAM
-        cam = torch.sum(weights * activations, dim=1).squeeze(0)  # [H, W]
+            # 生成CAM
+            cam = torch.sum(weights * activations, dim=1).squeeze(0)  # [H, W]
 
-        # ReLU（只保留正值）
-        cam = F.relu(cam)
+            # ReLU（只保留正值）
+            cam = F.relu(cam)
 
-        # 归一化到0-1
-        if cam.max() > cam.min():
-            cam = (cam - cam.min()) / (cam.max() - cam.min())
-        else:
-            cam = torch.zeros_like(cam)
+            # 归一化到0-1
+            if cam.max() > cam.min():
+                cam = (cam - cam.min()) / (cam.max() - cam.min())
+            else:
+                cam = torch.zeros_like(cam)
 
-        # 恢复模型状态
-        if hasattr(self.model, 'gpu_aug') and self.model.gpu_aug is not None and gpu_aug_training_mode is not None:
-            self.model.gpu_aug.training_mode = gpu_aug_training_mode
+            return cam.detach().cpu().numpy()
 
-        if was_training:
-            self.model.train()
+        finally:
+            # 恢复模型状态
+            if hasattr(self.model, 'gpu_aug') and self.model.gpu_aug is not None and gpu_aug_training_mode is not None:
+                if hasattr(self.model.gpu_aug, 'training_mode'):
+                    self.model.gpu_aug.training_mode = gpu_aug_training_mode
+                elif hasattr(self.model.gpu_aug, 'training'):
+                    self.model.gpu_aug.training = gpu_aug_training_mode
 
-        return cam.detach().cpu().numpy()
+            if was_training:
+                self.model.train()
 
     def visualize(self,
                   image: np.ndarray,

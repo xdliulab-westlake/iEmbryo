@@ -240,7 +240,7 @@ class ReportGenerator:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{self.model_name} 评估报告</title>
+    <title>{self.model_name} Evaluation Report</title>
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 40px; line-height: 1.6; }}
         .header {{ text-align: center; border-bottom: 2px solid #333; padding-bottom: 20px; }}
@@ -420,50 +420,50 @@ class ReportGenerator:
         plt.figure(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                    xticklabels=class_names, yticklabels=class_names)
-        plt.title('混淆矩阵')
-        plt.xlabel('预测标签')
-        plt.ylabel('真实标签')
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'confusion_matrix.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'confusion_matrix.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_roc_curve(self, roc_data: Dict[str, List], auc: float):
         """绘制ROC曲线"""
         plt.figure(figsize=(8, 6))
         plt.plot(roc_data['fpr'], roc_data['tpr'],
-                label=f'ROC曲线 (AUC = {auc:.4f})', linewidth=2)
-        plt.plot([0, 1], [0, 1], 'k--', alpha=0.8, label='随机分类')
-        plt.xlabel('假正率 (FPR)')
-        plt.ylabel('真正率 (TPR)')
-        plt.title('ROC曲线')
+                label=f'ROC Curve (AUC = {auc:.4f})', linewidth=2)
+        plt.plot([0, 1], [0, 1], 'k--', alpha=0.8, label='Random Classifier')
+        plt.xlabel('False Positive Rate (FPR)')
+        plt.ylabel('True Positive Rate (TPR)')
+        plt.title('ROC Curve')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'roc_curve.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'roc_curve.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_pr_curve(self, pr_data: Dict[str, List], ap: float):
         """绘制精确率-召回率曲线"""
         plt.figure(figsize=(8, 6))
         plt.plot(pr_data['recall'], pr_data['precision'],
-                label=f'PR曲线 (AP = {ap:.4f})', linewidth=2)
-        plt.xlabel('召回率')
-        plt.ylabel('精确率')
-        plt.title('精确率-召回率曲线')
+                label=f'PR Curve (AP = {ap:.4f})', linewidth=2)
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title('Precision-Recall Curve')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'pr_curve.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'pr_curve.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_metrics_distribution(self, metrics: Dict[str, Any]):
         """绘制指标分布图"""
         # 提取主要指标
         main_metrics = {
-            '准确率': metrics.get('accuracy', 0),
-            '精确率': metrics.get('precision_weighted', 0),
-            '召回率': metrics.get('recall_weighted', 0),
-            'F1分数': metrics.get('f1_weighted', 0),
+            'Accuracy': metrics.get('accuracy', 0),
+            'Precision': metrics.get('precision_weighted', 0),
+            'Recall': metrics.get('recall_weighted', 0),
+            'F1-Score': metrics.get('f1_weighted', 0),
         }
 
         if 'auc_roc' in metrics:
@@ -479,12 +479,12 @@ class ReportGenerator:
             plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
                     f'{value:.4f}', ha='center', va='bottom', fontweight='bold')
 
-        plt.title('模型评估指标')
-        plt.ylabel('分数')
+        plt.title('Model Evaluation Metrics')
+        plt.ylabel('Score')
         plt.ylim(0, 1.1)
         plt.grid(True, alpha=0.3, axis='y')
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'metrics_distribution.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'metrics_distribution.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _generate_csv_summary(self, metrics: Dict[str, Any]) -> Path:

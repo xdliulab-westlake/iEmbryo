@@ -379,7 +379,7 @@ class CrossValidator:
                     ha='center', va='bottom', fontweight='bold')
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'metrics_boxplot.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'metrics_boxplot.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_training_history(self):
@@ -416,7 +416,7 @@ class CrossValidator:
         axes[1].grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'training_history.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'training_history.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_confusion_matrices(self):
@@ -452,7 +452,7 @@ class CrossValidator:
             ax.set_visible(False)
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'confusion_matrices.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'confusion_matrices.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
     def _plot_roc_curves(self):
@@ -486,7 +486,7 @@ class CrossValidator:
         plt.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'roc_curves.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'roc_curves.pdf', dpi=150, bbox_inches='tight')
         plt.close()
 
 
