@@ -26,7 +26,14 @@ class GradCAM:
             model: 要分析的模型
             target_layer_name: 目标层名称，如果为None则自动选择
         """
-        self.model = model
+        # 处理DataParallel包装的模型
+        if hasattr(model, 'module'):
+            self.model = model.module  # 使用原始模型进行hook注册
+            self.wrapped_model = model  # 保留包装模型用于推理
+        else:
+            self.model = model
+            self.wrapped_model = model
+
         self.model.eval()
 
         # 自动选择目标层
@@ -175,8 +182,8 @@ class GradCAM:
             self.gradients = None
             self.activations = None
 
-            # 前向传播
-            output = self.model(input_tensor)
+            # 前向传播 - 使用包装后的模型以支持DataParallel
+            output = self.wrapped_model(input_tensor)
 
             # 如果没有指定类别，使用预测的类别
             if class_idx is None:

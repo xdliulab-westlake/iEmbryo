@@ -473,15 +473,15 @@ def create_model(config: Dict) -> BackboneModel:
     Returns:
         BackboneModel实例
     """
-    model_config = config.get('model', {})
+    # config参数直接就是model配置，不需要再嵌套取model
     return BackboneModel(
-        model_name=model_config.get('name', 'vgg16'),
-        pretrained=model_config.get('pretrained', True),
-        pretrained_path=model_config.get('pretrained_path', None),
-        num_classes=model_config.get('num_classes', 2),
-        fine_tune=model_config.get('fine_tune', True),
-        fine_tune_layers=model_config.get('fine_tune_layers', None),
-        config=config  # 传递完整配置用于GPU增强
+        model_name=config.get('name', 'vgg16'),
+        pretrained=config.get('pretrained', True),
+        pretrained_path=config.get('pretrained_path', None),
+        num_classes=config.get('num_classes', 2),
+        fine_tune=config.get('fine_tune', True),
+        fine_tune_layers=config.get('fine_tune_layers', None),
+        config={'model': config}  # 重新构建完整配置结构用于GPU增强
     )
 
 
