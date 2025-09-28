@@ -248,16 +248,31 @@ class ModelManager:
 
         # 加载模型
         if device is not None:
-            model_data = torch.load(best_model_path, map_location=device)
+            loaded_model = torch.load(best_model_path, map_location=device)
         else:
-            model_data = torch.load(best_model_path)
+            loaded_model = torch.load(best_model_path)
 
-        model.load_state_dict(model_data['model_state_dict'])
+        # 检查加载的是完整模型对象还是字典
+        if hasattr(loaded_model, 'state_dict'):
+            # 完整模型对象
+            model.load_state_dict(loaded_model.state_dict())
+            best_metric_value = getattr(loaded_model, 'best_metric', {}).get('value', 'Unknown')
+            model_info = {
+                'best_metric': getattr(loaded_model, 'best_metric', {}),
+                'training_metrics': getattr(loaded_model, 'training_metrics', {}),
+                'training_config': getattr(loaded_model, 'training_config', {}),
+                'save_timestamp': getattr(loaded_model, 'save_timestamp', 'Unknown')
+            }
+        else:
+            # 字典格式
+            model.load_state_dict(loaded_model['model_state_dict'])
+            best_metric_value = loaded_model['best_metric']['value']
+            model_info = loaded_model
 
         print(f"最佳模型加载完成")
-        print(f"   {metric_name}: {model_data['best_metric']['value']:.4f}")
+        print(f"   {metric_name}: {best_metric_value:.4f}")
 
-        return model_data
+        return model_info
 
     def export_model(self,
                     model: nn.Module,
