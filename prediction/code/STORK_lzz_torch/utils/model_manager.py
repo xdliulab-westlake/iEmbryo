@@ -398,11 +398,23 @@ class ModelManager:
         for best_model in self.best_models_dir.glob(f"{self.model_name}_best_*.pth"):
             try:
                 data = torch.load(best_model, map_location='cpu')
+                # 检查是否是完整模型对象（有属性）还是字典格式
+                if hasattr(data, 'best_metric'):
+                    # 新格式：完整模型对象，从属性获取信息
+                    metric_name = getattr(data, 'best_metric', {}).get('name', 'Unknown') if hasattr(data, 'best_metric') else 'Unknown'
+                    metric_value = getattr(data, 'best_metric', {}).get('value', 'Unknown') if hasattr(data, 'best_metric') else 'Unknown'
+                    timestamp = getattr(data, 'save_timestamp', 'Unknown')
+                else:
+                    # 旧格式：字典格式，从字典获取信息
+                    metric_name = data.get('best_metric', {}).get('name', 'Unknown')
+                    metric_value = data.get('best_metric', {}).get('value', 'Unknown')
+                    timestamp = data.get('timestamp', 'Unknown')
+
                 summary['best_models'].append({
                     'path': str(best_model),
-                    'metric_name': data.get('best_metric', {}).get('name', 'Unknown'),
-                    'metric_value': data.get('best_metric', {}).get('value', 'Unknown'),
-                    'timestamp': data.get('timestamp', 'Unknown'),
+                    'metric_name': metric_name,
+                    'metric_value': metric_value,
+                    'timestamp': timestamp,
                     'size_mb': best_model.stat().st_size / (1024 * 1024)
                 })
             except Exception as e:
