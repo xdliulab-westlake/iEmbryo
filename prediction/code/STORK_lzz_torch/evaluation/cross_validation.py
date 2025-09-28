@@ -70,7 +70,7 @@ class CrossValidator:
         Returns:
             交叉验证结果字典
         """
-        print(f"🔄 开始 {self.n_folds} 折交叉验证...")
+        print(f"开始 {self.n_folds} 折交叉验证...")
 
         # 获取标签用于分层
         labels = np.array([dataset[i][1] for i in range(len(dataset))])
@@ -96,7 +96,7 @@ class CrossValidator:
 
         # 执行交叉验证
         for fold, (train_idx, val_idx) in enumerate(kfold.split(range(len(dataset)), labels)):
-            print(f"\n📊 处理第 {fold + 1}/{self.n_folds} 折...")
+            print(f"\n处理第 {fold + 1}/{self.n_folds} 折...")
 
             # 运行单折验证
             fold_result = self._run_single_fold(
@@ -118,7 +118,7 @@ class CrossValidator:
         # 创建可视化
         self._create_visualizations()
 
-        print(f"\n✅ 交叉验证完成!")
+        print(f"\n交叉验证完成!")
         print(f"   平均准确率: {summary['mean_accuracy']:.4f} ± {summary['std_accuracy']:.4f}")
         print(f"   结果保存在: {self.output_dir}")
 
@@ -189,7 +189,7 @@ class CrossValidator:
             return metrics
 
         except Exception as e:
-            print(f"❌ 第 {fold + 1} 折训练失败: {e}")
+            print(f"第 {fold + 1} 折训练失败: {e}")
             return None
 
     def _evaluate_fold(self, model: torch.nn.Module, val_loader: DataLoader, fold: int) -> Dict:
@@ -282,7 +282,7 @@ class CrossValidator:
         # 创建CSV格式的汇总表
         self._create_summary_table(summary)
 
-        print(f"📄 详细结果已保存: {results_file}")
+        print(f"详细结果已保存: {results_file}")
 
     def _make_serializable(self, obj):
         """将对象转换为可序列化格式"""
@@ -327,7 +327,7 @@ class CrossValidator:
         csv_file = self.output_dir / 'cv_summary.csv'
         df.to_csv(csv_file, index=False)
 
-        print(f"📊 汇总表已保存: {csv_file}")
+        print(f"汇总表已保存: {csv_file}")
 
     def _create_visualizations(self):
         """创建可视化图表"""

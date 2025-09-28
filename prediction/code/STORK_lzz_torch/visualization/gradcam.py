@@ -96,7 +96,7 @@ class GradCAM:
                 # 尝试每个可能的层名称
                 for layer_name in layer_names:
                     if self._get_layer_by_name(layer_name) is not None:
-                        print(f"🎯 找到匹配的层: {layer_name}")
+                        print(f"找到匹配的层: {layer_name}")
                         return layer_name
 
         # 如果没有找到，尝试查找backbone中的最后一个卷积层
@@ -114,7 +114,7 @@ class GradCAM:
         if target_layer is None:
             raise ValueError("无法找到合适的卷积层")
 
-        print(f"🎯 自动选择目标层: {target_layer}")
+        print(f"自动选择目标层: {target_layer}")
         return target_layer
 
     def _register_hooks(self):
@@ -142,7 +142,7 @@ class GradCAM:
             error_msg += f"可用的卷积层: {available_layers[:10]}{'...' if len(available_layers) > 10 else ''}"
             raise ValueError(error_msg)
 
-        print(f"✅ 成功注册Grad-CAM钩子到层: {self.target_layer_name}")
+        print(f"成功注册Grad-CAM钩子到层: {self.target_layer_name}")
 
         # 注册钩子并保存句柄以便后续清理
         self.forward_handle = target_layer.register_forward_hook(forward_hook)
@@ -171,7 +171,7 @@ class GradCAM:
         """
         # 检查钩子是否仍然有效
         if not self.is_hook_alive():
-            print("⚠️  钩子已失效，重新注册...")
+            print("钩子已失效，重新注册...")
             self.cleanup()
             self._register_hooks()
 
@@ -326,7 +326,7 @@ class GradCAMVisualizer:
         Returns:
             可视化结果字典
         """
-        print(f"🎨 生成 {num_samples} 个样本的Grad-CAM可视化...")
+        print(f"生成 {num_samples} 个样本的Grad-CAM可视化...")
 
         results = {
             'samples': [],
@@ -385,7 +385,7 @@ class GradCAMVisualizer:
         # 创建汇总可视化
         self._create_summary_visualization(results)
 
-        print(f"✅ Grad-CAM可视化完成")
+        print(f"Grad-CAM可视化完成")
         print(f"   准确率: {results['class_stats']['correct']}/{results['class_stats']['total']} "
               f"({100*results['class_stats']['correct']/max(1, results['class_stats']['total']):.1f}%)")
 
@@ -403,7 +403,7 @@ class GradCAMVisualizer:
 
             # 检查Grad-CAM对象是否仍然有效
             if not self.gradcam.is_hook_alive():
-                print(f"⚠️  样本 {sample_idx}: Grad-CAM钩子已失效，重新初始化...")
+                print(f"样本 {sample_idx}: Grad-CAM钩子已失效，重新初始化...")
                 # 清理旧的钩子
                 self.gradcam.cleanup()
                 # 重新创建Grad-CAM对象
@@ -455,7 +455,7 @@ class GradCAMVisualizer:
             }
 
         except Exception as e:
-            print(f"⚠️  样本 {sample_idx} 可视化失败: {e}")
+            print(f"样本 {sample_idx} 可视化失败: {e}")
             return None
 
     def _denormalize_image(self, tensor: torch.Tensor) -> np.ndarray:
@@ -479,7 +479,7 @@ class GradCAMVisualizer:
         if not results['samples']:
             return
 
-        print("📊 创建Grad-CAM汇总分析...")
+        print("创建Grad-CAM汇总分析...")
 
         # 分析注意力模式
         self._analyze_attention_patterns(results)

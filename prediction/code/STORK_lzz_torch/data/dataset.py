@@ -52,7 +52,7 @@ class EmbryoDataset(Dataset):
         assert len(self.image_paths) == len(self.labels), "图像路径和标签数量不匹配"
         assert len(self.image_paths) == len(self.qualities), "图像路径和质量分数数量不匹配"
 
-        print(f"📊 数据集初始化完成:")
+        print(f"数据集初始化完成:")
         print(f"   样本数量: {len(self.image_paths)}")
         print(f"   类别分布: {self._get_class_distribution()}")
         print(f"   缓存: {'启用' if self.use_cache else '禁用'}")
@@ -83,7 +83,7 @@ class EmbryoDataset(Dataset):
             image = Image.open(image_path).convert('RGB')
             return image
         except Exception as e:
-            print(f"❌ 加载图像失败: {image_path}, 错误: {e}")
+            print(f"加载图像失败: {image_path}, 错误: {e}")
             # 返回一个默认的黑色图像
             return Image.new('RGB', (224, 224), color='black')
 
@@ -112,7 +112,7 @@ class EmbryoDataset(Dataset):
             with open(cache_filepath, 'wb') as f:
                 pickle.dump(image, f)
         except Exception as e:
-            print(f"⚠️  缓存保存失败: {e}")
+            print(f"缓存保存失败: {e}")
 
         return image
 
@@ -161,7 +161,7 @@ class STORKDataLoader:
         # 加载数据路径和标签
         self.image_paths, self.labels, self.qualities = self._load_data_info()
 
-        print(f"📁 数据加载器初始化:")
+        print(f"数据加载器初始化:")
         print(f"   数据目录: {self.data_dir}")
         print(f"   总样本数: {len(self.image_paths)}")
         print(f"   训练比例: {self.train_split}")
@@ -330,7 +330,7 @@ class STORKDataLoader:
             pin_memory=True
         )
 
-        print(f"📊 数据加载器创建完成:")
+        print(f"数据加载器创建完成:")
         print(f"   训练集: {len(train_dataset)} 样本")
         if val_dataset:
             print(f"   验证集: {len(val_dataset)} 样本")

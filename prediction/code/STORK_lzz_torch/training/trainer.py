@@ -51,7 +51,7 @@ class STORKTrainer:
         self.logger = logger
 
         # 设备设置
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or (torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
         self.is_distributed = dist.is_available() and dist.is_initialized()
 
         # 模型设置
@@ -78,11 +78,7 @@ class STORKTrainer:
         if self.use_amp and not self.use_deepspeed:
             self.scaler = GradScaler()
 
-        print(f"🚀 训练器初始化完成:")
-        print(f"   设备: {self.device}")
-        print(f"   分布式训练: {self.is_distributed}")
-        print(f"   DeepSpeed: {self.use_deepspeed}")
-        print(f"   混合精度: {self.use_amp}")
+        print(f"训练器初始化完成: 设备={self.device}, 分布式={self.is_distributed}, DeepSpeed={self.use_deepspeed}, 混合精度={self.use_amp}")
 
     def _setup_deepspeed(self):
         """设置DeepSpeed训练"""
@@ -94,7 +90,6 @@ class STORKTrainer:
             model=self.model,
             config=ds_config
         )
-        print("✅ DeepSpeed引擎初始化完成")
 
     def _setup_standard_training(self):
         """设置标准训练"""
@@ -111,7 +106,6 @@ class STORKTrainer:
         # 学习率调度器
         self.lr_scheduler = self._create_scheduler()
 
-        print("✅ 标准训练设置完成")
 
     def _create_deepspeed_config(self) -> Dict:
         """创建DeepSpeed配置"""
@@ -164,52 +158,33 @@ class STORKTrainer:
         """创建优化器"""
         train_config = self.config.get('training', {})
         optimizer_name = train_config.get('optimizer', 'adamw').lower()
+        lr = train_config.get('learning_rate', 1e-4)
+        weight_decay = train_config.get('weight_decay', 0.01)
 
-        if optimizer_name == 'adamw':
-            return torch.optim.AdamW(
-                self.model.parameters(),
-                lr=train_config.get('learning_rate', 1e-4),
-                weight_decay=train_config.get('weight_decay', 0.01)
-            )
-        elif optimizer_name == 'adam':
-            return torch.optim.Adam(
-                self.model.parameters(),
-                lr=train_config.get('learning_rate', 1e-4),
-                weight_decay=train_config.get('weight_decay', 0.01)
-            )
-        elif optimizer_name == 'sgd':
-            return torch.optim.SGD(
-                self.model.parameters(),
-                lr=train_config.get('learning_rate', 1e-4),
-                momentum=0.9,
-                weight_decay=train_config.get('weight_decay', 0.01)
-            )
-        else:
+        optimizers = {
+            'adamw': lambda: torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay),
+            'adam': lambda: torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay),
+            'sgd': lambda: torch.optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+        }
+
+        if optimizer_name not in optimizers:
             raise ValueError(f"不支持的优化器: {optimizer_name}")
+
+        return optimizers[optimizer_name]()
 
     def _create_scheduler(self):
         """创建学习率调度器"""
         train_config = self.config.get('training', {})
         scheduler_name = train_config.get('scheduler', 'cosine').lower()
+        epochs = train_config.get('epochs', 2000)
 
-        if scheduler_name == 'cosine':
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=train_config.get('epochs', 2000)
-            )
-        elif scheduler_name == 'step':
-            return torch.optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=train_config.get('epochs', 2000) // 3,
-                gamma=0.1
-            )
-        elif scheduler_name == 'exponential':
-            return torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizer,
-                gamma=0.95
-            )
-        else:
-            return None
+        schedulers = {
+            'cosine': lambda: torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs),
+            'step': lambda: torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=epochs // 3, gamma=0.1),
+            'exponential': lambda: torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.95)
+        }
+
+        return schedulers.get(scheduler_name, lambda: None)()
 
     def _create_loss_function(self) -> nn.Module:
         """创建损失函数"""
@@ -218,19 +193,14 @@ class STORKTrainer:
 
         if loss_name == 'cross_entropy':
             class_weights = train_config.get('class_weights', None)
-            if class_weights:
-                weight = torch.tensor(class_weights, dtype=torch.float32).to(self.device)
-                return nn.CrossEntropyLoss(weight=weight)
-            else:
-                return nn.CrossEntropyLoss()
-
+            weight = torch.tensor(class_weights, dtype=torch.float32).to(self.device) if class_weights else None
+            return nn.CrossEntropyLoss(weight=weight)
         elif loss_name == 'focal':
             return FocalLoss(
                 alpha=train_config.get('focal_alpha', 0.25),
                 gamma=train_config.get('focal_gamma', 2.0),
                 num_classes=2
             )
-
         else:
             raise ValueError(f"不支持的损失函数: {loss_name}")
 
@@ -331,7 +301,7 @@ class STORKTrainer:
 
     def train(self, num_epochs: int) -> Dict[str, list]:
         """完整训练过程"""
-        print(f"\n🎯 开始训练 {num_epochs} 个epochs")
+        print(f"开始训练 {num_epochs} 个epochs")
 
         for epoch in range(num_epochs):
             self.current_epoch = epoch + 1
@@ -382,13 +352,13 @@ class STORKTrainer:
                     )
 
                     if is_best:
-                        print(f"🏆 新的最佳模型已保存! 验证准确率: {val_acc:.2f}%")
+                        print(f"新的最佳模型已保存! 验证准确率: {val_acc:.2f}%")
                 else:
                     # 后备保存方式
                     model_name = self.config.get('model', {}).get('name', 'unknown')
                     checkpoint_filename = f'{model_name}_best_model.pth'
                     self.save_checkpoint(checkpoint_filename)
-                    print(f"💾 最佳模型已保存到checkpoints/{checkpoint_filename} (准确率: {val_acc:.2f}%)")
+                    print(f"最佳模型已保存到checkpoints/{checkpoint_filename} (准确率: {val_acc:.2f}%)")
 
             # 使用ModelManager定期保存检查点
             if self.model_manager and (epoch % self.config.get('logging', {}).get('save_model_every_n_epochs', 50) == 0):
@@ -465,7 +435,7 @@ class STORKTrainer:
         self.train_history = checkpoint.get('train_history', {'loss': [], 'acc': []})
         self.val_history = checkpoint.get('val_history', {'loss': [], 'acc': []})
 
-        print(f"✅ 检查点加载完成: {filename}")
+        print(f"检查点加载完成: {filename}")
 
 
 class FocalLoss(nn.Module):

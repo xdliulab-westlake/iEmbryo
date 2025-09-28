@@ -418,4 +418,4 @@ if __name__ == "__main__":
     # 测试代码
     preprocessor = STORKPreprocessor()
     print(preprocessor.get_summary())
-    print("\n✅ STORK预处理器模块初始化成功!")
+    print("\nSTORK预处理器模块初始化成功!")

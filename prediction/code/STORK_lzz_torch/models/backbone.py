@@ -107,12 +107,12 @@ class BackboneModel(nn.Module):
         if config and check_kornia_available():
             try:
                 self.gpu_aug = create_gpu_transforms(config)
-                print("✅ GPU数据增强模块已启用")
+                print("GPU数据增强模块已启用")
             except Exception as e:
-                print(f"⚠️ GPU数据增强初始化失败: {e}")
-                print("🔄 回退到CPU数据增强")
+                print(f"GPU数据增强初始化失败: {e}")
+                print("回退到CPU数据增强")
         elif config:
-            print("⚠️ Kornia未安装，无法使用GPU数据增强")
+            print("Kornia未安装，无法使用GPU数据增强")
 
         # 创建骨干网络
         self.backbone = self._create_backbone(pretrained, pretrained_path)
@@ -135,14 +135,14 @@ class BackboneModel(nn.Module):
         # 如果没有指定路径，尝试使用默认路径
         if not pretrained_path and self.model_name in self.PRETRAINED_PATHS:
             pretrained_path = self.PRETRAINED_PATHS[self.model_name]
-            print(f"🔧 使用默认预训练模型路径: {pretrained_path}")
+            print(f"使用默认预训练模型路径: {pretrained_path}")
 
         # 如果有本地路径且文件存在，优先使用本地模型
         if pretrained_path and os.path.exists(pretrained_path):
             return self._load_local_pretrained(pretrained_path)
         elif pretrained_path and not os.path.exists(pretrained_path):
-            print(f"⚠️ 预训练模型文件不存在: {pretrained_path}")
-            print(f"🔄 回退到在线预训练模型 {self.model_name}...")
+            print(f"预训练模型文件不存在: {pretrained_path}")
+            print(f"回退到在线预训练模型 {self.model_name}...")
         # 优先使用timm，回退到torchvision
         try:
             if self.model_config['timm_name']:
@@ -152,10 +152,10 @@ class BackboneModel(nn.Module):
                     num_classes=0,  # 移除分类头
                     global_pool=''  # 移除全局池化
                 )
-                print(f"✅ 使用timm加载模型: {self.model_config['timm_name']}")
+                print(f"使用timm加载模型: {self.model_config['timm_name']}")
                 return backbone
         except Exception as e:
-            print(f"⚠️  timm加载失败: {e}")
+            print(f"timm加载失败: {e}")
 
         # 回退到torchvision
         if self.model_config['torchvision_name']:
@@ -171,7 +171,7 @@ class BackboneModel(nn.Module):
                 backbone = models.inception_v3(pretrained=pretrained, aux_logits=False)
                 backbone = nn.Sequential(*list(backbone.children())[:-1])
 
-            print(f"✅ 使用torchvision加载模型: {self.model_config['torchvision_name']}")
+            print(f"使用torchvision加载模型: {self.model_config['torchvision_name']}")
             return backbone
 
         raise RuntimeError(f"无法创建模型: {self.model_name}")
@@ -179,7 +179,7 @@ class BackboneModel(nn.Module):
     def _load_local_pretrained(self, pretrained_path: str) -> nn.Module:
         """加载本地预训练模型"""
         try:
-            print(f"🔄 正在加载本地预训练模型: {pretrained_path}")
+            print(f"正在加载本地预训练模型: {pretrained_path}")
 
             # 根据文件扩展名判断加载方式
             if pretrained_path.endswith('.pth') or pretrained_path.endswith('.pt'):
@@ -189,8 +189,8 @@ class BackboneModel(nn.Module):
                 raise ValueError(f"不支持的模型格式: {pretrained_path}")
 
         except Exception as e:
-            print(f"❌ 本地模型加载失败: {e}")
-            print("🔄 回退到在线预训练模型...")
+            print(f"本地模型加载失败: {e}")
+            print("回退到在线预训练模型...")
             # 回退到在线模型
             return self._create_online_backbone(True)
 
@@ -207,7 +207,7 @@ class BackboneModel(nn.Module):
                     global_pool=''
                 )
             except Exception as e:
-                print(f"⚠️ timm创建模型失败: {e}，使用torchvision")
+                print(f"timm创建模型失败: {e}，使用torchvision")
                 backbone = self._create_torchvision_backbone(pretrained=False)
         else:
             # VGG16或其他情况使用torchvision创建空模型
@@ -253,11 +253,11 @@ class BackboneModel(nn.Module):
         missing_keys, unexpected_keys = backbone.load_state_dict(cleaned_state_dict, strict=False)
 
         if missing_keys:
-            print(f"⚠️ 缺少的键: {len(missing_keys)} 个")
+            print(f"缺少的键: {len(missing_keys)} 个")
         if unexpected_keys:
-            print(f"⚠️ 多余的键: {len(unexpected_keys)} 个")
+            print(f"多余的键: {len(unexpected_keys)} 个")
 
-        print(f"✅ 成功加载本地PyTorch模型: {model_path}")
+        print(f"成功加载本地PyTorch模型: {model_path}")
 
         return backbone
 
@@ -299,10 +299,10 @@ class BackboneModel(nn.Module):
                     num_classes=0,  # 移除分类头
                     global_pool=''  # 移除全局池化
                 )
-                print(f"✅ 使用timm加载模型: {self.model_config['timm_name']}")
+                print(f"使用timm加载模型: {self.model_config['timm_name']}")
                 return backbone
         except Exception as e:
-            print(f"⚠️  timm加载失败: {e}")
+            print(f"timm加载失败: {e}")
 
         # 回退到torchvision
         return self._create_torchvision_backbone(pretrained)
@@ -342,7 +342,7 @@ class BackboneModel(nn.Module):
         else:
             self._apply_optimal_fine_tuning()
 
-        print(f"🔧 微调模式: 解冻部分层用于训练")
+        print(f"微调模式: 解冻部分层用于训练")
 
     def _apply_optimal_fine_tuning(self):
         """应用最优微调策略：固定前1/3层，微调后2/3层（与STORK_lzz一致）"""
@@ -365,8 +365,8 @@ class BackboneModel(nn.Module):
         total_layers = len(trainable_layers)
         optimal_fine_tune_at = int(total_layers * 1/3)
 
-        print(f"🔓 启用最优微调策略: 固定前1/3层")
-        print(f"📊 {self.model_name.upper()} 层数分析:")
+        print(f"启用最优微调策略: 固定前1/3层")
+        print(f"{self.model_name.upper()} 层数分析:")
         print(f"   总层数: {total_layers}")
         print(f"   固定层数: {optimal_fine_tune_at} (前 {optimal_fine_tune_at/total_layers:.1%})")
         print(f"   微调层数: {total_layers - optimal_fine_tune_at} (后 {(total_layers - optimal_fine_tune_at)/total_layers:.1%})")
@@ -385,9 +385,9 @@ class BackboneModel(nn.Module):
         frozen_count = optimal_fine_tune_at
         trainable_count = total_layers - optimal_fine_tune_at
 
-        print(f"✅ 微调配置完成: {trainable_count}/{total_layers} 层可训练")
-        print(f"   🔒 冻结层: {frozen_count} 层 (前1/3)")
-        print(f"   🔓 训练层: {trainable_count} 层 (后2/3)")
+        print(f"微调配置完成: {trainable_count}/{total_layers} 层可训练")
+        print(f"   冻结层: {frozen_count} 层 (前1/3)")
+        print(f"   训练层: {trainable_count} 层 (后2/3)")
 
     def _unfreeze_top_layers(self, num_layers: int):
         """解冻顶部指定数量的层"""
@@ -403,14 +403,14 @@ class BackboneModel(nn.Module):
         """根据模型类型解冻默认层（已弃用，使用最优微调策略）"""
         # 这个方法已被 _apply_optimal_fine_tuning 替代
         # 保留只是为了向后兼容
-        print("⚠️ 使用已弃用的默认微调策略，建议使用最优策略")
+        print("使用已弃用的默认微调策略，建议使用最优策略")
         self._apply_optimal_fine_tuning()
 
     def _freeze_backbone(self):
         """冻结骨干网络"""
         for param in self.backbone.parameters():
             param.requires_grad = False
-        print("🔒 骨干网络已冻结，仅训练分类头")
+        print("骨干网络已冻结，仅训练分类头")
 
     def forward(self, x: torch.Tensor, labels: torch.Tensor = None) -> torch.Tensor:
         """前向传播"""
@@ -453,7 +453,7 @@ class BackboneModel(nn.Module):
     def print_model_info(self):
         """打印模型信息"""
         trainable, total = self.get_trainable_parameters()
-        print(f"\n🤖 模型信息:")
+        print(f"\n模型信息:")
         print(f"   名称: {self.model_name}")
         print(f"   描述: {self.model_config['description']}")
         print(f"   特征维度: {self.feature_dim}")

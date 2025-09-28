@@ -3,15 +3,22 @@
 支持模型检查点、最佳模型保存、模型恢复等功能
 """
 
-import torch
-import torch.nn as nn
-from typing import Dict, Any, Optional, Union
-from pathlib import Path
+import os
 import json
 import shutil
 import warnings
 from datetime import datetime
-import os
+from pathlib import Path
+from typing import Dict, Any, Optional, Union
+
+import torch
+import torch.nn as nn
+
+try:
+    import torch.onnx
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
 
 
 class ModelManager:
@@ -82,7 +89,7 @@ class ModelManager:
 
         torch.save(checkpoint, checkpoint_path)
 
-        print(f"💾 检查点已保存: {checkpoint_path}")
+        print(f"检查点已保存: {checkpoint_path}")
         return str(checkpoint_path)
 
     def save_best_model(self,
@@ -145,15 +152,10 @@ class ModelManager:
             model.training_config = config
             model.save_timestamp = datetime.now().isoformat()
 
-            try:
-                # 保存完整模型
-                torch.save(model, best_model_path)
-                print(f"🏆 完整模型已保存: {best_model_path}")
-                print(f"   {metric_name}: {current_metric:.4f}")
-                print(f"   包含: 模型结构 + 权重 + 训练信息")
-            except Exception as e:
-                print(f"❌ 模型保存失败: {e}")
-                return False
+            torch.save(model, best_model_path)
+            print(f"完整模型已保存: {best_model_path}")
+            print(f"   {metric_name}: {current_metric:.4f}")
+            print(f"   包含: 模型结构 + 权重 + 训练信息")
 
             # 保存独立的元数据文件（可选，用于快速查看信息）
             metadata = {
@@ -197,7 +199,7 @@ class ModelManager:
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"检查点文件不存在: {checkpoint_path}")
 
-        print(f"📂 加载检查点: {checkpoint_path}")
+        print(f"加载检查点: {checkpoint_path}")
 
         # 加载检查点
         if device is not None:
@@ -216,7 +218,7 @@ class ModelManager:
         if scheduler is not None and 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
-        print(f"✅ 检查点加载完成")
+        print(f"检查点加载完成")
         print(f"   轮数: {checkpoint.get('epoch', 'Unknown')}")
         print(f"   指标: {checkpoint.get('metrics', {})}")
 
@@ -242,7 +244,7 @@ class ModelManager:
         if not best_model_path.exists():
             raise FileNotFoundError(f"最佳模型不存在: {best_model_path}")
 
-        print(f"🏆 加载最佳模型: {best_model_path}")
+        print(f"加载最佳模型: {best_model_path}")
 
         # 加载模型
         if device is not None:
@@ -252,7 +254,7 @@ class ModelManager:
 
         model.load_state_dict(model_data['model_state_dict'])
 
-        print(f"✅ 最佳模型加载完成")
+        print(f"最佳模型加载完成")
         print(f"   {metric_name}: {model_data['best_metric']['value']:.4f}")
 
         return model_data
@@ -290,9 +292,7 @@ class ModelManager:
 
     def _export_onnx(self, model: nn.Module, input_shape: tuple, model_name: str) -> str:
         """导出ONNX格式"""
-        try:
-            import torch.onnx
-        except ImportError:
+        if not ONNX_AVAILABLE:
             raise ImportError("ONNX导出需要安装onnx库: pip install onnx")
 
         export_path = self.exports_dir / f"{model_name}.onnx"
@@ -316,7 +316,7 @@ class ModelManager:
             }
         )
 
-        print(f"📦 ONNX模型已导出: {export_path}")
+        print(f"ONNX模型已导出: {export_path}")
         return str(export_path)
 
     def _export_torchscript(self, model: nn.Module, input_shape: tuple, model_name: str) -> str:
@@ -327,7 +327,7 @@ class ModelManager:
         scripted_model = torch.jit.script(model)
         scripted_model.save(export_path)
 
-        print(f"📦 TorchScript模型已导出: {export_path}")
+        print(f"TorchScript模型已导出: {export_path}")
         return str(export_path)
 
     def _export_traced(self, model: nn.Module, input_shape: tuple, model_name: str) -> str:
@@ -342,7 +342,7 @@ class ModelManager:
         traced_model = torch.jit.trace(model, dummy_input)
         traced_model.save(export_path)
 
-        print(f"📦 Traced模型已导出: {export_path}")
+        print(f"Traced模型已导出: {export_path}")
         return str(export_path)
 
     def get_latest_checkpoint(self) -> Optional[str]:
@@ -367,7 +367,7 @@ class ModelManager:
         # 删除多余的检查点
         for checkpoint in checkpoints[keep_last_n:]:
             checkpoint.unlink()
-            print(f"🗑️  删除旧检查点: {checkpoint.name}")
+            print(f"删除旧检查点: {checkpoint.name}")
 
     def get_model_summary(self) -> Dict[str, Any]:
         """获取模型目录摘要"""
@@ -392,7 +392,7 @@ class ModelManager:
                     'size_mb': checkpoint.stat().st_size / (1024 * 1024)
                 })
             except Exception as e:
-                print(f"⚠️  无法读取检查点 {checkpoint}: {e}")
+                print(f"无法读取检查点 {checkpoint}: {e}")
 
         # 最佳模型信息
         for best_model in self.best_models_dir.glob(f"{self.model_name}_best_*.pth"):
@@ -418,7 +418,7 @@ class ModelManager:
                     'size_mb': best_model.stat().st_size / (1024 * 1024)
                 })
             except Exception as e:
-                print(f"⚠️  无法读取最佳模型 {best_model}: {e}")
+                print(f"无法读取最佳模型 {best_model}: {e}")
 
         # 导出模型信息
         for export in self.exports_dir.glob(f"{self.model_name}*"):

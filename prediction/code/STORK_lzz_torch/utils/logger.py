@@ -3,17 +3,24 @@
 提供训练过程的日志记录和监控功能
 """
 
+import json
 import logging
 import sys
-from typing import Dict, Any, Optional, List, Union
-from pathlib import Path
-import json
 import time
+from collections import defaultdict, deque
 from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, Optional, List, Union
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from collections import defaultdict, deque
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
 
 
 class TrainingLogger:
@@ -89,15 +96,15 @@ class TrainingLogger:
     def log_training_start(self, config: Dict[str, Any]):
         """记录训练开始"""
         self.start_time = time.time()
-        self.info("🚀 开始训练")
-        self.info(f"📋 训练配置:")
+        self.info("开始训练")
+        self.info(f"训练配置:")
         for key, value in config.items():
             self.info(f"   {key}: {value}")
 
     def log_epoch_start(self, epoch: int, total_epochs: int):
         """记录轮次开始"""
         self.epoch_start_time = time.time()
-        self.info(f"📊 开始第 {epoch + 1}/{total_epochs} 轮训练")
+        self.info(f"开始第 {epoch + 1}/{total_epochs} 轮训练")
 
     def log_epoch_end(self, epoch: int, metrics: Dict[str, float]):
         """记录轮次结束"""
@@ -110,17 +117,17 @@ class TrainingLogger:
 
         # 格式化指标信息
         metrics_str = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
-        self.info(f"✅ 第 {epoch + 1} 轮完成 (用时: {epoch_time:.1f}s) | {metrics_str}")
+        self.info(f"第 {epoch + 1} 轮完成 (用时: {epoch_time:.1f}s) | {metrics_str}")
 
     def log_training_end(self, final_metrics: Dict[str, float]):
         """记录训练结束"""
         total_time = time.time() - self.start_time
         avg_epoch_time = np.mean(self.epoch_times) if self.epoch_times else 0
 
-        self.info("🎉 训练完成")
-        self.info(f"⏱️  总用时: {total_time:.1f}s ({total_time/3600:.2f}h)")
-        self.info(f"⏱️  平均每轮: {avg_epoch_time:.1f}s")
-        self.info("📊 最终指标:")
+        self.info("训练完成")
+        self.info(f"总用时: {total_time:.1f}s ({total_time/3600:.2f}h)")
+        self.info(f"平均每轮: {avg_epoch_time:.1f}s")
+        self.info("最终指标:")
         for key, value in final_metrics.items():
             self.info(f"   {key}: {value:.4f}")
 
@@ -129,19 +136,19 @@ class TrainingLogger:
 
     def log_best_model(self, epoch: int, metric_name: str, metric_value: float):
         """记录最佳模型"""
-        self.info(f"🏆 发现最佳模型! 第 {epoch + 1} 轮, {metric_name}: {metric_value:.4f}")
+        self.info(f"发现最佳模型! 第 {epoch + 1} 轮, {metric_name}: {metric_value:.4f}")
 
     def log_early_stopping(self, epoch: int, patience: int):
         """记录早停"""
-        self.warning(f"⏹️  早停触发! 第 {epoch + 1} 轮, 耐心值: {patience}")
+        self.warning(f"早停触发! 第 {epoch + 1} 轮, 耐心值: {patience}")
 
     def log_learning_rate(self, lr: float):
         """记录学习率变化"""
-        self.debug(f"📈 学习率: {lr:.6f}")
+        self.debug(f"学习率: {lr:.6f}")
 
     def log_memory_usage(self, gpu_memory_mb: float, cpu_memory_mb: float):
         """记录内存使用"""
-        self.debug(f"💾 内存使用 - GPU: {gpu_memory_mb:.1f}MB, CPU: {cpu_memory_mb:.1f}MB")
+        self.debug(f"内存使用 - GPU: {gpu_memory_mb:.1f}MB, CPU: {cpu_memory_mb:.1f}MB")
 
     def _save_training_history(self):
         """保存训练历史"""
@@ -159,7 +166,7 @@ class TrainingLogger:
         with open(history_file, 'w', encoding='utf-8') as f:
             json.dump(history_data, f, indent=2, ensure_ascii=False)
 
-        self.info(f"📊 训练历史已保存: {history_file}")
+        self.info(f"训练历史已保存: {history_file}")
 
 
 class MetricsMonitor:
@@ -268,12 +275,11 @@ class TensorBoardLogger:
         self.writer = None
 
         if enabled:
-            try:
-                from torch.utils.tensorboard import SummaryWriter
+            if TENSORBOARD_AVAILABLE:
                 self.writer = SummaryWriter(log_dir)
-                print(f"📊 TensorBoard已启用: {log_dir}")
-            except ImportError:
-                print("⚠️  TensorBoard未安装，跳过TensorBoard日志")
+                print(f"TensorBoard已启用: {log_dir}")
+            else:
+                print("TensorBoard未安装，跳过TensorBoard日志")
                 self.enabled = False
 
     def log_scalar(self, tag: str, value: float, step: int):
@@ -344,7 +350,7 @@ class PlotGenerator:
                 available_metrics.append(metric)
 
         if not available_metrics:
-            print("⚠️  没有可绘制的训练曲线数据")
+            print("没有可绘制的训练曲线数据")
             return ""
 
         # 创建子图
@@ -387,7 +393,7 @@ class PlotGenerator:
         plt.savefig(save_path, dpi=150, bbox_inches='tight', format='pdf')
         plt.close()
 
-        print(f"📈 Training curves saved: {save_path}")
+        print(f"Training curves saved: {save_path}")
         return str(save_path)
 
     def plot_learning_rate_schedule(self,
@@ -419,7 +425,7 @@ class PlotGenerator:
         plt.savefig(save_path, dpi=150, bbox_inches='tight', format='pdf')
         plt.close()
 
-        print(f"📉 Learning rate curve saved: {save_path}")
+        print(f"Learning rate curve saved: {save_path}")
         return str(save_path)
 
 

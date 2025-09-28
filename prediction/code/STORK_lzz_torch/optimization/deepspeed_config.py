@@ -37,13 +37,13 @@ class DeepSpeedOptimizer:
 
         if self.available:
             if is_main_process():
-                print("🚀 DeepSpeed可用，将启用ZeRO内存优化")
+                print("DeepSpeed可用，将启用ZeRO内存优化")
         else:
             if is_main_process():
                 if not DEEPSPEED_AVAILABLE:
-                    print("⚠️  DeepSpeed未安装，使用标准PyTorch优化")
+                    print("DeepSpeed未安装，使用标准PyTorch优化")
                 else:
-                    print("🔧 使用标准PyTorch优化（DeepSpeed已禁用）")
+                    print("使用标准PyTorch优化（DeepSpeed已禁用）")
 
     def is_available(self) -> bool:
         """检查DeepSpeed是否可用"""
@@ -210,14 +210,14 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
             pass
 
         if is_main_process():
-            print(f"🔧 CUDA设备数量: {torch.cuda.device_count()}")
+            print(f"CUDA设备数量: {torch.cuda.device_count()}")
             for i in range(torch.cuda.device_count()):
                 print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
 
     else:
         device = torch.device('cpu')
         if is_main_process():
-            print("⚠️  未检测到CUDA设备，使用CPU训练")
+            print("未检测到CUDA设备，使用CPU训练")
 
     # 分布式训练设置
     is_distributed = False
@@ -229,15 +229,15 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
                 if 'WORLD_SIZE' in os.environ and 'RANK' in os.environ:
                     # 已经通过分布式启动器启动，直接初始化
                     if is_main_process():
-                        print(f"🚀 检测到分布式环境，初始化 {os.environ.get('WORLD_SIZE')} 块GPU")
+                        print(f"检测到分布式环境，初始化 {os.environ.get('WORLD_SIZE')} 块GPU")
                     try:
                         dist.init_process_group(backend='nccl')
                         is_distributed = True
                         if is_main_process():
-                            print(f"✅ 分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
+                            print(f"分布式训练初始化完成: 使用 {dist.get_world_size()} 块GPU")
                     except Exception as e:
                         if is_main_process():
-                            print(f"⚠️  分布式初始化失败: {e}，回退到单GPU训练")
+                            print(f"分布式初始化失败: {e}，回退到单GPU训练")
                         is_distributed = False
                 else:
                     # 检查是否要使用DeepSpeed
@@ -246,9 +246,9 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
 
                     if use_deepspeed:
                         # DeepSpeed需要分布式环境，但单进程启动时禁用DeepSpeed
-                        print(f"⚠️  DeepSpeed需要分布式环境启动，当前为单进程模式")
-                        print("🔄 自动禁用DeepSpeed，使用DataParallel进行多GPU训练")
-                        print("💡 如需使用DeepSpeed，请使用以下命令启动：")
+                        print(f"DeepSpeed需要分布式环境启动，当前为单进程模式")
+                        print("自动禁用DeepSpeed，使用DataParallel进行多GPU训练")
+                        print("如需使用DeepSpeed，请使用以下命令启动：")
                         print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} main.py --config config/my_config.yaml")
 
                         # 在配置中临时禁用DeepSpeed
@@ -256,29 +256,29 @@ def setup_pytorch_optimization(config: Dict[str, Any]) -> Tuple[torch.device, bo
                         is_distributed = False
                     else:
                         # 不使用DeepSpeed，使用DataParallel
-                        print(f"🔧 检测到 {torch.cuda.device_count()} 块GPU，将使用DataParallel进行多GPU训练")
-                        print("💡 提示：如需更高效的分布式训练，请使用以下命令启动：")
+                        print(f"检测到 {torch.cuda.device_count()} 块GPU，将使用DataParallel进行多GPU训练")
+                        print("提示：如需更高效的分布式训练，请使用以下命令启动：")
                         print(f"   torchrun --nproc_per_node={torch.cuda.device_count()} main.py --config config/my_config.yaml")
                         is_distributed = False
             else:
                 is_distributed = True
                 if is_main_process():
-                    print("✅ 分布式训练已初始化")
+                    print("分布式训练已初始化")
         except Exception as e:
             if is_main_process():
-                print(f"⚠️  分布式训练初始化失败: {e}")
+                print(f"分布式训练初始化失败: {e}")
             is_distributed = False
 
     # 混合精度设置
     if opt_config.get('mixed_precision', True) and device.type == 'cuda':
         # PyTorch AMP会自动处理
         if is_main_process():
-            print("🎯 启用混合精度训练(AMP)")
+            print("启用混合精度训练(AMP)")
 
     # 编译优化（PyTorch 2.0+）
     if hasattr(torch, 'compile') and opt_config.get('torch_compile', False):
         if is_main_process():
-            print("⚡ 启用torch.compile优化")
+            print("启用torch.compile优化")
 
     return device, is_distributed
 
@@ -298,7 +298,7 @@ def calculate_optimal_batch_size(config: Dict[str, Any]) -> Tuple[int, int]:
 
     global_batch_size = per_gpu_batch_size * num_gpus
 
-    print(f"📦 批处理大小配置:")
+    print(f"批处理大小配置:")
     print(f"   每GPU批次: {per_gpu_batch_size}")
     print(f"   GPU数量: {num_gpus}")
     print(f"   总批次大小: {global_batch_size}")
@@ -323,13 +323,9 @@ class MemoryMonitor:
         max_allocated = torch.cuda.max_memory_allocated(self.device) / 1024**3
 
         if stage:
-            print(f"📊 {stage} GPU内存使用:")
+            print(f"{stage} GPU内存使用: 已分配={allocated:.2f}GB, 已保留={reserved:.2f}GB, 峰值分配={max_allocated:.2f}GB")
         else:
-            print("📊 GPU内存使用:")
-
-        print(f"   已分配: {allocated:.2f}GB")
-        print(f"   已保留: {reserved:.2f}GB")
-        print(f"   峰值分配: {max_allocated:.2f}GB")
+            print(f"GPU内存使用: 已分配={allocated:.2f}GB, 已保留={reserved:.2f}GB, 峰值分配={max_allocated:.2f}GB")
 
     def reset_peak_stats(self):
         """重置峰值统计"""
@@ -369,7 +365,7 @@ def create_optimization_setup(config: Dict[str, Any]) -> Dict[str, Any]:
         'strategy_description': deepspeed_optimizer.get_strategy_description()
     }
 
-    print(f"\n🎯 优化设置完成:")
+    print(f"\n优化设置完成:")
     print(f"   策略: {setup_info['strategy_description']}")
     print(f"   设备: {device}")
     print(f"   分布式: {is_distributed}")

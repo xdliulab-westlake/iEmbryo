@@ -139,7 +139,7 @@ class ConfigManager:
 
     def print_config(self):
         """打印当前配置"""
-        print("🔧 当前配置:")
+        print("当前配置:")
         print("=" * 50)
         self._print_dict(self.config, indent=0)
         print("=" * 50)

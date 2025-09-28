@@ -144,10 +144,10 @@ class BatchCacheManager:
                                       apply_center_crop, split, train_split, random_state)
 
         if cache_key in self.index:
-            print(f"✅ 缓存已存在: {cache_key}")
+            print(f"缓存已存在: {cache_key}")
             return cache_key
 
-        print(f"🔄 开始批量缓存: {len(image_paths)} 张图片")
+        print(f"开始批量缓存: {len(image_paths)} 张图片")
         start_time = time.time()
 
         # 分块处理
@@ -180,7 +180,7 @@ class BatchCacheManager:
 
                     chunk_data.append(torch.from_numpy(preprocessed_img.astype(np.uint8)))
                 except Exception as e:
-                    print(f"⚠️ 预处理失败: {path}, 错误: {e}")
+                    print(f"预处理失败: {path}, 错误: {e}")
                     # 创建零图像作为占位符（uint8格式）
                     chunk_data.append(torch.zeros(3, img_size, img_size, dtype=torch.uint8))
 
@@ -233,7 +233,7 @@ class BatchCacheManager:
         self._save_metadata()
 
         elapsed_time = time.time() - start_time
-        print(f"✅ 批量缓存完成: {cache_key}")
+        print(f"批量缓存完成: {cache_key}")
         print(f"   文件数量: {total_chunks} 个chunk文件 (vs {len(image_paths)} 个单独文件)")
         print(f"   缓存时间: {elapsed_time:.2f} 秒")
         print(f"   平均速度: {len(image_paths)/elapsed_time:.1f} 张/秒")
@@ -256,7 +256,7 @@ class BatchCacheManager:
         cache_info = self.index[cache_key]
         chunks = cache_info['chunks']
 
-        print(f"🔄 加载批量缓存: {cache_key}")
+        print(f"加载批量缓存: {cache_key}")
         start_time = time.time()
 
         all_images = []
@@ -267,7 +267,7 @@ class BatchCacheManager:
             chunk_path = self.cache_dir / chunk_info['filename']
 
             if not chunk_path.exists():
-                print(f"❌ 缓存块不存在: {chunk_info['filename']}")
+                print(f"缓存块不存在: {chunk_info['filename']}")
                 return None
 
             try:
@@ -276,12 +276,12 @@ class BatchCacheManager:
                 all_labels.append(chunk_data['labels'])
                 all_paths.extend(chunk_data['paths'])
             except Exception as e:
-                print(f"❌ 加载缓存块失败: {chunk_info['filename']}, 错误: {e}")
+                print(f"加载缓存块失败: {chunk_info['filename']}, 错误: {e}")
                 return None
 
         # 检查是否有数据
         if not all_images:
-            print("❌ 缓存中没有图片数据")
+            print("缓存中没有图片数据")
             return None
 
         # 合并所有数据
@@ -289,7 +289,7 @@ class BatchCacheManager:
         labels = torch.cat(all_labels, dim=0)
 
         elapsed_time = time.time() - start_time
-        print(f"✅ 批量缓存加载完成: {len(images)} 张图片")
+        print(f"批量缓存加载完成: {len(images)} 张图片")
         print(f"   加载时间: {elapsed_time:.2f} 秒")
         print(f"   加载速度: {len(images)/elapsed_time:.1f} 张/秒")
 
@@ -316,7 +316,7 @@ class BatchCacheManager:
 
         self._save_index()
         self._save_metadata()
-        print(f"✅ 缓存清理完成")
+        print(f"缓存清理完成")
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """获取缓存统计信息"""
@@ -385,7 +385,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
 
         # 检查是否有图片
         if len(image_paths) == 0:
-            print(f"⚠️ {split}数据集为空，创建空数据集")
+            print(f"{split}数据集为空，创建空数据集")
             self.images = torch.empty(0, 3, img_size, img_size)
             self.cached_labels = torch.empty(0, dtype=torch.long)
             self.cached_paths = []
@@ -394,10 +394,10 @@ class BatchCachedDataset(torch.utils.data.Dataset):
         self.cached_data = None
         if self.cache_manager.is_cached(data_dir, img_size, apply_petri_crop, apply_center_crop,
                                       split, train_split, random_state):
-            print(f"✅ 发现已有缓存: {self.cache_key}，加载中...")
+            print(f"发现已有缓存: {self.cache_key}，加载中...")
             self.cached_data = self.cache_manager.load_cached_data(self.cache_key)
         else:
-            print(f"🔄 未发现缓存: {self.cache_key}，创建批量缓存...")
+            print(f"未发现缓存: {self.cache_key}，创建批量缓存...")
             self.cache_manager.save_batch_cache(
                 image_paths, labels, data_dir, img_size, apply_petri_crop,
                 apply_center_crop, split, is_training, train_split, random_state
@@ -405,14 +405,14 @@ class BatchCachedDataset(torch.utils.data.Dataset):
             self.cached_data = self.cache_manager.load_cached_data(self.cache_key)
 
         if self.cached_data is None:
-            print(f"⚠️ 无法加载缓存数据，创建空数据集")
+            print(f"无法加载缓存数据，创建空数据集")
             self.images = torch.empty(0, 3, img_size, img_size, dtype=torch.uint8)
             self.cached_labels = torch.empty(0, dtype=torch.long)
             self.cached_paths = []
         else:
             if self.use_memory_mapping:
                 # 延迟加载：只保存元数据，使用时再加载具体chunk
-                print(f"🗂️  启用延迟加载模式")
+                print(f" 启用延迟加载模式")
                 self.images = None  # 延迟加载
                 self.cached_labels = self.cached_data[1]
                 self.cached_paths = self.cached_data[2]
@@ -420,7 +420,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
             else:
                 # 全量加载到内存
                 self.images, self.cached_labels, self.cached_paths = self.cached_data
-                print(f"✅ 批量缓存数据集初始化完成: {len(self.images)} 张图片")
+                print(f"批量缓存数据集初始化完成: {len(self.images)} 张图片")
 
     def _setup_chunk_mapping(self):
         """设置chunk映射，用于延迟加载"""

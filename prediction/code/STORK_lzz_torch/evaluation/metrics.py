@@ -187,7 +187,7 @@ class ReportGenerator:
         Returns:
             报告文件路径
         """
-        print("📊 生成评估报告...")
+        print("生成评估报告...")
 
         # 设置类别名称
         if class_names is None:
@@ -206,7 +206,7 @@ class ReportGenerator:
         # 4. 生成CSV摘要
         csv_path = self._generate_csv_summary(metrics)
 
-        print(f"✅ 报告生成完成:")
+        print(f"报告生成完成:")
         print(f"   HTML报告: {html_path}")
         print(f"   JSON报告: {json_path}")
         print(f"   CSV摘要: {csv_path}")
@@ -264,7 +264,7 @@ class ReportGenerator:
     </div>
 
     <div class="section">
-        <h2>📊 核心指标</h2>
+        <h2>核心指标</h2>
         <div class="metrics-grid">
             <div class="metric-card">
                 <div class="metric-value">{metrics.get('accuracy', 0):.4f}</div>
@@ -286,22 +286,22 @@ class ReportGenerator:
     </div>
 
     <div class="section">
-        <h2>📈 详细指标</h2>
+        <h2>详细指标</h2>
         {self._generate_metrics_table(metrics)}
     </div>
 
     <div class="section">
-        <h2>🔍 混淆矩阵</h2>
+        <h2>混淆矩阵</h2>
         {self._generate_confusion_matrix_html(metrics.get('confusion_matrix', []), class_names)}
     </div>
 
     <div class="section">
-        <h2>📋 分类报告</h2>
+        <h2>分类报告</h2>
         {self._generate_classification_report_html(metrics.get('classification_report', {}))}
     </div>
 
     <div class="section">
-        <h2>📊 可视化图表</h2>
+        <h2>可视化图表</h2>
         <p>以下图表已保存到输出目录:</p>
         <ul>
             <li>混淆矩阵热力图: confusion_matrix.png</li>
@@ -544,7 +544,7 @@ def evaluate_model(model: torch.nn.Module,
     all_labels = []
     all_probs = []
 
-    print("🔍 正在评估模型...")
+    print("正在评估模型...")
 
     with torch.no_grad():
         for images, labels in data_loader:

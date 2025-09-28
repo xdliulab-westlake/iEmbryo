@@ -6,6 +6,7 @@ STORK PyTorch 主程序
 
 import os
 import sys
+import traceback
 import warnings
 from pathlib import Path
 
@@ -17,6 +18,13 @@ warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import torch
+from torch.utils.data import DataLoader, random_split, ConcatDataset
+try:
+    from torch.utils.data.distributed import DistributedSampler
+    DISTRIBUTED_AVAILABLE = True
+except ImportError:
+    DISTRIBUTED_AVAILABLE = False
+
 from config import create_arg_parser, load_config
 from models import create_model
 from data import STORKDataLoader, create_train_transforms, create_val_transforms
@@ -36,7 +44,7 @@ class STORKApplication:
         self.is_main_process = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
 
         if self.is_main_process:
-            print("🧬 STORK PyTorch 胚胎分类系统")
+            print("STORK PyTorch 胚胎分类系统")
             print("=" * 50)
 
         # 加载配置
@@ -77,7 +85,7 @@ class STORKApplication:
     def setup_data(self):
         """设置数据加载器"""
         if self.is_main_process:
-            print("\n📊 设置STORK数据加载器...")
+            print("\n设置STORK数据加载器...")
 
         # 创建STORK数据加载器
         self.data_loader = STORKDataLoader(self.config)
@@ -86,7 +94,6 @@ class STORKApplication:
         self.train_dataset, self.test_dataset = self.data_loader.load_data()
 
         # 创建PyTorch数据加载器
-        from torch.utils.data import DataLoader, random_split
 
         # 从训练集中分离验证集
         train_size = int(0.8 * len(self.train_dataset))
@@ -103,7 +110,7 @@ class STORKApplication:
             from torch.utils.data.distributed import DistributedSampler
             train_sampler = DistributedSampler(train_subset)
             if self.is_main_process:
-                print("🔄 使用分布式采样器")
+                print("使用分布式采样器")
 
         self.train_loader = DataLoader(
             train_subset,
@@ -123,7 +130,7 @@ class STORKApplication:
         )
 
         if self.is_main_process:
-            print(f"✅ STORK数据加载器设置完成")
+            print(f"STORK数据加载器设置完成")
             print(f"   训练集: {len(train_subset)} 样本")
             print(f"   验证集: {len(val_subset)} 样本")
             print(f"   测试集: {len(self.test_dataset)} 样本")
@@ -131,7 +138,7 @@ class STORKApplication:
     def setup_model(self):
         """设置模型"""
         if self.is_main_process:
-            print("\n🤖 设置模型...")
+            print("\n设置模型...")
 
         # 创建模型
         self.model = create_model(self.config['model'])
@@ -146,15 +153,15 @@ class STORKApplication:
             # 使用DataParallel进行多GPU训练
             self.model = torch.nn.DataParallel(self.model)
             if self.is_main_process:
-                print(f"🚀 启用DataParallel多GPU训练: {torch.cuda.device_count()} 块GPU")
+                print(f"启用DataParallel多GPU训练: {torch.cuda.device_count()} 块GPU")
 
         if self.is_main_process:
-            print("✅ 模型设置完成")
+            print("模型设置完成")
 
     def setup_trainer(self):
         """设置训练器"""
         if self.is_main_process:
-            print("\n🎯 设置训练器...")
+            print("\n设置训练器...")
 
         # 创建模型管理器
         self.model_manager = create_model_manager(
@@ -181,12 +188,12 @@ class STORKApplication:
         )
 
         if self.is_main_process:
-            print("✅ 训练器设置完成")
+            print("训练器设置完成")
 
     def train(self):
         """执行训练"""
         if self.is_main_process:
-            print("\n🚀 开始训练...")
+            print("\n开始训练...")
 
         # 检查是否恢复训练
         if self.config['training']['resume_training']:
@@ -194,7 +201,7 @@ class STORKApplication:
             checkpoint_path = Path(f'checkpoints/{model_name}_best_model.pth')
             if checkpoint_path.exists():
                 if self.is_main_process:
-                    print(f"📂 恢复训练 ({model_name}): {checkpoint_path}")
+                    print(f"恢复训练 ({model_name}): {checkpoint_path}")
                 self.trainer.load_checkpoint(str(checkpoint_path))
             else:
                 if self.is_main_process:
@@ -205,12 +212,12 @@ class STORKApplication:
         history = self.trainer.train(num_epochs)
 
         if self.is_main_process:
-            print("✅ 训练完成")
+            print("训练完成")
         return history
 
     def evaluate(self):
         """执行评估"""
-        print("\n📈 开始全面评估...")
+        print("\n开始全面评估...")
 
         # 加载最佳模型
         model_loaded = False
@@ -221,18 +228,18 @@ class STORKApplication:
                 model_to_load = self.model.module
 
             model_data = self.model_manager.load_best_model(model_to_load, 'val_accuracy', self.device)
-            print("📂 已加载最佳模型")
+            print("已加载最佳模型")
             print(f"   验证准确率: {model_data['best_metric']['value']:.4f}")
             print(f"   训练轮数: {model_data.get('metrics', {}).get('epoch', 'Unknown')}")
             model_loaded = True
         except Exception as e:
-            print(f"⚠️  无法加载最佳模型: {e}")
+            print(f"无法加载最佳模型: {e}")
             print("使用当前训练模型进行评估")
 
         # 如果成功加载了最佳模型，导出生产模型
         if model_loaded:
             try:
-                print("\n📦 导出生产模型...")
+                print("\n导出生产模型...")
                 # 导出ONNX格式
                 onnx_path = self.model_manager.export_model(
                     model=model_to_load if model_loaded else self.model,
@@ -247,9 +254,9 @@ class STORKApplication:
                     export_format='torchscript'
                 )
 
-                print("✅ 模型导出完成")
+                print("模型导出完成")
             except Exception as e:
-                print(f"⚠️  模型导出失败: {e}")
+                print(f"模型导出失败: {e}")
 
         # 在测试集上进行详细评估
         output_dir = self.config['paths']['output_dir']
@@ -264,7 +271,7 @@ class STORKApplication:
             class_names=['Non-viable', 'Viable']
         )
 
-        print(f"📊 测试集评估完成:")
+        print(f"测试集评估完成:")
         print(f"   准确率: {metrics.get('accuracy', 0):.4f}")
         print(f"   精确率: {metrics.get('precision_weighted', 0):.4f}")
         print(f"   召回率: {metrics.get('recall_weighted', 0):.4f}")
@@ -272,16 +279,16 @@ class STORKApplication:
 
         # 生成Grad-CAM可视化（如果启用）
         if self.config.get('evaluation', {}).get('generate_gradcam', False):
-            print("\n🎨 生成Grad-CAM可视化...")
+            print("\n生成Grad-CAM可视化...")
             try:
                 gradcam_visualizer = create_gradcam_visualizer(self.model, self.config)
                 gradcam_results = gradcam_visualizer.visualize_samples(
                     self.test_loader,
                     num_samples=self.config.get('evaluation', {}).get('gradcam_samples', 10)
                 )
-                print("✅ Grad-CAM可视化完成")
+                print("Grad-CAM可视化完成")
             except Exception as e:
-                print(f"⚠️  Grad-CAM可视化失败: {e}")
+                print(f"Grad-CAM可视化失败: {e}")
 
         return metrics
 
@@ -303,12 +310,12 @@ class STORKApplication:
             # 评估
             metrics = self.evaluate()
 
-            print("\n🎉 训练和评估完成!")
-            print(f"🏆 最终测试准确率: {metrics.get('accuracy', 0)*100:.2f}%")
+            print("\n训练和评估完成!")
+            print(f"最终测试准确率: {metrics.get('accuracy', 0)*100:.2f}%")
 
             # 可选：运行交叉验证
             if self.config.get('validation', {}).get('cross_validation', False):
-                print("\n🔄 开始交叉验证...")
+                print("\n开始交叉验证...")
                 try:
                     cv_validator = create_cross_validator(self.config, self.device)
 
@@ -321,14 +328,14 @@ class STORKApplication:
                         full_dataset,
                         lambda: create_model(self.config['model'])
                     )
-                    print("✅ 交叉验证完成")
+                    print("交叉验证完成")
                 except Exception as e:
-                    print(f"⚠️  交叉验证失败: {e}")
+                    print(f"交叉验证失败: {e}")
 
             # 显示模型摘要
             if hasattr(self, 'model_manager') and self.model_manager:
                 summary = self.model_manager.get_model_summary()
-                print(f"\n📁 模型文件摘要:")
+                print(f"\n模型文件摘要:")
                 print(f"   检查点数量: {len(summary.get('checkpoints', []))}")
                 print(f"   最佳模型数量: {len(summary.get('best_models', []))}")
                 print(f"   导出模型数量: {len(summary.get('exports', []))}")
@@ -336,11 +343,11 @@ class STORKApplication:
             return True
 
         except KeyboardInterrupt:
-            print("\n⏹️  训练被用户中断")
+            print("\n训练被用户中断")
             return False
 
         except Exception as e:
-            print(f"\n❌ 训练过程发生错误: {e}")
+            print(f"\n训练过程发生错误: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -354,14 +361,14 @@ def main():
 
     # 调试模式
     if args.debug:
-        print("🐛 调试模式已启用")
+        print("调试模式已启用")
 
     # 仅验证配置模式
     if args.dry_run:
-        print("🔍 仅验证配置（不实际训练）")
+        print("仅验证配置（不实际训练）")
         config_manager = load_config(args.config, args)
         config_manager.print_config()
-        print("✅ 配置验证完成")
+        print("配置验证完成")
         return
 
     # 创建并运行应用
@@ -369,10 +376,10 @@ def main():
     success = app.run()
 
     if success:
-        print("\n🎯 程序执行成功")
+        print("\n程序执行成功")
         sys.exit(0)
     else:
-        print("\n❌ 程序执行失败")
+        print("\n程序执行失败")
         sys.exit(1)
 
 

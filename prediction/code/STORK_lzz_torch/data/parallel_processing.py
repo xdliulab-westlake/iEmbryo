@@ -86,7 +86,7 @@ def batch_preprocess_images_parallel(paths: List[str],
         num_workers = min(mp.cpu_count(), 8)  # 限制进程数避免系统过载
 
     if is_main_process():
-        print(f"🚀 使用 {num_workers} 个进程并行处理 {len(paths)} 张图像...")
+        print(f"使用 {num_workers} 个进程并行处理 {len(paths)} 张图像...")
 
     # 准备多进程参数
     args_list = [(path, img_size, is_training, apply_petri_crop, apply_center_crop)
@@ -137,11 +137,11 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
 
     if is_main_process():
         print("=== 使用优化的STORK胚胎图像预处理加载数据 ===")
-        print(f"🚀 并行处理模式：{'启用' if num_workers != 1 else '禁用'}")
+        print(f"并行处理模式：{'启用' if num_workers != 1 else '禁用'}")
     if num_workers is None:
         num_workers = min(mp.cpu_count(), 8)
         if is_main_process():
-            print(f"🔧 自动检测到 {num_workers} 个工作进程")
+            print(f"自动检测到 {num_workers} 个工作进程")
 
     # 收集所有图像路径和标签
     data_path = Path(data_dir)
@@ -176,7 +176,7 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     test_size = 1.0 - train_split
     split_strategy = f"{int(train_split*100)}_{int(test_size*100)}_split"
     if is_main_process():
-        print(f"🎯 采用 {int(train_split*100)}/{int(test_size*100)} 数据分割策略...")
+        print(f"采用 {int(train_split*100)}/{int(test_size*100)} 数据分割策略...")
 
     # 直接进行分割，避免数据泄漏
     train_paths, test_paths, train_labels, test_labels, train_quals, test_quals = train_test_split(
@@ -190,7 +190,7 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     test_samples = len(test_paths)
 
     if is_main_process():
-        print(f"📊 数据分割完成:")
+        print(f"数据分割完成:")
         print(f"  总样本数: {total_samples}")
         print(f"  训练集: {train_samples} ({train_samples/total_samples*100:.1f}%)")
         print(f"  测试集: {test_samples} ({test_samples/total_samples*100:.1f}%)")
@@ -215,7 +215,7 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
 
     # 使用优化的并行处理
     if is_main_process():
-        print(f"=== 🎯 并行预处理训练集（{int(train_split*100)}%）===")
+        print(f"=== 并行预处理训练集（{int(train_split*100)}%）===")
     start_time = time.time()
     X_train = batch_preprocess_images_parallel(
         train_paths, img_size, is_training=True,
@@ -225,10 +225,10 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     )
     train_time = time.time() - start_time
     if is_main_process():
-        print(f"✅ 训练集预处理完成，耗时: {train_time:.2f} 秒")
+        print(f"训练集预处理完成，耗时: {train_time:.2f} 秒")
 
     if is_main_process():
-        print(f"=== 🔒 并行预处理测试集（{int(test_size*100)}%）===")
+        print(f"=== 并行预处理测试集（{int(test_size*100)}%）===")
     start_time = time.time()
     X_test = batch_preprocess_images_parallel(
         test_paths, img_size, is_training=False,
@@ -238,15 +238,15 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     )
     test_time = time.time() - start_time
     if is_main_process():
-        print(f"✅ 测试集预处理完成，耗时: {test_time:.2f} 秒")
+        print(f"测试集预处理完成，耗时: {test_time:.2f} 秒")
 
     total_time = train_time + test_time
     if is_main_process():
-        print(f"=== 📊 数据预处理完成 ===")
+        print(f"=== 数据预处理完成 ===")
         print(f"训练集形状: {X_train.shape}")
         print(f"测试集形状: {X_test.shape}")
-        print(f"⏱️  总预处理时间: {total_time:.2f} 秒 (并行优化版)")
-        print(f"📊 平均每张图像: {total_time/len(image_paths)*1000:.2f} 毫秒")
+        print(f" 总预处理时间: {total_time:.2f} 秒 (并行优化版)")
+        print(f"平均每张图像: {total_time/len(image_paths)*1000:.2f} 毫秒")
 
     # 保存缓存
     if use_cache:
@@ -294,7 +294,7 @@ def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, te
     except ImportError:
         from batch_cache import BatchCachedDataset
 
-    print(f"🔄 创建批量缓存数据集...")
+    print(f"创建批量缓存数据集...")
     print(f"   图片尺寸: {img_size}×{img_size}")
     print(f"   训练集: {len(train_paths)} 样本")
     print(f"   测试集: {len(test_paths)} 样本")
@@ -321,14 +321,14 @@ def create_pytorch_datasets_from_paths(train_paths, train_labels, test_paths, te
         random_state=random_state
     )
 
-    print(f"✅ 批量缓存数据集创建完成")
+    print(f"批量缓存数据集创建完成")
     print(f"   训练集: {len(train_dataset)} 样本")
     print(f"   测试集: {len(test_dataset)} 样本")
     print(f"   缓存目录: {cache_dir}")
 
     # 显示缓存统计
     stats = train_dataset.get_cache_stats()
-    print(f"   📊 缓存统计: {stats['total_chunks']} 个文件, {stats['total_size_mb']:.1f}MB")
+    print(f"   缓存统计: {stats['total_chunks']} 个文件, {stats['total_size_mb']:.1f}MB")
 
     return train_dataset, test_dataset
 
@@ -364,7 +364,7 @@ class STORKDataLoader:
             训练数据集, 测试数据集
         """
         if is_main_process():
-            print("🔄 开始收集图片路径信息...")
+            print("开始收集图片路径信息...")
 
         # 直接收集图片路径，不进行预处理
         train_paths, train_labels, test_paths, test_labels = self._collect_image_paths()
@@ -380,7 +380,7 @@ class STORKDataLoader:
         )
 
         if is_main_process():
-            print(f"✅ 数据加载完成")
+            print(f"数据加载完成")
             print(f"   训练集: {len(train_dataset)} 样本")
             print(f"   测试集: {len(test_dataset)} 样本")
 
@@ -428,7 +428,7 @@ class STORKDataLoader:
         # 数据分割
         test_size = 1.0 - self.train_split
         if is_main_process():
-            print(f"🎯 采用 {int(self.train_split*100)}/{int(test_size*100)} 数据分割策略...")
+            print(f"采用 {int(self.train_split*100)}/{int(test_size*100)} 数据分割策略...")
 
         train_paths, test_paths, train_labels, test_labels = train_test_split(
             image_paths, labels, test_size=test_size,
@@ -436,7 +436,7 @@ class STORKDataLoader:
         )
 
         if is_main_process():
-            print(f"📊 数据分割完成:")
+            print(f"数据分割完成:")
             print(f"  训练集: {len(train_paths)} ({len(train_paths)/len(image_paths)*100:.1f}%)")
             print(f"  测试集: {len(test_paths)} ({len(test_paths)/len(image_paths)*100:.1f}%)")
 
@@ -450,7 +450,7 @@ class STORKDataLoader:
         except ImportError:
             from batch_cache import BatchCachedDataset
 
-        print(f"🔄 创建批量缓存数据集...")
+        print(f"创建批量缓存数据集...")
         print(f"   图片尺寸: {self.img_size}×{self.img_size}")
         print(f"   训练集: {len(train_paths)} 样本")
         print(f"   测试集: {len(test_paths)} 样本")
@@ -478,7 +478,7 @@ class STORKDataLoader:
             apply_center_crop=self.apply_center_crop
         )
 
-        print(f"✅ 批量缓存数据集创建完成")
+        print(f"批量缓存数据集创建完成")
         print(f"   训练集: {len(train_dataset)} 样本")
         print(f"   测试集: {len(test_dataset)} 样本")
         print(f"   缓存目录: {cache_dir}")
@@ -486,9 +486,9 @@ class STORKDataLoader:
         # 显示缓存统计
         try:
             stats = train_dataset.get_cache_stats()
-            print(f"   📊 缓存统计: {stats['total_chunks']} 个文件, {stats['total_size_mb']:.1f}MB")
+            print(f"   缓存统计: {stats['total_chunks']} 个文件, {stats['total_size_mb']:.1f}MB")
         except Exception as e:
-            print(f"   ⚠️ 无法获取缓存统计: {e}")
+            print(f"   无法获取缓存统计: {e}")
 
         return train_dataset, test_dataset
 
