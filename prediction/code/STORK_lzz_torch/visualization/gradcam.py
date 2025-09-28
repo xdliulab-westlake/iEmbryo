@@ -429,18 +429,20 @@ class GradCAMVisualizer:
 
             # 叠加图
             axes[2].imshow(superimposed)
-            axes[2].set_title(f'Overlay\nTrue: {true_label}, Pred: {pred_label}')
+            true_class = 'Non-viable' if true_label == 0 else 'Viable'
+            pred_class = 'Non-viable' if pred_label == 0 else 'Viable'
+            axes[2].set_title(f'Grad-CAM Overlay\nGround Truth: {true_class}\nPrediction: {pred_class}')
             axes[2].axis('off')
 
             # 添加整体标题
             accuracy_marker = "✓" if true_label == pred_label else "✗"
-            fig.suptitle(f'Sample {sample_idx} {accuracy_marker}', fontsize=14)
+            fig.suptitle(f'Embryo Sample {sample_idx} - Prediction {accuracy_marker}', fontsize=14)
 
             plt.tight_layout()
 
-            # 保存
-            save_path = self.output_dir / f'sample_{sample_idx:03d}_class_{true_label}_pred_{pred_label}.png'
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            # 保存为PDF格式
+            save_path = self.output_dir / f'sample_{sample_idx:03d}_class_{true_label}_pred_{pred_label}.pdf'
+            plt.savefig(save_path, dpi=150, bbox_inches='tight', format='pdf')
             plt.close()
 
             return {
@@ -499,19 +501,19 @@ class GradCAMVisualizer:
 
             # 显示平均注意力图
             im = axes[class_idx, 0].imshow(avg_attention, cmap='jet')
-            axes[class_idx, 0].set_title(f'Class {class_idx} Average Attention')
+            axes[class_idx, 0].set_title(f'Class {class_idx} Average Attention Pattern')
             axes[class_idx, 0].axis('off')
             plt.colorbar(im, ax=axes[class_idx, 0])
 
             # 显示注意力强度分布
             intensities = [np.mean(attention) for attention in attention_maps]
             axes[class_idx, 1].hist(intensities, bins=10, alpha=0.7)
-            axes[class_idx, 1].set_title(f'Class {class_idx} Attention Intensity')
-            axes[class_idx, 1].set_xlabel('Average Attention')
-            axes[class_idx, 1].set_ylabel('Count')
+            axes[class_idx, 1].set_title(f'Class {class_idx} Attention Intensity Distribution')
+            axes[class_idx, 1].set_xlabel('Average Attention Score')
+            axes[class_idx, 1].set_ylabel('Sample Count')
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'attention_pattern_analysis.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'attention_pattern_analysis.pdf', dpi=150, bbox_inches='tight', format='pdf')
         plt.close()
 
     def _create_accuracy_analysis(self, results: Dict):
@@ -528,7 +530,7 @@ class GradCAMVisualizer:
         # 创建条形图
         fig, ax = plt.subplots(figsize=(8, 6))
 
-        classes = ['Class 0', 'Class 1']
+        classes = ['Non-viable', 'Viable']
         accuracies = []
         for class_idx in [0, 1]:
             if class_stats[class_idx]['total'] > 0:
@@ -538,8 +540,8 @@ class GradCAMVisualizer:
             accuracies.append(acc * 100)
 
         bars = ax.bar(classes, accuracies, color=['skyblue', 'lightcoral'])
-        ax.set_ylabel('Accuracy (%)')
-        ax.set_title('Per-Class Accuracy in Grad-CAM Samples')
+        ax.set_ylabel('Classification Accuracy (%)')
+        ax.set_title('Per-Class Accuracy in Grad-CAM Analysis')
         ax.set_ylim(0, 100)
 
         # 添加数值标签
@@ -550,7 +552,7 @@ class GradCAMVisualizer:
                    ha='center', va='bottom')
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / 'gradcam_accuracy_analysis.png', dpi=150, bbox_inches='tight')
+        plt.savefig(self.output_dir / 'gradcam_accuracy_analysis.pdf', dpi=150, bbox_inches='tight', format='pdf')
         plt.close()
 
 

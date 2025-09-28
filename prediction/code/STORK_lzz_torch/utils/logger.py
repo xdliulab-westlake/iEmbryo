@@ -382,12 +382,12 @@ class PlotGenerator:
 
         plt.tight_layout()
 
-        # 保存图片
-        save_path = self.output_dir / f"{save_name}.png"
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        # 保存为PDF格式
+        save_path = self.output_dir / f"{save_name}.pdf"
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', format='pdf')
         plt.close()
 
-        print(f"📈 训练曲线已保存: {save_path}")
+        print(f"📈 Training curves saved: {save_path}")
         return str(save_path)
 
     def plot_learning_rate_schedule(self,
@@ -409,17 +409,17 @@ class PlotGenerator:
         plt.figure(figsize=(10, 6))
         epochs = range(1, len(lr_history) + 1)
         plt.plot(epochs, lr_history, 'b-', linewidth=2)
-        plt.title('学习率调度')
-        plt.xlabel('轮次')
-        plt.ylabel('学习率')
+        plt.title('Learning Rate Schedule')
+        plt.xlabel('Epoch')
+        plt.ylabel('Learning Rate')
         plt.grid(True, alpha=0.3)
         plt.yscale('log')  # 使用对数尺度
 
-        save_path = self.output_dir / f"{save_name}.png"
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        save_path = self.output_dir / f"{save_name}.pdf"
+        plt.savefig(save_path, dpi=150, bbox_inches='tight', format='pdf')
         plt.close()
 
-        print(f"📉 学习率曲线已保存: {save_path}")
+        print(f"📉 Learning rate curve saved: {save_path}")
         return str(save_path)
 
 
