@@ -55,10 +55,27 @@ class GradCAM:
 
     def cleanup(self):
         """清理钩子"""
-        if hasattr(self, 'forward_handle') and self.forward_handle:
-            self.forward_handle.remove()
-        if hasattr(self, 'backward_handle') and self.backward_handle:
-            self.backward_handle.remove()
+        try:
+            if hasattr(self, 'forward_handle') and self.forward_handle:
+                self.forward_handle.remove()
+                self.forward_handle = None
+        except Exception as e:
+            print(f"清理前向钩子时出错: {e}")
+
+        try:
+            if hasattr(self, 'backward_handle') and self.backward_handle:
+                self.backward_handle.remove()
+                self.backward_handle = None
+        except Exception as e:
+            print(f"清理反向钩子时出错: {e}")
+
+    def is_hook_alive(self) -> bool:
+        """检查钩子是否仍然有效"""
+        try:
+            return (hasattr(self, 'forward_handle') and self.forward_handle is not None and
+                   hasattr(self, 'backward_handle') and self.backward_handle is not None)
+        except Exception:
+            return False
 
     def _find_target_layer(self) -> str:
         """自动查找合适的目标层"""
@@ -152,6 +169,12 @@ class GradCAM:
         Returns:
             热力图数组
         """
+        # 检查钩子是否仍然有效
+        if not self.is_hook_alive():
+            print("⚠️  钩子已失效，重新注册...")
+            self.cleanup()
+            self._register_hooks()
+
         # 确保输入是正确的形状
         if input_tensor.dim() == 3:
             input_tensor = input_tensor.unsqueeze(0)
@@ -377,6 +400,14 @@ class GradCAMVisualizer:
         try:
             # 反归一化图像用于显示
             image_np = self._denormalize_image(image_tensor[0])
+
+            # 检查Grad-CAM对象是否仍然有效
+            if not self.gradcam.is_hook_alive():
+                print(f"⚠️  样本 {sample_idx}: Grad-CAM钩子已失效，重新初始化...")
+                # 清理旧的钩子
+                self.gradcam.cleanup()
+                # 重新创建Grad-CAM对象
+                self.gradcam = GradCAM(self.model)
 
             # 生成Grad-CAM
             heatmap, superimposed = self.gradcam.visualize(
