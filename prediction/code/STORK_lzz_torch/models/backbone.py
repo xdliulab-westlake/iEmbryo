@@ -135,9 +135,48 @@ class BackboneModel(nn.Module):
             return None
 
     def _create_backbone(self, pretrained: bool, pretrained_path: str = None) -> nn.Module:
-        """创建骨干网络，直接使用预训练模型"""
-        print(f"直接使用预训练模型: {self.model_name}")
+        """创建骨干网络，优先使用本地预训练模型"""
+        # 优先使用指定的本地预训练路径
+        if pretrained_path and os.path.exists(pretrained_path):
+            print(f"使用指定的本地预训练模型: {pretrained_path}")
+            return self._create_local_model(pretrained_path)
+
+        # 其次使用默认的本地预训练路径
+        if pretrained and self.model_name in self.PRETRAINED_PATHS:
+            local_path = self.PRETRAINED_PATHS[self.model_name]
+            if os.path.exists(local_path):
+                print(f"使用本地预训练模型: {local_path}")
+                return self._create_local_model(local_path)
+            else:
+                print(f"本地预训练模型不存在: {local_path}")
+
+        # 最后回退到在线下载
+        print(f"使用在线预训练模型: {self.model_name}")
         return self._create_online_model(pretrained)
+
+    def _create_local_model(self, pretrained_path: str) -> nn.Module:
+        """从本地路径加载预训练模型"""
+        try:
+            # 创建模型架构（不加载预训练权重）
+            backbone = self._create_torchvision_model(pretrained=False)
+
+            # 加载本地预训练权重
+            state_dict = torch.load(pretrained_path, map_location='cpu')
+
+            # 处理可能的键名不匹配问题
+            if hasattr(backbone, 'load_state_dict'):
+                try:
+                    backbone.load_state_dict(state_dict, strict=False)
+                    print(f"✅ 成功加载本地预训练权重")
+                except Exception as e:
+                    print(f"⚠️ 部分权重加载失败: {e}")
+
+            return backbone
+
+        except Exception as e:
+            print(f"❌ 本地预训练模型加载失败: {e}")
+            print("回退到在线模型")
+            return self._create_online_model(True)
 
     def _create_online_model(self, pretrained: bool) -> nn.Module:
         """创建在线模型（统一timm和torchvision逻辑）"""
@@ -151,7 +190,13 @@ class BackboneModel(nn.Module):
                     global_pool=''
                 )
                 print(f"使用timm加载模型: {self.model_config['timm_name']}")
-                return backbone
+
+                # 确保TIMM模型输出是平坦的特征向量
+                return nn.Sequential(
+                    backbone,
+                    nn.AdaptiveAvgPool2d((1, 1)),  # 全局平均池化
+                    nn.Flatten()  # 展平成1D特征向量
+                )
             except Exception as e:
                 print(f"timm加载失败: {e}，回退到torchvision")
 
@@ -189,17 +234,28 @@ class BackboneModel(nn.Module):
     def _create_resnet(self, pretrained: bool) -> nn.Module:
         """创建ResNet系列模型"""
         backbone = getattr(models, self.model_config['torchvision_name'])(pretrained=pretrained)
-        return nn.Sequential(*list(backbone.children())[:-1])
+        # 保留到avgpool层，确保输出是正确的特征维度
+        features = nn.Sequential(*list(backbone.children())[:-1])
+        return nn.Sequential(
+            features,
+            nn.Flatten()  # 确保输出是平坦的特征向量
+        )
 
     def _create_inception_v3(self, pretrained: bool) -> nn.Module:
         """创建InceptionV3模型"""
         backbone = models.inception_v3(pretrained=pretrained, aux_logits=False)
-        return nn.Sequential(*list(backbone.children())[:-1])
+        # 保留到avgpool层，确保输出是正确的特征维度
+        features = nn.Sequential(*list(backbone.children())[:-1])
+        return nn.Sequential(
+            features,
+            nn.Flatten()  # 确保输出是平坦的特征向量
+        )
 
     def _create_classifier(self) -> nn.Module:
-        """创建分类头"""
-        # VGG16已输出展平特征
+        """创建分类头 - 优化版本，防止logits极端化"""
+        # 所有模型在backbone中已经处理了pooling和flatten
         if self.model_name == 'vgg16':
+            # VGG16保持原有设计（效果良好）
             return nn.Sequential(
                 nn.Dropout(0.5),
                 nn.Linear(self.feature_dim, 512),
@@ -207,17 +263,48 @@ class BackboneModel(nn.Module):
                 nn.Dropout(0.3),
                 nn.Linear(512, self.num_classes)
             )
-
-        # 其他模型需要pooling和flatten
-        return nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Dropout(0.5),
-            nn.Linear(self.feature_dim, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(512, self.num_classes)
-        )
+        elif self.model_name in ['resnet152', 'resnet50']:
+            # ResNet优化版本：增加正则化，防止logits极端化（使用LayerNorm避免batch_size=1问题）
+            return nn.Sequential(
+                nn.LayerNorm(self.feature_dim),    # 使用LayerNorm代替BatchNorm
+                nn.Dropout(0.5),                   # 增加dropout
+                nn.Linear(self.feature_dim, 512),  # 增加中间层维度
+                nn.ReLU(inplace=True),
+                nn.LayerNorm(512),                 # 中间层LayerNorm
+                nn.Dropout(0.4),                   # 增加dropout
+                nn.Linear(512, 128),               # 添加额外的降维层
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(128, self.num_classes)   # 最终分类层
+            )
+        elif self.model_name == 'inceptionv3':
+            # InceptionV3优化版本：增加正则化
+            return nn.Sequential(
+                nn.LayerNorm(self.feature_dim),
+                nn.Dropout(0.5),                   # 增加dropout
+                nn.Linear(self.feature_dim, 512),
+                nn.ReLU(inplace=True),
+                nn.LayerNorm(512),
+                nn.Dropout(0.4),                   # 增加dropout
+                nn.Linear(512, 128),               # 添加额外层
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(128, self.num_classes)
+            )
+        else:
+            # 默认分类头 - 增强版本（使用LayerNorm）
+            return nn.Sequential(
+                nn.LayerNorm(self.feature_dim),
+                nn.Dropout(0.5),
+                nn.Linear(self.feature_dim, 512),
+                nn.ReLU(inplace=True),
+                nn.LayerNorm(512),
+                nn.Dropout(0.4),
+                nn.Linear(512, 128),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.3),
+                nn.Linear(128, self.num_classes)
+            )
 
     def _setup_fine_tuning(self, fine_tune_layers: int = None):
         """设置微调策略"""
@@ -234,10 +321,19 @@ class BackboneModel(nn.Module):
         print(f"微调模式: 解冻部分层用于训练")
 
     def _apply_optimal_fine_tuning(self):
-        """应用最优微调策略：固定前1/3层，微调后2/3层"""
+        """应用最优微调策略：根据模型类型调整冻结比例"""
         trainable_layers = self._collect_trainable_layers()
         total_layers = len(trainable_layers)
-        optimal_fine_tune_at = int(total_layers * 1/3)
+
+        # 针对不同模型的冻结策略
+        if self.model_name in ['resnet152', 'resnet50']:
+            # ResNet容易过拟合，冻结更多层
+            freeze_ratio = 0.5  # 冻结前50%
+        else:
+            # 其他模型使用原策略
+            freeze_ratio = 1/3  # 冻结前33%
+
+        optimal_fine_tune_at = int(total_layers * freeze_ratio)
 
         print(f"启用最优微调策略: 固定前1/3层")
         print(f"{self.model_name.upper()} 层数分析:")

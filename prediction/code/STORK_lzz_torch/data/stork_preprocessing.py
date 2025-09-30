@@ -359,8 +359,15 @@ def create_stork_preprocessor(config: dict) -> STORKPreprocessor:
     """
     data_config = config.get('data', {})
 
+    # 根据模型选择合适的输入尺寸
+    model_name = config.get('model', {}).get('name', 'vgg16')
+    if model_name == 'inceptionv3':
+        img_size = 299
+    else:
+        img_size = data_config.get('img_size', 224)
+
     return STORKPreprocessor(
-        img_size=data_config.get('img_size', 224),
+        img_size=img_size,
         apply_petri_crop=data_config.get('apply_petri_crop', True),
         apply_center_crop=data_config.get('apply_center_crop', True),
         normalize=data_config.get('normalize', True)

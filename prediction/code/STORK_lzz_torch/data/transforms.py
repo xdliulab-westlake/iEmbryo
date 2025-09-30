@@ -18,7 +18,13 @@ def create_train_transforms(config: Dict) -> Callable:
     Returns:
         训练数据变换组合
     """
-    img_size = config['data']['img_size']
+    # 根据模型选择合适的输入尺寸
+    model_name = config.get('model', {}).get('name', 'vgg16')
+    if model_name == 'inceptionv3':
+        img_size = 299
+    else:
+        img_size = config['data']['img_size']
+
     aug_config = config.get('augmentation', {})
 
     if not aug_config.get('enabled', True):
@@ -90,7 +96,12 @@ def create_val_transforms(config: Dict) -> Callable:
     Returns:
         验证数据变换组合
     """
-    img_size = config['data']['img_size']
+    # 根据模型选择合适的输入尺寸
+    model_name = config.get('model', {}).get('name', 'vgg16')
+    if model_name == 'inceptionv3':
+        img_size = 299
+    else:
+        img_size = config['data']['img_size']
 
     return transforms.Compose([
         transforms.Resize((img_size, img_size)),
