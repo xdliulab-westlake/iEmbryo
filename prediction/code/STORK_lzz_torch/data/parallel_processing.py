@@ -425,10 +425,10 @@ class STORKDataLoader:
             print(f"找到 {len(image_paths)} 张图像")
             print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
 
-        # 数据分割
-        test_size = 1.0 - self.train_split
+        # 数据分割: 训练集85%, 测试集15% (训练集后续会分出验证集)
+        test_size = 0.15
         if is_main_process():
-            print(f"采用 {int(self.train_split*100)}/{int(test_size*100)} 数据分割策略...")
+            print(f"采用训练+验证集85%/测试集15%数据分割策略...")
 
         train_paths, test_paths, train_labels, test_labels = train_test_split(
             image_paths, labels, test_size=test_size,

@@ -95,9 +95,11 @@ class STORKApplication:
 
         # 创建PyTorch数据加载器
 
-        # 从训练集中分离验证集
-        train_size = int(0.8 * len(self.train_dataset))
-        val_size = len(self.train_dataset) - train_size
+        # 从训练集中分离验证集 (训练集70%, 验证集15%, 总共85%)
+        # 85% * (70/85) ≈ 70%, 85% * (15/85) ≈ 15%
+        val_ratio = 15.0 / 85.0  # 验证集占训练+验证集的比例
+        val_size = int(val_ratio * len(self.train_dataset))
+        train_size = len(self.train_dataset) - val_size
         train_subset, val_subset = random_split(self.train_dataset, [train_size, val_size])
 
         # 创建数据加载器

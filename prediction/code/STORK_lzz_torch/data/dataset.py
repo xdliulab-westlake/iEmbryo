@@ -246,12 +246,11 @@ class STORKDataLoader:
         Returns:
             (train_loader, val_loader, test_loader)
         """
-        # 数据分割
+        # 数据分割: 先分出15%测试集
         if test_size is None:
-            # 使用论文级70/30分割
-            test_size = 1.0 - self.train_split
+            test_size = 0.15
 
-        # 分割数据
+        # 分割数据: 85% 训练+验证, 15% 测试
         train_paths, test_paths, train_labels, test_labels, train_qualities, test_qualities = train_test_split(
             self.image_paths, self.labels, self.qualities,
             test_size=test_size,
@@ -259,13 +258,14 @@ class STORKDataLoader:
             random_state=42
         )
 
-        # 进一步分割训练集为训练和验证
+        # 进一步分割训练集为训练和验证: 70% 训练, 15% 验证
         val_config = self.config.get('validation', {})
         if val_config.get('cross_validation', False):
             # 交叉验证模式：不分割验证集
             val_paths, val_labels, val_qualities = None, None, None
         else:
-            val_split = val_config.get('validation_split', 0.2)
+            # 验证集占训练+验证集的比例: 15/85 ≈ 0.176
+            val_split = val_config.get('validation_split', 15.0 / 85.0)
             if val_split > 0:
                 train_paths, val_paths, train_labels, val_labels, train_qualities, val_qualities = train_test_split(
                     train_paths, train_labels, train_qualities,
