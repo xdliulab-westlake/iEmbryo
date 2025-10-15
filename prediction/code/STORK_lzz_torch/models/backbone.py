@@ -28,7 +28,10 @@ class BackboneModel(nn.Module):
         'resnet50': "/liaozizhuo/scripts/pretrain_models/resnet50-11ad3fa6.pth",
         'resnet152': "/liaozizhuo/scripts/pretrain_models/resnet152-394f9c45.pth",
         'inceptionv3': "/liaozizhuo/scripts/pretrain_models/inception_v3_google-0cc3c7bd.pth",
-        'efficientnetb0': "/liaozizhuo/scripts/pretrain_models/efficientnet-b0-355c32eb.pth"
+        'efficientnetb0': "/liaozizhuo/scripts/pretrain_models/efficientnet-b0-355c32eb.pth",
+        'densenet121': "/liaozizhuo/scripts/pretrain_models/densenet121-a639ec97.pth",
+        'densenet169': "/liaozizhuo/scripts/pretrain_models/densenet169-b2777c0a.pth",
+        'densenet201': "/liaozizhuo/scripts/pretrain_models/densenet201-c1103571.pth"
     }
 
     # 模型配置字典
@@ -67,6 +70,27 @@ class BackboneModel(nn.Module):
             'feature_dim': 1280,
             'fine_tune_layer': 'blocks.5',
             'description': 'EfficientNetB0: 高效网络，平衡准确率和计算效率'
+        },
+        'densenet121': {
+            'torchvision_name': 'densenet121',
+            'timm_name': 'densenet121',
+            'feature_dim': 1024,
+            'fine_tune_layer': 'features.denseblock3',
+            'description': 'DenseNet121: 密集连接网络，特征重用，参数效率高'
+        },
+        'densenet169': {
+            'torchvision_name': 'densenet169',
+            'timm_name': 'densenet169',
+            'feature_dim': 1664,
+            'fine_tune_layer': 'features.denseblock3',
+            'description': 'DenseNet169: 更深的密集连接网络，更强的特征提取能力'
+        },
+        'densenet201': {
+            'torchvision_name': 'densenet201',
+            'timm_name': 'densenet201',
+            'feature_dim': 1920,
+            'fine_tune_layer': 'features.denseblock3',
+            'description': 'DenseNet201: 最深的密集连接网络，最强的表征能力'
         }
     }
 
@@ -214,6 +238,10 @@ class BackboneModel(nn.Module):
         if self.model_name.startswith('resnet'):
             return self._create_resnet(pretrained)
 
+        # DenseNet系列
+        if self.model_name.startswith('densenet'):
+            return self._create_densenet(pretrained)
+
         if self.model_name in model_creators:
             return model_creators[self.model_name](pretrained)
 
@@ -249,6 +277,17 @@ class BackboneModel(nn.Module):
         return nn.Sequential(
             features,
             nn.Flatten()  # 确保输出是平坦的特征向量
+        )
+
+    def _create_densenet(self, pretrained: bool) -> nn.Module:
+        """创建DenseNet系列模型"""
+        backbone = getattr(models, self.model_config['torchvision_name'])(pretrained=pretrained)
+        # DenseNet的features已经包含了所有卷积层，只需添加池化和展平
+        return nn.Sequential(
+            backbone.features,
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten()
         )
 
     def _create_classifier(self) -> nn.Module:
@@ -291,6 +330,20 @@ class BackboneModel(nn.Module):
                 nn.Dropout(0.3),
                 nn.Linear(128, self.num_classes)
             )
+        elif self.model_name.startswith('densenet'):
+            # DenseNet优化版本：密集连接已提供强正则化，使用适度dropout
+            return nn.Sequential(
+                nn.LayerNorm(self.feature_dim),
+                nn.Dropout(0.4),                   # 适度dropout
+                nn.Linear(self.feature_dim, 512),
+                nn.ReLU(inplace=True),
+                nn.LayerNorm(512),
+                nn.Dropout(0.3),
+                nn.Linear(512, 128),
+                nn.ReLU(inplace=True),
+                nn.Dropout(0.2),
+                nn.Linear(128, self.num_classes)
+            )
         else:
             # 默认分类头 - 增强版本（使用LayerNorm）
             return nn.Sequential(
@@ -321,18 +374,12 @@ class BackboneModel(nn.Module):
         print(f"微调模式: 解冻部分层用于训练")
 
     def _apply_optimal_fine_tuning(self):
-        """应用最优微调策略：根据模型类型调整冻结比例"""
+        """应用最优微调策略：统一冻结前33%的层"""
         trainable_layers = self._collect_trainable_layers()
         total_layers = len(trainable_layers)
 
-        # 针对不同模型的冻结策略
-        if self.model_name in ['resnet152', 'resnet50']:
-            # ResNet容易过拟合，冻结更多层
-            freeze_ratio = 0.5  # 冻结前50%
-        else:
-            # 其他模型使用原策略
-            freeze_ratio = 1/3  # 冻结前33%
-
+        # 统一冻结策略：所有模型都冻结前33%
+        freeze_ratio = 1/3  # 冻结前33%
         optimal_fine_tune_at = int(total_layers * freeze_ratio)
 
         print(f"启用最优微调策略: 固定前1/3层")
