@@ -266,21 +266,22 @@ def extract_focal_plane_from_filename(filename_or_path):
 def extract_embryo_id(filename):
     """
     从文件名中提取胚胎ID
-    例如: D2023.05.31_S00744_I4424_P_WELL12_RUN595_F-15.jpeg
-          -> D2023.05.31_S00744_I4424_P_WELL12
-
-    Args:
-        filename: 文件名字符串
-
-    Returns:
-        胚胎ID字符串
+    兼容以下形式：
+      - D2023.05.31_S00744_I4424_P_WELL12_RUN595_F-15.jpeg -> D2023.05.31_S00744_I4424_P_WELL12
+      - D2022.04.15_S00003_I4425_P_8.png                   -> D2022.04.15_S00003_I4425_P_8
     """
-    # 提取从 D 开始到 WELL 后面数字的部分
-    match = re.search(r'(D\d{4}\.\d{2}\.\d{2}_S\d+_I\d+_P_WELL\d+)', filename)
+    stem = Path(filename).stem
+    stem = re.split(r'_(?:RUN\d+.*|F-?\d+|FOCUS-?\d+|FRAME\d+|IMG\d+)$', stem)[0]
+
+    match = re.match(
+        r'(D\d{4}\.\d{2}\.\d{2}_S\d+_I\d+_P(?:_[A-Za-z0-9]+)*)',
+        stem,
+        flags=re.IGNORECASE
+    )
     if match:
         return match.group(1)
-    # 如果没有匹配到，返回完整文件名用于排序
-    return filename
+
+    return stem
 
 
 def group_images_by_embryo(image_paths, labels, required_focal_planes=11, filter_label=None):

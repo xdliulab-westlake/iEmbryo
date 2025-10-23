@@ -13,6 +13,9 @@ from typing import List, Dict, Tuple, Optional, Any
 import time
 # 预处理函数在需要时动态导入
 
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+
 
 class NumpyEncoder(json.JSONEncoder):
     """处理numpy类型的JSON编码器"""
@@ -373,6 +376,8 @@ class BatchCachedDataset(torch.utils.data.Dataset):
         self.data_dir = data_dir
         self.train_split = train_split
         self.random_state = random_state
+        self._norm_mean = IMAGENET_MEAN
+        self._norm_std = IMAGENET_STD
 
         # 初始化缓存管理器
         self.cache_manager = BatchCacheManager(cache_dir, chunk_size)
@@ -476,6 +481,8 @@ class BatchCachedDataset(torch.utils.data.Dataset):
 
         # 转换为float32并归一化到[0,1]
         image = image.float() / 255.0
+        # 按ImageNet统计量进行标准化，保持与常用预训练权重一致
+        image = (image - self._norm_mean) / self._norm_std
 
         return image, label.long()
 

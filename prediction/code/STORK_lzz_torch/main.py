@@ -132,10 +132,9 @@ class STORKApplication:
         )
 
         if self.is_main_process:
-            print(f"STORK数据加载器设置完成")
-            print(f"   训练集: {len(train_subset)} 样本")
-            print(f"   验证集: {len(val_subset)} 样本")
-            print(f"   测试集: {len(self.test_dataset)} 样本")
+            # 打印数据集统计信息
+            from utils import print_dataset_statistics
+            print_dataset_statistics(train_subset, val_subset, self.test_dataset)
 
     def setup_model(self):
         """设置模型"""
