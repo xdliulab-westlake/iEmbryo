@@ -163,12 +163,14 @@ class ViTHybridModel(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, x):
+    def forward(self, x, return_attention_weights=False):
         """
         前向传播
 
         输入: (batch_size, 33, 11, 3, 224, 224)
-        返回: (batch_size, 1) 胚胎质量概率
+        返回:
+            - 如果return_attention_weights=False: (batch_size, 1) 胚胎质量概率
+            - 如果return_attention_weights=True: (output, attention_weights) 元组
         """
         batch_size = x.size(0)
 
@@ -196,8 +198,14 @@ class ViTHybridModel(nn.Module):
 
         # Transformer编码
         x = temporal_features
+        attention_weights = [] if return_attention_weights else None
+
         for transformer_block in self.transformer_blocks:
-            x = transformer_block(x)
+            if return_attention_weights:
+                x, attn = transformer_block(x, return_attention=True)
+                attention_weights.append(attn)
+            else:
+                x = transformer_block(x)
 
         # 全局平均池化: (batch, 33, d_model) -> (batch, d_model)
         x = torch.mean(x, dim=1)
@@ -205,6 +213,8 @@ class ViTHybridModel(nn.Module):
         # 分类
         output = self.classifier(x)
 
+        if return_attention_weights:
+            return output, attention_weights
         return output
 
     def unfreeze_vgg16(self, num_layers=None):

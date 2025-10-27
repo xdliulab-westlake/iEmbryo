@@ -929,3 +929,298 @@ quality值说明：
 5. 根据GPU显存调整batch_size
 6. 训练前确保有足够的磁盘空间保存检查点
 7. 图像预处理会自动进行，无需手动处理
+
+---
+
+## 九、模型可解释性分析（时间点重要性）
+
+### 背景
+
+训练好的模型能够进行预测，但其内部决策过程是"黑箱"的。为了理解模型**如何关注不同的时间点**、**哪些时间点最重要**，我们提供了一套完整的可解释性分析工具。
+
+### 分析方法
+
+#### 方法1：梯度归因法（Gradient Attribution）
+
+**原理：** 计算预测输出对输入的梯度，衡量每个时间点对最终预测的影响程度
+
+**特点：**
+- ✓ 计算快速，直观理解
+- ✓ 显示每个时间点对预测的敏感性
+- ✓ 输出：33维重要性分数
+
+**使用：**
+```python
+from analysis.temporal_interpretability import compute_temporal_importance
+
+importance_scores = compute_temporal_importance(model, images, device='cuda')
+# importance_scores: (33,) - 每个时间点的重要性分数
+```
+
+**结果解读：**
+- 高分值 → 该时间点对预测影响大，删除会显著改变输出
+- 低分值 → 该时间点不重要，模型较少依赖
+- 通常会发现某些关键时间段（如受精后72-96小时）的重要性显著高于其他时期
+
+#### 方法2：注意力权重可视化（Attention Weights）
+
+**原理：** Transformer的多头注意力权重直接表示模型如何在时间点间分配注意力
+
+**特点：**
+- ✓ 显示时间点间的关联关系
+- ✓ 可视化为热力图，直观清晰
+- ✓ 提供每层Transformer的注意力分布
+
+**使用：**
+```python
+from analysis.attention_visualization import (
+    extract_attention_weights,
+    visualize_attention_heatmap,
+    visualize_attention_flow
+)
+
+# 提取注意力权重
+attention_weights = extract_attention_weights(model, images)
+# 列表，长度4（4层Transformer），每元素形状(batch, 8, 33, 33)
+
+# 可视化热力图
+visualize_attention_heatmap(attention_weights, save_path='attention.png')
+
+# 可视化注意力流（某个时间点的信息流向）
+visualize_attention_flow(attention_weights, source_timepoint=0, save_path='flow.png')
+```
+
+**结果解读：**
+- 热力图行：当前时间点（查询端）
+- 热力图列：被关注的时间点（键值端）
+- 颜色深度：注意力权重大小
+- 对角线强 → 时间点重视自身信息
+- 非对角线强 → 相邻时间点间信息交流密集
+
+#### 方法3：特征相关性矩阵（Temporal Correlation）
+
+**原理：** 计算不同时间点的特征向量间的余弦相似度，理解时间点间的"特征距离"
+
+**特点：**
+- ✓ 量化时间点间的相似性
+- ✓ 显示发育阶段的连续性
+- ✓ 输出：33×33相关性矩阵
+
+**使用：**
+```python
+from analysis.temporal_interpretability import compute_temporal_correlation
+
+correlation_matrix, info = compute_temporal_correlation(
+    model, images, device='cuda'
+)
+# correlation_matrix: (33, 33) - 时间点间的特征相关性
+```
+
+**结果解读：**
+- 矩阵对角线值大 → 时间点自身特征一致
+- 近对角线值大 → 相邻时间点特征相似（连续发育）
+- 远离对角线区域高值 → 不同发育阶段仍有相似特征
+
+#### 方法4：消融分析（Ablation Analysis）
+
+**原理：** 逐个移除（遮挡）每个时间点，计算对预测的影响
+
+**特点：**
+- ✓ 最直接的重要性度量方法
+- ✓ 物理意义明确：删除该时间点后预测变化多少
+- ✓ 计算量大，但结果最可信
+
+**使用：**
+```python
+from analysis.ablation_analysis import temporal_ablation_analysis
+
+ablation_scores, ablated_preds = temporal_ablation_analysis(
+    model, images, device='cuda', ablation_mode='zero'
+)
+# ablation_scores: (33,) - 每个时间点的消融分数
+```
+
+**结果解读：**
+- 高分值 → 该时间点对预测至关重要
+- 低分值 → 该时间点影响较小
+- 与梯度归因法通常高度相关，但计算成本更高
+
+### 快速开始：完整分析流程
+
+```bash
+# 1. 基础分析（推荐首先运行）
+python analyze_temporal_interpretability.py \
+    --model checkpoints/final_model.pth \
+    --output results/temporal_analysis
+
+# 2. 使用GPU加速
+python analyze_temporal_interpretability.py \
+    --model checkpoints/final_model.pth \
+    --device cuda \
+    --output results/temporal_analysis
+
+# 3. 分析多个样本
+python analyze_temporal_interpretability.py \
+    --model checkpoints/final_model.pth \
+    --batch_size 8 \
+    --output results/temporal_analysis
+```
+
+### 输出文件说明
+
+脚本执行后会在输出目录中生成：
+
+| 文件 | 说明 |
+|------|------|
+| `temporal_importance.json` | 梯度归因法的重要性分数 |
+| `attention_analysis.json` | 注意力权重的统计分析 |
+| `ablation_analysis.json` | 消融分析的结果 |
+| `attention_heatmap.png` | 4层Transformer的注意力热力图 |
+| `attention_flow_t0.png` | 第一个时间点(96h)的注意力流 |
+| `attention_flow_t16.png` | 中间时间点(104h)的注意力流 |
+| `temporal_correlation.png` | 时间点特征相关性热力图 |
+| `temporal_ablation.png` | 时间点消融分析条形图 |
+| `correlation_matrix.npy` | 相关性矩阵的数值存储 |
+
+### 编程接口
+
+#### 时间点重要性分析
+
+```python
+from analysis.temporal_interpretability import (
+    compute_temporal_importance,
+    get_critical_timepoints,
+    print_temporal_importance_report
+)
+
+# 计算重要性
+importance = compute_temporal_importance(model, images, device='cuda')
+
+# 找出最重要的5个时间点
+critical = get_critical_timepoints(importance, topk=5)
+print(f"最重要的时间点: {critical['hours']}")
+
+# 生成报告
+report = print_temporal_importance_report(importance)
+print(report)
+```
+
+#### 注意力权重分析
+
+```python
+from analysis.attention_visualization import (
+    extract_attention_weights,
+    get_most_attended_timepoints
+)
+
+# 提取权重
+attn_weights = extract_attention_weights(model, images, device='cuda')
+
+# 找出最被关注的时间点（最后一层）
+most_attended = get_most_attended_timepoints(
+    attn_weights,
+    layer_index=-1,
+    topk=5
+)
+print(f"最被关注的时间点: {most_attended['hours']}")
+```
+
+#### 焦平面级别的消融分析
+
+```python
+from analysis.ablation_analysis import (
+    focal_plane_ablation_analysis,
+    visualize_focal_plane_ablation
+)
+
+# 分析特定时间点的不同焦平面的重要性
+ablation_scores, _ = focal_plane_ablation_analysis(
+    model, images, target_timepoint=16  # 104小时
+)
+
+# 可视化
+visualize_focal_plane_ablation(ablation_scores, target_timepoint=16)
+```
+
+### 案例解读
+
+假设分析结果显示：
+
+**时间点重要性：**
+- 96-98h：0.15（相对较低）
+- 102-104h：0.28（最高峰）
+- 108-110h：0.22（次高峰）
+- 110-112h：0.12（下降）
+
+**解读：**
+1. **关键发育阶段**：102-104小时是胚胎发育最关键的时期
+2. **特征动态**：在此阶段，细胞分裂、形态变化最显著
+3. **预测贡献**：模型的好坏判断主要依赖此时段的形态学特征
+4. **实际应用**：收集高质量的102-104小时图像至关重要
+
+**注意力权重显示：**
+- 104h时间点与其他时间点的注意力权重普遍较高
+- 形成"扇形"结构，指向104h
+- 表明模型显式地关注该时间点
+
+### 进阶用法
+
+#### 单个样本分析
+
+```python
+# 对单个胚胎进行详细分析
+single_embryo = images[0:1]  # (1, 33, 11, 3, 224, 224)
+
+importance = compute_temporal_importance(model, single_embryo)
+attn_weights = extract_attention_weights(model, single_embryo)
+ablation_scores, _ = temporal_ablation_analysis(model, single_embryo)
+
+# 三种方法的对比
+import matplotlib.pyplot as plt
+hours = np.arange(96, 112.5, 0.5)
+
+fig, ax = plt.subplots(figsize=(12, 5))
+ax.plot(hours, importance/importance.max(), label='Gradient', marker='o')
+ax.plot(hours, ablation_scores/ablation_scores.max(), label='Ablation', marker='s')
+ax.legend()
+ax.set_xlabel('Development Time (hours)')
+ax.set_ylabel('Normalized Score')
+plt.show()
+```
+
+#### 对比分析
+
+```python
+# 比较好胚胎与差胚胎的时间点重要性
+good_images = ...  # 好胚胎
+poor_images = ...  # 差胚胎
+
+importance_good = compute_temporal_importance(model, good_images)
+importance_poor = compute_temporal_importance(model, poor_images)
+
+diff = importance_good - importance_poor
+# 正值：该时间点对好胚胎的判别更重要
+# 负值：该时间点对差胚胎的判别更重要
+```
+
+### 局限与建议
+
+**梯度归因法：**
+- ✓ 计算快速
+- ✗ 对梯度饱和情况敏感（可考虑使用Integrated Gradient）
+
+**注意力权重：**
+- ✓ 直观清晰
+- ✗ 注意力权重不完全等同于重要性（can attend to unimportant features）
+
+**消融分析：**
+- ✓ 最可信
+- ✗ 计算成本高（需要33次前向传播）
+
+**建议：**
+1. 同时使用多种方法进行对比验证
+2. 关注不同方法的一致性
+3. 对关键时间点进行定性分析
+4. 定期更新分析结果以跟踪模型演进
+
+---

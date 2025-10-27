@@ -113,8 +113,19 @@ class TransformerBlock(nn.Module):
         self.dropout1 = nn.Dropout(dropout_rate)
         self.dropout2 = nn.Dropout(dropout_rate)
 
-    def forward(self, x):
-        attn_output, _ = self.attention(x, x, x)
+    def forward(self, x, return_attention=False):
+        """
+        前向传播
+
+        Args:
+            x: (batch, seq_len, d_model)
+            return_attention: 是否返回注意力权重
+
+        Returns:
+            如果return_attention=False: x (batch, seq_len, d_model)
+            如果return_attention=True: (x, attn_weights) 其中attn_weights (batch, num_heads, seq_len, seq_len)
+        """
+        attn_output, attn_weights = self.attention(x, x, x)
         attn_output = self.dropout1(attn_output)
         x = self.layernorm1(x + attn_output)
 
@@ -122,4 +133,6 @@ class TransformerBlock(nn.Module):
         ffn_output = self.dropout2(ffn_output)
         x = self.layernorm2(x + ffn_output)
 
+        if return_attention:
+            return x, attn_weights
         return x
