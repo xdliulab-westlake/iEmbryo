@@ -1,6 +1,10 @@
 """
 ViT-Hybrid Main Entry Point
 Orchestrates the complete workflow: setup, data loading, model training, evaluation
+
+Before training, generate score_dict.json:
+  python generate_score_dict.py --maindb MainDB.csv --image_dir ./image
+
 Author: Liao Zizhuo
 Date: 2025-10-27
 """
