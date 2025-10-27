@@ -115,16 +115,27 @@ ViT-Hybrid（多焦平面融合版）是一种结合卷积与注意力机制的�
 
 ```
 ViT-Hybrid/
-├── README.md              # 本文档
-├── layers.py              # 自定义层模块
-├── model.py               # 模型架构定义
-├── dataset.py             # 数据加载器
-├── config.py              # 配置文件
-├── utils.py               # 工具函数
-├── train.py               # 训练脚本
-├── checkpoints/           # 模型保存目录
-├── logs/                  # 训练日志
-└── results/               # 结果输出
+├── main.py                      # 主入口点
+├── README.md                    # 项目文档
+├── model/                       # 模型相关
+│   ├── __init__.py
+│   ├── layers.py               # 自定义层（FocalPlaneFusion、PositionalEncoding、TransformerBlock）
+│   └── model.py                # 模型架构（VGG16FeatureExtractor、ViTHybridModel、create_model）
+├── dataset/                     # 数据处理
+│   ├── __init__.py
+│   └── dataset.py              # 数据加载器（EmbryoDataset、ImagePreprocessor、create_data_loaders）
+├── config/                      # 配置管理
+│   ├── __init__.py
+│   └── config.py               # 配置类（ModelConfig、TrainingConfig、DataConfig、PathConfig）
+├── utils/                       # 工具函数
+│   ├── __init__.py
+│   └── utils.py                # 工具（FocalLoss、EarlyStopping、calculate_metrics等）
+├── training/                    # 训练
+│   ├── __init__.py
+│   └── train.py                # 训练脚本（两阶段训练、早停、学习率调度）
+├── checkpoints/                 # 模型保存目录
+├── logs/                        # 训练日志
+└── results/                     # 结果输出
 ```
 
 ### 环境依赖
@@ -198,19 +209,38 @@ class DataConfig:
 #### 2. 单阶段训练
 
 ```bash
-python train.py --data_root /path/to/data
+python main.py train --data_root /path/to/data
 ```
 
 #### 3. 两阶段训练（推荐）
 
 ```bash
-python train.py --data_root /path/to/data --two_stage
+python main.py train --data_root /path/to/data --two_stage
 ```
 
 #### 4. 使用Focal Loss（适用于类别不平衡）
 
 ```bash
-python train.py --data_root /path/to/data --two_stage --use_focal_loss
+python main.py train --data_root /path/to/data --two_stage --use_focal_loss
+```
+
+### 训练流程
+
+main.py 自动执行以下8个步骤：
+
+1. **环境设置** - 创建目录，检测GPU/CPU
+2. **配置加载** - 加载模型、训练、数据配置
+3. **数据准备** - 加载训练/验证/测试数据集
+4. **模型构建** - 创建ViT-Hybrid模型
+5. **模型训练** - 执行单/两阶段训练
+6. **模型评估** - 在测试集上评估性能
+7. **保存模型** - 保存最终模型权重
+8. **结果总结** - 显示训练结果和后续步骤
+
+或直接使用训练脚本：
+
+```bash
+python training/train.py --data_root /path/to/data --two_stage
 ```
 
 ### 模型使用示例
@@ -218,8 +248,8 @@ python train.py --data_root /path/to/data --two_stage --use_focal_loss
 #### 训练模型
 
 ```python
-from model import create_model
-from config import get_model_config
+from model.model import create_model
+from config.config import get_model_config
 import torch
 
 # 创建模型
@@ -240,7 +270,7 @@ print(f"Output shape: {output.shape}")  # (2, 1)
 
 ```python
 import torch
-from model import create_model
+from model.model import create_model
 
 model = create_model()
 model.load_state_dict(torch.load('checkpoints/final_model.pth'))
@@ -254,7 +284,7 @@ with torch.no_grad():
 
 ### 配置参数说明
 
-#### 模型配置（config.py - ModelConfig）
+#### 模型配置（config/config.py - ModelConfig）
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -267,7 +297,7 @@ with torch.no_grad():
 | `DFF` | 1024 | 前馈网络维度 |
 | `DROPOUT_RATE` | 0.1 | Dropout率 |
 
-#### 训练配置（config.py - TrainingConfig）
+#### 训练配置（config/config.py - TrainingConfig）
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -335,12 +365,68 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 使用第0号GPU
    - 随机亮度调整
    - 随机对比度调整
 
-可在config.py中控制预处理选项：
+可在config/config.py中控制预处理选项：
 
 ```python
 APPLY_PETRI_CROP = True    # 启用培养皿裁剪
 APPLY_CENTER_CROP = True   # 启用中心裁剪
 ```
+
+### 配置文件和标签生成
+
+#### 修改配置
+
+编辑 `config/config.py`：
+
+**方式1：BiLSTM风格（单张图像）**
+```python
+class DataConfig:
+    DATA_ROOT = '/path/to/data'      # 数据根目录
+    SCORE_DICT_PATH = 'score_dict.json'  # 标签文件路径
+```
+
+**方式2：时间序列风格（good/poor目录）**
+```python
+class DataConfig:
+    DATA_ROOT = '/path/to/data'      # 数据根目录（包含good/poor子目录）
+    SCORE_DICT_PATH = None           # 不使用score_dict
+```
+
+#### 生成score_dict.json
+
+如果使用BiLSTM风格数据，需要创建score_dict.json来标注图像质量。
+
+**方法1：从CSV文件生成**
+
+创建CSV文件 `labels.csv`（格式：filename,quality）：
+```csv
+filename,quality
+embryo_001.jpg,1
+embryo_002.jpg,0
+embryo_003.jpg,1
+```
+
+然后在config/config.py中设置：
+```python
+class DataConfig:
+    DATA_ROOT = '/path/to/data'
+    SCORE_DICT_PATH = 'score_dict.json'
+```
+
+**方法2：手动创建JSON**
+
+在数据根目录创建 `score_dict.json`：
+```json
+{
+    "embryo_001.jpg": {"quality": 1},
+    "embryo_002.jpg": {"quality": 0},
+    "embryo_003.jpg": {"quality": 1}
+}
+```
+
+quality值说明：
+- `1` = 好胚胎 (Good embryo)
+- `0` = 差胚胎 (Poor embryo)
 
 ### 注意事项
 

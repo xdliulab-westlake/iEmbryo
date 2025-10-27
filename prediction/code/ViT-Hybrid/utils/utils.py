@@ -127,7 +127,7 @@ def load_history(load_path):
 
 def create_directories():
     """创建必要的目录"""
-    from config import PathConfig
+    from config.config import PathConfig
 
     dirs = [
         PathConfig.MODEL_SAVE_DIR,

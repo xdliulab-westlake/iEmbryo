@@ -7,7 +7,7 @@ Date: 2025-10-27
 import torch
 import torch.nn as nn
 from torchvision import models
-from layers import FocalPlaneFusion, PositionalEncoding, TransformerBlock
+from .layers import FocalPlaneFusion, PositionalEncoding, TransformerBlock
 
 
 class VGG16FeatureExtractor(nn.Module):

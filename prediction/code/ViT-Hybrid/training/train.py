@@ -12,9 +12,9 @@ from pathlib import Path
 import argparse
 import numpy as np
 
-from model import create_model
-from dataset import create_data_loaders
-from utils import (
+from model.model import create_model
+from dataset.dataset import create_data_loaders
+from utils.utils import (
     FocalLoss,
     EarlyStopping,
     calculate_metrics,
@@ -23,7 +23,7 @@ from utils import (
     create_directories,
     count_parameters
 )
-from config import (
+from config.config import (
     get_model_config,
     get_training_config,
     get_data_config,
@@ -32,7 +32,7 @@ from config import (
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    """训练一个epoch"""
+    """Train one epoch"""
     model.train()
     total_loss = 0
     all_preds = []
@@ -60,7 +60,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
 
 
 def validate(model, dataloader, criterion, device):
-    """验证"""
+    """Validate"""
     model.eval()
     total_loss = 0
     all_preds = []
@@ -85,9 +85,7 @@ def validate(model, dataloader, criterion, device):
 
 
 def train_stage1(model, train_loader, val_loader, config, device):
-    """
-    第一阶段训练: 冻结VGG16
-    """
+    """Stage 1: Train Transformer (VGG16 frozen)"""
     print("\n" + "="*60)
     print("Stage 1: Training Transformer (VGG16 frozen)")
     print("="*60)
@@ -148,9 +146,7 @@ def train_stage1(model, train_loader, val_loader, config, device):
 
 
 def train_stage2(model, train_loader, val_loader, config, device):
-    """
-    第二阶段训练: 解冻VGG16
-    """
+    """Stage 2: Fine-tune with VGG16 unfrozen"""
     print("\n" + "="*60)
     print("Stage 2: Fine-tuning with VGG16 unfrozen")
     print("="*60)
@@ -213,7 +209,7 @@ def train_stage2(model, train_loader, val_loader, config, device):
 
 
 def main(args):
-    """主训练函数"""
+    """Main training function"""
     create_directories()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
