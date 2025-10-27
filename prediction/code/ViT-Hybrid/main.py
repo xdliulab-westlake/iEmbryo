@@ -42,9 +42,35 @@ def load_configuration(args):
     print("STEP 2: CONFIGURATION LOADING")
     print("="*60)
 
+    import json
+    from pathlib import Path
+
     model_config = get_model_config()
     training_config = get_training_config()
     data_config = get_data_config()
+
+    if args.config_file and Path(args.config_file).exists():
+        print(f"Loading config from: {args.config_file}")
+        with open(args.config_file, 'r') as f:
+            json_config = json.load(f)
+
+        if 'model' in json_config:
+            for key, value in json_config['model'].items():
+                config_key = key.lower()
+                if config_key in model_config:
+                    model_config[config_key] = value
+
+        if 'training' in json_config:
+            for key, value in json_config['training'].items():
+                config_key = key.lower()
+                if config_key in training_config:
+                    training_config[config_key] = value
+
+        if 'data' in json_config:
+            for key, value in json_config['data'].items():
+                config_key = key.lower()
+                if config_key in data_config:
+                    data_config[config_key] = value
 
     if args.data_root:
         data_config['data_root'] = args.data_root
@@ -63,6 +89,7 @@ def load_configuration(args):
         print("Loss function: Binary Cross-Entropy")
 
     print(f"Model config: time_steps={model_config['time_steps']}, focal_planes={model_config['focal_planes']}")
+    print(f"  num_transformer_layers={model_config['num_transformer_layers']}, num_heads={model_config['num_heads']}")
     print(f"Batch size: {training_config['batch_size']}, Epochs: {training_config['epochs']}")
 
     return model_config, training_config, data_config
@@ -294,7 +321,11 @@ def generate_config_command(args):
     print("  - training.BATCH_SIZE: Adjust based on GPU memory")
     print("  - training.EPOCHS: Set training epochs")
     print("\nUsage with this config:")
-    print(f"  python main.py train --data_root /path/to/data --config {output_path}")
+    print(f"  python main.py train --data_root /path/to/data --config_file {output_path}")
+    print(f"  python main.py train --data_root /path/to/data -c {output_path}")
+    print("\nYou can modify these fields in the config file:")
+    print("  - model.NUM_TRANSFORMER_LAYERS: Number of Transformer encoder layers (default: 4)")
+    print("  - model.NUM_HEADS: Number of attention heads (default: 8)")
 
 
 def main():
@@ -307,14 +338,17 @@ Examples:
   # Generate config template
   python main.py generate-config --output my_config.json
 
-  # Single-stage training
+  # Single-stage training with default config
   python main.py train --data_root /path/to/data
 
+  # Training with custom config (change encoder layers, attention heads, etc)
+  python main.py train --data_root /path/to/data --config_file my_config.json
+
   # Two-stage training (recommended)
-  python main.py train --data_root /path/to/data --two_stage
+  python main.py train --data_root /path/to/data --two_stage -c my_config.json
 
   # With Focal Loss for imbalanced data
-  python main.py train --data_root /path/to/data --two_stage --use_focal_loss
+  python main.py train --data_root /path/to/data --two_stage --use_focal_loss -c my_config.json
         """
     )
 
@@ -327,6 +361,7 @@ Examples:
     # Training command
     train_parser = subparsers.add_parser('train', help='Train the model')
     train_parser.add_argument('--data_root', type=str, required=True, help='Path to data root directory')
+    train_parser.add_argument('--config_file', '-c', type=str, default=None, help='Path to config JSON file')
     train_parser.add_argument('--two_stage', action='store_true', help='Use two-stage training')
     train_parser.add_argument('--use_focal_loss', action='store_true', help='Use Focal Loss for imbalanced data')
 
