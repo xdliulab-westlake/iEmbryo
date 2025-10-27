@@ -88,15 +88,24 @@ class EmbryoDataset(Dataset):
     """
     胚胎数据集
 
-    数据结构:
+    支持两种数据结构:
+
+    方式1 (BiLSTM风格):
+    data_root/
+        image/
+            embryo_001.jpg
+            embryo_002.jpg
+            ...
+        score_dict.json (包含quality标签)
+
+    方式2 (时间序列):
     data_root/
         good/
             embryo_001/
                 time_000/
                     focal_00.jpg
                     ...
-                    focal_10.jpg
-                ...
+                time_032/
         poor/
             embryo_002/
                 ...
@@ -104,6 +113,7 @@ class EmbryoDataset(Dataset):
     def __init__(
         self,
         data_root,
+        score_dict_path=None,
         time_steps=33,
         focal_planes=11,
         image_size=224,
@@ -120,14 +130,35 @@ class EmbryoDataset(Dataset):
         self.transform = transform
         self.preprocessor = ImagePreprocessor()
 
-        self.class_to_label = {'poor': 0, 'good': 1}
-        self.embryo_paths, self.labels = self._load_dataset()
+        self.embryo_paths, self.labels = self._load_dataset(score_dict_path)
 
-    def _load_dataset(self):
+    def _load_dataset(self, score_dict_path=None):
         """加载数据集路径和标签"""
         embryo_paths = []
         labels = []
 
+        # 方式1: BiLSTM风格 (单张图像+评分字典)
+        image_dir = self.data_root / 'image'
+        if image_dir.exists() and score_dict_path:
+            import json
+            score_dict_path = Path(score_dict_path)
+            if not score_dict_path.is_absolute():
+                score_dict_path = self.data_root / score_dict_path
+
+            if score_dict_path.exists():
+                with open(score_dict_path, 'r') as f:
+                    score_dict = json.load(f)
+
+                for image_file in image_dir.glob('*.jpg'):
+                    image_name = image_file.name
+                    if image_name in score_dict:
+                        quality = score_dict[image_name].get('quality', 0)
+                        embryo_paths.append(image_file)
+                        labels.append(quality)
+                return embryo_paths, labels
+
+        # 方式2: 时间序列风格 (good/poor子目录)
+        self.class_to_label = {'poor': 0, 'good': 1}
         for class_name in ['poor', 'good']:
             class_dir = self.data_root / class_name
             if not class_dir.exists():
@@ -185,12 +216,20 @@ class EmbryoDataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns:
-            sequence: (time_steps, focal_planes, 3, H, W)
+            image: (3, H, W) - BiLSTM风格单张图像
+            或
+            sequence: (time_steps, focal_planes, 3, H, W) - 时间序列
             label: 0 or 1
         """
         embryo_path = self.embryo_paths[idx]
         label = self.labels[idx]
 
+        # 方式1: BiLSTM风格 (单张图像)
+        if embryo_path.is_file():
+            image = self._load_image(embryo_path)
+            return image, torch.tensor(label, dtype=torch.float32)
+
+        # 方式2: 时间序列风格 (多时间点多焦平面)
         sequence = torch.zeros(
             self.time_steps,
             self.focal_planes,
@@ -236,7 +275,7 @@ def create_data_loaders(data_root, config):
 
     Args:
         data_root: 数据根目录
-        config: 配置字典
+        config: 配置字典 (包含score_dict_path, 若为BiLSTM风格数据)
 
     Returns:
         train_loader, val_loader, test_loader
@@ -246,6 +285,7 @@ def create_data_loaders(data_root, config):
 
     full_dataset = EmbryoDataset(
         data_root=data_root,
+        score_dict_path=config.get('score_dict_path'),
         time_steps=config.get('time_steps', 33),
         focal_planes=config.get('focal_planes', 11),
         image_size=config.get('image_size', 224),

@@ -45,6 +45,7 @@ class TrainingConfig:
 class DataConfig:
     """数据配置"""
     DATA_ROOT = '/path/to/embryo/data'
+    SCORE_DICT_PATH = 'score_dict.json'
 
     TRAIN_RATIO = 0.8
     VAL_RATIO = 0.1
@@ -97,6 +98,7 @@ def get_data_config():
     """获取数据配置字典"""
     return {
         'data_root': DataConfig.DATA_ROOT,
+        'score_dict_path': DataConfig.SCORE_DICT_PATH,
         'time_steps': ModelConfig.TIME_STEPS,
         'focal_planes': ModelConfig.FOCAL_PLANES,
         'image_size': ModelConfig.IMAGE_SIZE,

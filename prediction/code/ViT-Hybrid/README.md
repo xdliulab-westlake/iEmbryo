@@ -137,6 +137,19 @@ pip install scikit-learn
 
 ### 数据组织格式
 
+支持两种数据结构:
+
+**方式1 (BiLSTM风格-推荐):**
+```
+data_root/
+├── image/
+│   ├── embryo_001.jpg
+│   ├── embryo_002.jpg
+│   └── ...
+└── score_dict.json (包含quality标签)
+```
+
+**方式2 (时间序列风格):**
 ```
 data_root/
 ├── good/
@@ -150,6 +163,16 @@ data_root/
 │   └── embryo_002/
 └── poor/
     └── embryo_003/
+        └── ...
+```
+
+score_dict.json格式示例:
+```json
+{
+  "embryo_001.jpg": {"quality": 1},
+  "embryo_002.jpg": {"quality": 0},
+  "embryo_003.jpg": {"quality": 1}
+}
 ```
 
 ### 快速开始
@@ -160,7 +183,16 @@ data_root/
 
 ```python
 class DataConfig:
-    DATA_ROOT = '/path/to/your/embryo/data'  # 修改为实际数据路径
+    DATA_ROOT = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/code'  # BiLSTM风格数据路径
+    SCORE_DICT_PATH = 'score_dict.json'  # 相对于DATA_ROOT的路径
+```
+
+或使用时间序列风格数据:
+
+```python
+class DataConfig:
+    DATA_ROOT = '/path/to/time/series/data'  # 有good/poor子目录
+    SCORE_DICT_PATH = None  # 不使用score_dict
 ```
 
 #### 2. 单阶段训练
