@@ -9,7 +9,79 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import numpy as np
+import cv2
+import copy
 from pathlib import Path
+
+
+class ImagePreprocessor:
+    """图像预处理工具"""
+
+    @staticmethod
+    def crop_center_square(frame):
+        """裁剪中心正方形区域"""
+        y, x = frame.shape[0:2]
+        min_dim = min(y, x)
+        start_x = (x // 2) - (min_dim // 2)
+        start_y = (y // 2) - (min_dim // 2)
+        return frame[start_y:start_y + min_dim, start_x:start_x + min_dim]
+
+    @staticmethod
+    def crop_petri_dish(frame):
+        """使用Hough圆检测培养皿并裁剪"""
+        if len(frame.shape) == 3:
+            gimg = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        else:
+            gimg = frame.copy()
+
+        cimg = copy.deepcopy(frame)
+        img_height, img_width = gimg.shape
+        img_center_x, img_center_y = img_width // 2, img_height // 2
+
+        gimg_blurred = cv2.GaussianBlur(gimg, (9, 9), 2)
+
+        img_diagonal = np.sqrt(img_height ** 2 + img_width ** 2)
+        min_radius = max(50, int(img_diagonal * 0.15))
+        max_radius = min(int(img_diagonal * 0.45), max(img_height, img_width) // 2)
+
+        param_combinations = [(60, 40), (70, 45), (50, 35), (80, 50), (90, 55)]
+        all_circles = []
+
+        for param1, param2 in param_combinations:
+            circles = cv2.HoughCircles(
+                gimg_blurred,
+                cv2.HOUGH_GRADIENT,
+                dp=1,
+                minDist=max(80, int(min(img_height, img_width) * 0.2)),
+                param1=param1,
+                param2=param2,
+                minRadius=min_radius,
+                maxRadius=max_radius
+            )
+
+            if circles is not None and len(circles[0]) > 0:
+                for circle in circles[0]:
+                    x, y, r = circle
+                    distance_to_center = np.sqrt((x - img_center_x) ** 2 + (y - img_center_y) ** 2)
+                    all_circles.append({
+                        'x': x, 'y': y, 'r': r,
+                        'dist': distance_to_center
+                    })
+
+        if not all_circles:
+            return frame
+
+        best_circle = max(all_circles, key=lambda c: c['r'])
+        x, y, r = int(best_circle['x']), int(best_circle['y']), int(best_circle['r'])
+
+        mask = np.zeros_like(cimg)
+        if len(cimg.shape) == 3:
+            cv2.circle(mask, (x, y), r, (255, 255, 255), -1)
+        else:
+            cv2.circle(mask, (x, y), r, 255, -1)
+
+        result = cv2.bitwise_and(cimg, mask)
+        return result if result.any() else frame
 
 
 class EmbryoDataset(Dataset):
@@ -35,13 +107,18 @@ class EmbryoDataset(Dataset):
         time_steps=33,
         focal_planes=11,
         image_size=224,
+        apply_petri_crop=True,
+        apply_center_crop=True,
         transform=None
     ):
         self.data_root = Path(data_root)
         self.time_steps = time_steps
         self.focal_planes = focal_planes
         self.image_size = image_size
+        self.apply_petri_crop = apply_petri_crop
+        self.apply_center_crop = apply_center_crop
         self.transform = transform
+        self.preprocessor = ImagePreprocessor()
 
         self.class_to_label = {'poor': 0, 'good': 1}
         self.embryo_paths, self.labels = self._load_dataset()
@@ -65,16 +142,41 @@ class EmbryoDataset(Dataset):
         return embryo_paths, labels
 
     def _load_image(self, image_path):
-        """加载单张图像"""
+        """
+        加载单张图像并进行预处理
+
+        Args:
+            image_path: 图像路径
+
+        Returns:
+            预处理后的图像张量
+        """
         try:
-            img = Image.open(image_path).convert('RGB')
-            img = img.resize((self.image_size, self.image_size))
+            img = cv2.imread(str(image_path))
+            if img is None:
+                img = Image.open(image_path).convert('RGB')
+                img = np.array(img)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            if self.apply_petri_crop:
+                img = self.preprocessor.crop_petri_dish(img)
+
+            if self.apply_center_crop:
+                img = self.preprocessor.crop_center_square(img)
+
+            img = cv2.resize(img, (self.image_size, self.image_size))
+
+            img = Image.fromarray(img.astype(np.uint8))
+
             if self.transform:
                 img = self.transform(img)
             else:
                 img = transforms.ToTensor()(img)
+
             return img
-        except:
+
+        except Exception as e:
             return torch.zeros(3, self.image_size, self.image_size)
 
     def __len__(self):
@@ -147,6 +249,8 @@ def create_data_loaders(data_root, config):
         time_steps=config.get('time_steps', 33),
         focal_planes=config.get('focal_planes', 11),
         image_size=config.get('image_size', 224),
+        apply_petri_crop=config.get('apply_petri_crop', True),
+        apply_center_crop=config.get('apply_center_crop', True),
         transform=None
     )
 
@@ -170,7 +274,7 @@ def create_data_loaders(data_root, config):
         batch_size=config.get('batch_size', 4),
         shuffle=True,
         num_workers=config.get('num_workers', 4),
-        pin_memory=True
+        pin_memory=config.get('pin_memory', True)
     )
 
     val_loader = DataLoader(
@@ -178,7 +282,7 @@ def create_data_loaders(data_root, config):
         batch_size=config.get('batch_size', 4),
         shuffle=False,
         num_workers=config.get('num_workers', 4),
-        pin_memory=True
+        pin_memory=config.get('pin_memory', True)
     )
 
     test_loader = DataLoader(
@@ -186,7 +290,7 @@ def create_data_loaders(data_root, config):
         batch_size=config.get('batch_size', 4),
         shuffle=False,
         num_workers=config.get('num_workers', 4),
-        pin_memory=True
+        pin_memory=config.get('pin_memory', True)
     )
 
     return train_loader, val_loader, test_loader

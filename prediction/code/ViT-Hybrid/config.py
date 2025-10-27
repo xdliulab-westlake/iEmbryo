@@ -50,6 +50,9 @@ class DataConfig:
     VAL_RATIO = 0.1
     TEST_RATIO = 0.1
 
+    APPLY_PETRI_CROP = True
+    APPLY_CENTER_CROP = True
+
 
 class PathConfig:
     """路径配置"""
@@ -101,5 +104,7 @@ def get_data_config():
         'train_ratio': DataConfig.TRAIN_RATIO,
         'val_ratio': DataConfig.VAL_RATIO,
         'num_workers': TrainingConfig.NUM_WORKERS,
-        'pin_memory': TrainingConfig.PIN_MEMORY
+        'pin_memory': TrainingConfig.PIN_MEMORY,
+        'apply_petri_crop': DataConfig.APPLY_PETRI_CROP,
+        'apply_center_crop': DataConfig.APPLY_CENTER_CROP
     }
