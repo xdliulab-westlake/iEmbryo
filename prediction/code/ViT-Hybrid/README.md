@@ -51,30 +51,30 @@
 ## 四、模块说明
 
 ### 1️⃣ VGG16 卷积特征提取模块
-- 使用预训练的 **VGG16（ImageNet 权重）**：该模型在初次运行时自动从 PyTorch torchvision 库下载。无需手动提供预训练权重。
-- 移除顶层全连接部分，仅保留卷积主体和全局平均池化层。
+- 使用预训练的 **VGG16（ImageNet 权重，STORK风格实现）**：该模型在初次运行时自动从 PyTorch torchvision 库下载。无需手动提供预训练权重。
+- 架构遵循STORK标准：`features + avgpool(7x7) + flatten + classifier[:4]`
+- 输出每张图像 **4096 维**特征向量（来自原始VGG16分类器的FC层）
 - 所有时间点与焦平面图像共用同一权重，实现高效共享特征提取。
-- 输出每张图像 512 维特征向量，为后续时序建模提供高层语义特征。
-- 训练初期冻结 VGG16 参数，待 Transformer 收敛后再解冻高层卷积模块进行联合微调。
+- **微调策略采用STORK最优方案**：冻结前1/3层，解冻后2/3层进行联合训练（无需两阶段训练）
 
-### 2️⃣ 多焦平面融合模块（Focal Fusion）  
-- 输入：单一时间点的 11 张焦平面特征 `(11, 512)`  
-- 采用**平均融合策略**对所有焦平面特征进行聚合，确保不同深度信息均被利用。  
-- 输出：单个时间点的 512 维特征向量 `(1, 512)`  
+### 2️⃣ 多焦平面融合模块（Focal Fusion）
+- 输入：单一时间点的 11 张焦平面特征 `(11, 4096)`
+- 采用**平均融合策略**对所有焦平面特征进行聚合，确保不同深度信息均被利用。
+- 输出：单个时间点的 **4096 维**特征向量 `(1, 4096)`
 - 此操作在保持整体结构信息的同时避免注意力偏置，提高特征稳定性。
 
-### 3️⃣ Transformer 编码器（Temporal Transformer）  
-- 输入：33×512 的时间序列特征矩阵。  
-- 添加可学习的位置编码，显式建模时间顺序。  
-- 包含 4 层 Transformer 块，每层由多头自注意力（8 heads）、前馈网络（1024 单元）、Layer Normalization 和残差连接组成。  
+### 3️⃣ Transformer 编码器（Temporal Transformer）
+- 输入：33×**4096** 的时间序列特征矩阵。
+- 添加可学习的位置编码，显式建模时间顺序。
+- 包含 4 层 Transformer 块，每层由多头自注意力（8 heads × 512维）、前馈网络（2048 单元）、Layer Normalization 和残差连接组成。
 - 该模块学习胚胎在发育过程中形态变化的全局动态模式。
 
-### 4️⃣ 分类头（Classification Head）  
-- 将 Transformer 输出经全局平均池化（GlobalAveragePooling1D）得到整体时序特征向量。  
-- 通过两层全连接网络进行非线性映射：  
-  - Dense(256, ReLU 激活) + Dropout(0.3)  
-  - Dense(1, Sigmoid 激活)  
-- 最终输出值 `p ∈ [0,1]` 表示胚胎为“好”的概率。
+### 4️⃣ 分类头（Classification Head）
+- 将 Transformer 输出经全局平均池化（GlobalAveragePooling1D）得到整体时序特征向量 (4096D)。
+- 通过三层全连接网络进行非线性映射：
+  - Dropout(0.5) + Linear(4096, 512) + ReLU + Dropout(0.3)
+  - Linear(512, 1) + Sigmoid
+- 最终输出值 `p ∈ [0,1]` 表示胚胎为"好"的概率。
 
 ---
 
@@ -89,7 +89,7 @@
 | **早停策略 (EarlyStopping)** | monitor='val_auc'，patience=10 |
 | **Batch Size** | 4–8（取决于 GPU 显存） |
 | **数据增强 (Augmentation)** | 随机翻转、旋转、亮度对比调整、轻微缩放与裁剪 |
-| **训练策略** | 采用两阶段训练：① 冻结 VGG16，仅训练 Transformer + 分类头；② 解冻 VGG16 高层卷积层联合微调 |
+| **训练策略** | **STORK最优方案**：冻结VGG16前1/3层，解冻后2/3层进行联合训练（单阶段训练，避免两阶段导致的梯度不稳定） |
 
 ---
 
@@ -602,8 +602,8 @@ with torch.no_grad():
 | `IMAGE_SIZE` | 224 | 图像尺寸 |
 | `NUM_TRANSFORMER_LAYERS` | 4 | Transformer层数 |
 | `NUM_HEADS` | 8 | 注意力头数 |
-| `D_MODEL` | 512 | 特征维度 |
-| `DFF` | 1024 | 前馈网络维度 |
+| `D_MODEL` | **4096** | 特征维度（与VGG16输出保持一致，STORK风格） |
+| `DFF` | **2048** | 前馈网络维度 |
 | `DROPOUT_RATE` | 0.1 | Dropout率 |
 
 #### 训练配置（config/config.py - TrainingConfig）
