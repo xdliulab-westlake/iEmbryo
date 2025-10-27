@@ -27,8 +27,8 @@ class TrainingConfig:
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 1e-5
 
-    TRAIN_RATIO = 0.8
-    VAL_RATIO = 0.1
+    TRAIN_RATIO = 0.7
+    VAL_RATIO = 0.15
 
     EARLY_STOPPING_PATIENCE = 10
     REDUCE_LR_PATIENCE = 5
@@ -47,9 +47,9 @@ class DataConfig:
     DATA_ROOT = '/path/to/embryo/data'
     SCORE_DICT_PATH = 'score_dict.json'
 
-    TRAIN_RATIO = 0.8
-    VAL_RATIO = 0.1
-    TEST_RATIO = 0.1
+    TRAIN_RATIO = 0.7
+    VAL_RATIO = 0.15
+    TEST_RATIO = 0.15
 
     APPLY_PETRI_CROP = True
     APPLY_CENTER_CROP = True
