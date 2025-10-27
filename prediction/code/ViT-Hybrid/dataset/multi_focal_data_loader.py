@@ -143,8 +143,6 @@ class MultiFocalDataLoader:
         for embryo_id, embryo_df in multi_focal_df.groupby('EmbryoID'):
             # Check if embryo has quality label
             if embryo_id not in score_dict:
-                if self.verbose:
-                    print(f"Skipping {embryo_id}: No quality label in score_dict")
                 self.validator._log_rejection("No quality label")
                 continue
 
@@ -155,12 +153,8 @@ class MultiFocalDataLoader:
                 valid_embryo_ids.append(embryo_id)
                 embryo_to_label[embryo_id] = score_dict[embryo_id]['quality']
                 self.validator.validation_stats['valid_embryos'] += 1
-                if self.verbose:
-                    print(f"✓ {embryo_id}: Valid (33 timepoints)")
             else:
                 self.validator.validation_stats['rejected_embryos'] += 1
-                if self.verbose:
-                    print(f"✗ {embryo_id}: {reason}")
 
         # Filter to valid embryos only
         validated_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(valid_embryo_ids)].copy()
