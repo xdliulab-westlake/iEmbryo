@@ -149,10 +149,16 @@ class EmbryoDataset(Dataset):
                 with open(score_dict_path, 'r') as f:
                     score_dict = json.load(f)
 
-                for image_file in image_dir.glob('*.jpg'):
-                    image_name = image_file.name
-                    if image_name in score_dict:
-                        quality = score_dict[image_name].get('quality', 0)
+                # 支持所有图像扩展名，并匹配不含扩展名的 score_dict key
+                for image_file in image_dir.glob('*'):
+                    if not image_file.is_file():
+                        continue
+
+                    # 使用 stem 获取不含扩展名的文件名
+                    image_name_without_ext = image_file.stem
+
+                    if image_name_without_ext in score_dict:
+                        quality = score_dict[image_name_without_ext].get('quality', 0)
                         embryo_paths.append(image_file)
                         labels.append(quality)
                 return embryo_paths, labels
