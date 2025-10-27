@@ -309,7 +309,71 @@ python main.py train --data_root /path/to/data --two_stage
 python main.py train --data_root /path/to/data --two_stage --use_focal_loss
 ```
 
-#### 6. 使用自定义配置文件
+#### 6. 多焦距多时间点训练（Multi-Focal Mode）
+
+**背景**：从 `selected_image_paths.csv` 中加载多焦距多时间点的完整胚胎数据，支持完整性检查（必须有33个时间点）。
+
+**数据准备**：
+1. 生成 `selected_image_paths.csv`（包含所有时间点和焦距的图像路径）
+2. 准备 `MainDB.csv`（包含 EmbryoID, ICM, TE, Quality）
+3. 准备 `filtered_clean_embryos.csv`（补充低质量胚胎）
+
+**训练命令**：
+
+```bash
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage
+```
+
+**多焦距模式的工作流**：
+
+```
+selected_image_paths.csv
+  (PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath)
+           ↓
+加载质量标签
+  (MainDB.csv + filtered_clean_embryos.csv)
+           ↓
+验证完整性
+  (检查每个胚胎是否有完整的33个时间点)
+           ↓
+聚合焦距
+  (对每个胚胎平均所有焦距和时间点的图像)
+           ↓
+创建数据加载器
+  (train/val/test 分层划分)
+           ↓
+训练二分类模型
+```
+
+**完整性检查详情**：
+- **要求**：每个胚胎必须有完整的33个时间点（96-112小时，每0.5小时采样）
+- **验证**：检查所有图像文件是否存在
+- **拒绝**：时间点不完整或缺少图像的胚胎会被跳过
+- **统计**：自动输出验证统计（总胚胎数、有效胚胎数、拒绝原因）
+
+**示例输出**：
+```
+MULTI-FOCAL DATA VALIDATION SUMMARY
+================================================================================
+Total embryos: 150
+Valid embryos: 142
+Rejected embryos: 8
+Success rate: 94.7%
+
+Rejection reasons:
+  Incomplete timepoints: 5
+  Missing image files: 3
+
+Final dataset: 4686 images from 142 embryos
+```
+
+#### 7. 使用自定义配置文件
 
 修改 encoder 层数和注意力头数量：
 
@@ -347,6 +411,38 @@ python main.py train \
 
 # 5. 查看训练结果
 # 结果保存在 results/ 目录中
+```
+
+### 多焦距训练完整工作流
+
+```bash
+# 1. 生成 selected_image_paths.csv（如果还没有）
+# 使用 BiLSTM/select_TimePoint_time_lapse.py 或类似脚本
+
+# 2. 准备数据文件
+# - selected_image_paths.csv (包含所有时间点和焦距)
+# - MainDB.csv (包含 EmbryoID, ICM, TE, Quality)
+# - filtered_clean_embryos.csv (补充低质量胚胎)
+
+# 3. 生成配置文件
+python main.py generate-config --output multi_focal_config.json
+
+# 4. 编辑 multi_focal_config.json（可选）
+# 调整 BATCH_SIZE, EPOCHS, LEARNING_RATE 等参数
+
+# 5. 执行多焦距训练（含完整性验证）
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --config_file multi_focal_config.json \
+  --two_stage
+
+# 6. 查看训练结果
+# 结果保存在 results/ 目录中
+# 包括：loss 曲线、evaluation metrics、最终模型权重
 ```
 
 ### 训练流程
