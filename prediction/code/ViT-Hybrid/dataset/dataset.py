@@ -149,19 +149,15 @@ class EmbryoDataset(Dataset):
                 with open(score_dict_path, 'r') as f:
                     score_dict = json.load(f)
 
-                # 支持所有图像扩展名，并匹配不含扩展名的 score_dict key
-                for image_file in image_dir.glob('*'):
-                    if not image_file.is_file():
-                        continue
-
-                    # 使用 stem 获取不含扩展名的文件名
-                    image_name_without_ext = image_file.stem
-
-                    if image_name_without_ext in score_dict:
-                        quality = score_dict[image_name_without_ext].get('quality', 0)
-                        embryo_paths.append(image_file)
-                        labels.append(quality)
-                return embryo_paths, labels
+                # 检查是否为嵌套目录结构 (image/embryo_id/images/...)
+                # 还是平面结构 (image/embryo_001.jpg)
+                first_item = next(image_dir.iterdir(), None)
+                if first_item and first_item.is_dir():
+                    # 嵌套结构: image/embryo_id/images/F.../xxx.jpg
+                    return self._load_nested_dataset(image_dir, score_dict)
+                else:
+                    # 平面结构: image/embryo_001.jpg
+                    return self._load_flat_dataset(image_dir, score_dict)
 
         # 方式2: 时间序列风格 (good/poor子目录)
         self.class_to_label = {'poor': 0, 'good': 1}
@@ -175,6 +171,47 @@ class EmbryoDataset(Dataset):
                 if embryo_dir.is_dir():
                     embryo_paths.append(embryo_dir)
                     labels.append(label)
+
+        return embryo_paths, labels
+
+    def _load_flat_dataset(self, image_dir, score_dict):
+        """加载平面结构 (image/embryo_001.jpg)"""
+        embryo_paths = []
+        labels = []
+
+        # 支持所有图像扩展名，并匹配不含扩展名的 score_dict key
+        for image_file in image_dir.glob('*'):
+            if not image_file.is_file():
+                continue
+
+            # 使用 stem 获取不含扩展名的文件名
+            image_name_without_ext = image_file.stem
+
+            if image_name_without_ext in score_dict:
+                quality = score_dict[image_name_without_ext].get('quality', 0)
+                embryo_paths.append(image_file)
+                labels.append(quality)
+
+        return embryo_paths, labels
+
+    def _load_nested_dataset(self, image_dir, score_dict):
+        """加载嵌套结构 (image/embryo_id/images/focal_plane/xxx.jpg)"""
+        embryo_paths = []
+        labels = []
+
+        # 遍历胚胎ID目录
+        for embryo_dir in image_dir.iterdir():
+            if not embryo_dir.is_dir():
+                continue
+
+            # 胚胎ID就是目录名
+            embryo_id = embryo_dir.name
+
+            # 检查评分字典中是否有这个胚胎ID
+            if embryo_id in score_dict:
+                quality = score_dict[embryo_id].get('quality', 0)
+                embryo_paths.append(embryo_dir)
+                labels.append(quality)
 
         return embryo_paths, labels
 
@@ -222,7 +259,7 @@ class EmbryoDataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns:
-            image: (3, H, W) - BiLSTM风格单张图像
+            image: (3, H, W) - BiLSTM风格单张图像或嵌套结构聚合图像
             或
             sequence: (time_steps, focal_planes, 3, H, W) - 时间序列
             label: 0 or 1
@@ -234,6 +271,11 @@ class EmbryoDataset(Dataset):
         if embryo_path.is_file():
             image = self._load_image(embryo_path)
             return image, torch.tensor(label, dtype=torch.float32)
+
+        # 检查是否为嵌套结构 (image/embryo_id/images/F-xx/)
+        images_subdir = embryo_path / 'images'
+        if images_subdir.exists():
+            return self._load_nested_structure(images_subdir, label)
 
         # 方式2: 时间序列风格 (多时间点多焦平面)
         sequence = torch.zeros(
@@ -255,6 +297,49 @@ class EmbryoDataset(Dataset):
                     sequence[t, f] = self._load_image(focal_path)
 
         return sequence, torch.tensor(label, dtype=torch.float32)
+
+    def _load_nested_structure(self, images_dir, label):
+        """
+        Load images from nested structure (images/F-xx/ with multiple RUN images)
+        Aggregates focal planes into a single representative image.
+
+        Args:
+            images_dir: Path to 'images' directory containing F-xx subdirectories
+            label: Quality label
+
+        Returns:
+            image: (3, H, W) - Aggregated representative image
+            label: Quality label tensor
+        """
+        focal_dirs = sorted([d for d in images_dir.iterdir() if d.is_dir()])
+
+        if not focal_dirs:
+            return torch.zeros(3, self.image_size, self.image_size), torch.tensor(label, dtype=torch.float32)
+
+        # Collect images from all focal planes
+        all_images = []
+        for focal_dir in focal_dirs:
+            # Find image files (support different extensions)
+            image_files = (list(focal_dir.glob('*.jpg')) +
+                          list(focal_dir.glob('*.jpeg')) +
+                          list(focal_dir.glob('*.png')) +
+                          list(focal_dir.glob('*.JPG')) +
+                          list(focal_dir.glob('*.JPEG')) +
+                          list(focal_dir.glob('*.PNG')))
+
+            if image_files:
+                # Use the first RUN image from this focal plane
+                image = self._load_image(image_files[0])
+                all_images.append(image)
+
+        if not all_images:
+            return torch.zeros(3, self.image_size, self.image_size), torch.tensor(label, dtype=torch.float32)
+
+        # Aggregate: Average across all focal planes
+        stacked = torch.stack(all_images)  # (num_focal_planes, 3, H, W)
+        aggregated_image = torch.mean(stacked, dim=0)  # (3, H, W)
+
+        return aggregated_image, torch.tensor(label, dtype=torch.float32)
 
 
 def get_transforms(augment=False):
