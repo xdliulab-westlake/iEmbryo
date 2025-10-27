@@ -242,7 +242,39 @@ def train_command(args):
     try:
         device = setup_environment(args)
         model_config, training_config, data_config = load_configuration(args)
-        train_loader, val_loader, test_loader = prepare_data(data_config)
+
+        # Check if using multi-focal mode
+        if args.multi_focal:
+            print("\n" + "="*60)
+            print("MULTI-FOCAL TRAINING MODE")
+            print("="*60)
+
+            from dataset.multi_focal_data_loader import (
+                load_score_dict_for_multi_focal,
+                MultiFocalDataLoader
+            )
+            from dataset.dataset import create_multi_focal_data_loaders
+
+            # Load quality labels
+            maindb_csv = args.maindb_csv or "/liaozizhuo/scripts/MainDB.csv"
+            filtered_csv = args.filtered_csv or "/liaozizhuo/scripts/filtered_clean_embryos.csv"
+            score_dict = load_score_dict_for_multi_focal(maindb_csv, filtered_csv)
+
+            # Load and validate multi-focal data
+            selected_images_csv = args.selected_images_csv or "/liaozizhuo/selected_image_paths.csv"
+            loader = MultiFocalDataLoader(verbose=True)
+            multi_focal_df, embryo_to_label = loader.load_multi_focal_data(
+                selected_images_csv, score_dict
+            )
+
+            # Create data loaders
+            train_loader, val_loader, test_loader, labels = create_multi_focal_data_loaders(
+                multi_focal_df, embryo_to_label, data_config
+            )
+        else:
+            # Standard mode
+            train_loader, val_loader, test_loader = prepare_data(data_config)
+
         model = build_model(model_config, device)
         model = train_model(model, train_loader, val_loader, training_config, device, args)
         metrics = evaluate_model(model, test_loader, device)
@@ -368,6 +400,10 @@ Examples:
     train_parser.add_argument('--config_file', '-c', type=str, default=None, help='Path to config JSON file')
     train_parser.add_argument('--two_stage', action='store_true', help='Use two-stage training')
     train_parser.add_argument('--use_focal_loss', action='store_true', help='Use Focal Loss for imbalanced data')
+    train_parser.add_argument('--multi_focal', action='store_true', help='Use multi-focal multi-timepoint data mode')
+    train_parser.add_argument('--selected_images_csv', type=str, default=None, help='Path to selected_image_paths.csv')
+    train_parser.add_argument('--maindb_csv', type=str, default=None, help='Path to MainDB.csv')
+    train_parser.add_argument('--filtered_csv', type=str, default=None, help='Path to filtered_clean_embryos.csv')
 
     args = parser.parse_args()
 
