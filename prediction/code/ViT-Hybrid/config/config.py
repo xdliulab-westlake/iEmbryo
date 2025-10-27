@@ -13,8 +13,8 @@ class ModelConfig:
 
     NUM_TRANSFORMER_LAYERS = 4
     NUM_HEADS = 8
-    D_MODEL = 512
-    DFF = 1024
+    D_MODEL = 4096  # 与VGG16输出维度保持一致（STORK风格）
+    DFF = 2048      # 前馈网络维度
     DROPOUT_RATE = 0.1
 
     FUSION_TYPE = 'average'
