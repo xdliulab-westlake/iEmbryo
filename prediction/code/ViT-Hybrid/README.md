@@ -221,6 +221,51 @@ score_dict.json格式示例:
 
 ### 快速开始
 
+#### 0. 生成评分字典（数据准备）
+
+如果使用 BiLSTM 风格的数据（单张图像 + score_dict.json），需要先生成评分字典：
+
+```bash
+python generate_score_dict.py --maindb MainDB.csv --image_dir ./image -o score_dict.json
+```
+
+**参数说明：**
+- `--maindb`: MainDB.csv 文件路径（必需）
+- `--image_dir`: 胚胎图像目录（可选，用于验证图像存在）
+- `--filtered`: filtered_clean_embryos.csv 文件路径（可选）
+- `--output`: 输出文件路径（默认：score_dict.json）
+
+**数据处理过程：**
+1. 读取 MainDB.csv 中的胚胎数据
+2. 从 ICM/TE 评分计算 BS_prime 分数
+3. 映射质量标签 (good=1, poor=0)
+4. 筛选有有效质量标签的胚胎
+5. 生成 JSON 格式的评分字典
+
+**输出示例：**
+```json
+{
+  "embryo_001": {
+    "bs_score": 3.5,
+    "quality": 1
+  },
+  "embryo_002": {
+    "bs_score": 6.2,
+    "quality": 0
+  }
+}
+```
+
+将生成的 `score_dict.json` 放在数据目录中：
+```
+data_root/
+  ├── image/
+  │   ├── embryo_001.jpg
+  │   ├── embryo_002.jpg
+  │   └── ...
+  └── score_dict.json
+```
+
 #### 1. 生成配置文件
 
 使用 main.py 生成配置模板：
@@ -229,7 +274,9 @@ score_dict.json格式示例:
 python main.py generate-config --output my_config.json
 ```
 
-这会生成 `my_config.json` 配置文件，编辑以下必需字段：
+#### 2. 配置文件设置
+
+生成的 `my_config.json` 配置文件需编辑以下必需字段：
 
 ```json
 {
@@ -244,36 +291,62 @@ python main.py generate-config --output my_config.json
 }
 ```
 
-或直接编辑 `config/config.py` 中的配置类（高级用法）：
-
-```python
-# BiLSTM风格数据
-class DataConfig:
-    DATA_ROOT = '/path/to/data'
-    SCORE_DICT_PATH = 'score_dict.json'
-
-# 时间序列风格数据
-class DataConfig:
-    DATA_ROOT = '/path/to/data'  # 有good/poor子目录
-    SCORE_DICT_PATH = None  # 设为None
-```
-
-#### 2. 单阶段训练
+#### 3. 单阶段训练
 
 ```bash
 python main.py train --data_root /path/to/data
 ```
 
-#### 3. 两阶段训练（推荐）
+#### 4. 两阶段训练（推荐）
 
 ```bash
 python main.py train --data_root /path/to/data --two_stage
 ```
 
-#### 4. 使用Focal Loss（适用于类别不平衡）
+#### 5. 使用Focal Loss（适用于类别不平衡）
 
 ```bash
 python main.py train --data_root /path/to/data --two_stage --use_focal_loss
+```
+
+#### 6. 使用自定义配置文件
+
+修改 encoder 层数和注意力头数量：
+
+```bash
+# 编辑 my_config.json，修改：
+# "NUM_TRANSFORMER_LAYERS": 6,  # 改为 6 层 encoder
+# "NUM_HEADS": 16,              # 改为 16 个注意力头
+
+python main.py train --data_root /path/to/data --config_file my_config.json --two_stage
+```
+
+### 完整示例工作流
+
+```bash
+# 1. 生成评分字典（数据准备）
+python generate_score_dict.py --maindb MainDB.csv --image_dir ./image -o score_dict.json
+
+# 2. 生成配置文件
+python main.py generate-config --output my_config.json
+
+# 3. 编辑 my_config.json，设置数据路径和训练参数
+# 编辑以下字段：
+# - data.DATA_ROOT: /path/to/embryo/data
+# - training.BATCH_SIZE: 4 (根据GPU内存调整)
+# - training.EPOCHS: 100
+# - model.NUM_TRANSFORMER_LAYERS: 4 (可选)
+# - model.NUM_HEADS: 8 (可选)
+
+# 4. 执行两阶段训练
+python main.py train \
+  --data_root /path/to/embryo/data \
+  --config_file my_config.json \
+  --two_stage \
+  --use_focal_loss
+
+# 5. 查看训练结果
+# 结果保存在 results/ 目录中
 ```
 
 ### 训练流程
