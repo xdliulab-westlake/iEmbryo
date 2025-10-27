@@ -232,6 +232,71 @@ def train_command(args):
         sys.exit(1)
 
 
+def generate_config_command(args):
+    """Generate configuration template file"""
+    import json
+
+    print("\n" + "="*60)
+    print("GENERATING CONFIG TEMPLATE")
+    print("="*60)
+
+    config_template = {
+        "model": {
+            "TIME_STEPS": 33,
+            "FOCAL_PLANES": 11,
+            "IMAGE_SIZE": 224,
+            "NUM_TRANSFORMER_LAYERS": 4,
+            "NUM_HEADS": 8,
+            "D_MODEL": 512,
+            "DFF": 1024,
+            "DROPOUT_RATE": 0.1,
+            "FUSION_TYPE": "average"
+        },
+        "training": {
+            "BATCH_SIZE": 4,
+            "EPOCHS": 100,
+            "LEARNING_RATE": 0.0001,
+            "WEIGHT_DECAY": 0.00001,
+            "TRAIN_RATIO": 0.8,
+            "VAL_RATIO": 0.1,
+            "EARLY_STOPPING_PATIENCE": 10,
+            "REDUCE_LR_PATIENCE": 5,
+            "REDUCE_LR_FACTOR": 0.5,
+            "MIN_LR": 0.0000001,
+            "MONITOR_METRIC": "val_auc",
+            "MONITOR_MODE": "max",
+            "NUM_WORKERS": 4,
+            "PIN_MEMORY": True
+        },
+        "data": {
+            "DATA_ROOT": "/path/to/embryo/data",
+            "SCORE_DICT_PATH": "score_dict.json",
+            "TEST_RATIO": 0.1,
+            "APPLY_PETRI_CROP": True,
+            "APPLY_CENTER_CROP": True
+        },
+        "paths": {
+            "MODEL_SAVE_DIR": "./checkpoints",
+            "LOG_DIR": "./logs",
+            "RESULT_DIR": "./results"
+        }
+    }
+
+    output_path = args.output if args.output else 'config.json'
+
+    with open(output_path, 'w') as f:
+        json.dump(config_template, f, indent=2)
+
+    print(f"\nConfiguration template generated: {output_path}")
+    print("\nIMPORTANT: Edit the following fields before training:")
+    print("  - data.DATA_ROOT: Set to your data directory path")
+    print("  - data.SCORE_DICT_PATH: Set to your score_dict.json path (or null for temporal data)")
+    print("  - training.BATCH_SIZE: Adjust based on GPU memory")
+    print("  - training.EPOCHS: Set training epochs")
+    print("\nUsage with this config:")
+    print(f"  python main.py train --data_root /path/to/data --config {output_path}")
+
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
@@ -239,6 +304,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Generate config template
+  python main.py generate-config --output my_config.json
+
   # Single-stage training
   python main.py train --data_root /path/to/data
 
@@ -252,6 +320,10 @@ Examples:
 
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
 
+    # Generate config command
+    config_parser = subparsers.add_parser('generate-config', help='Generate configuration template')
+    config_parser.add_argument('--output', '-o', type=str, default='config.json', help='Output config file path')
+
     # Training command
     train_parser = subparsers.add_parser('train', help='Train the model')
     train_parser.add_argument('--data_root', type=str, required=True, help='Path to data root directory')
@@ -260,7 +332,9 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.command == 'train':
+    if args.command == 'generate-config':
+        generate_config_command(args)
+    elif args.command == 'train':
         train_command(args)
     else:
         parser.print_help()

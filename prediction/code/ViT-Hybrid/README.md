@@ -188,22 +188,41 @@ score_dict.json格式示例:
 
 ### 快速开始
 
-#### 1. 修改配置
+#### 1. 生成配置文件
 
-编辑 `config.py`：
+使用 main.py 生成配置模板：
 
-```python
-class DataConfig:
-    DATA_ROOT = '/Users/lzz/Documents/GitHub/IVF_AI/prediction/code'  # BiLSTM风格数据路径
-    SCORE_DICT_PATH = 'score_dict.json'  # 相对于DATA_ROOT的路径
+```bash
+python main.py generate-config --output my_config.json
 ```
 
-或使用时间序列风格数据:
+这会生成 `my_config.json` 配置文件，编辑以下必需字段：
+
+```json
+{
+  "data": {
+    "DATA_ROOT": "/path/to/your/embryo/data",
+    "SCORE_DICT_PATH": "score_dict.json"
+  },
+  "training": {
+    "BATCH_SIZE": 4,
+    "EPOCHS": 100
+  }
+}
+```
+
+或直接编辑 `config/config.py` 中的配置类（高级用法）：
 
 ```python
+# BiLSTM风格数据
 class DataConfig:
-    DATA_ROOT = '/path/to/time/series/data'  # 有good/poor子目录
-    SCORE_DICT_PATH = None  # 不使用score_dict
+    DATA_ROOT = '/path/to/data'
+    SCORE_DICT_PATH = 'score_dict.json'
+
+# 时间序列风格数据
+class DataConfig:
+    DATA_ROOT = '/path/to/data'  # 有good/poor子目录
+    SCORE_DICT_PATH = None  # 设为None
 ```
 
 #### 2. 单阶段训练
