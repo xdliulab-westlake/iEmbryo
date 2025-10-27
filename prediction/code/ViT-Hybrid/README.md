@@ -110,7 +110,252 @@ ViT-Hybrid（多焦平面融合版）是一种结合卷积与注意力机制的�
 
 ---
 
-## 八、模型架构详解
+## 八、完整的预处理到评估流程
+
+### 📋 数据预处理流程
+
+#### 8.1 图像加载与标准化
+
+**输入:** 原始胚胎显微镜图像 (任意分辨率，RGB格式)
+
+**处理步骤:**
+
+1. **读取图像**
+   - 使用 OpenCV (cv2.imread) 或 PIL 加载
+   - 转换为 RGB 颜色空间 (OpenCV默认为BGR)
+
+2. **培养皿检测与裁剪** (可选，默认启用)
+   - 使用 **Hough 圆检测** 找到圆形培养皿边界
+   - 参数范围: 半径 15%-45% 图像对角线
+   - 遍历多组参数组合确保鲁棒性: (60,40), (70,45), (50,35), (80,50), (90,55)
+   - 取检测到的最大圆形作为培养皿
+
+3. **中心正方形裁剪** (可选，默认启用)
+   - 从裁剪后的图像提取中心正方形区域
+   - 目的: 进一步标准化输入
+
+4. **调整尺寸到 224×224**
+   - 使用双线性插值 (cv2.INTER_LINEAR)
+   - 这是 VGG16 的标准输入尺寸
+
+5. **转换为张量并归一化**
+   ```python
+   # ImageNet 标准化参数
+   mean = [0.485, 0.456, 0.406]
+   std  = [0.229, 0.224, 0.225]
+
+   # 处理流程
+   img_tensor = ToTensor()(img_ndarray)  # [0, 1] 范围
+   img_normalized = Normalize(mean, std)(img_tensor)  # ImageNet 标准化
+   ```
+
+   这些是 **ImageNet 数据集的官方统计参数**，与 VGG16 预训练时使用的标准化一致
+
+#### 8.2 数据增强 (仅用于训练集)
+
+**增强策略:**
+
+| 增强方法 | 参数 | 用途 |
+|---------|------|------|
+| **随机水平翻转** | p=0.5 | 提高空间不变性 |
+| **颜色抖动** | brightness=0.1, contrast=0.1 | 增强光照鲁棒性 |
+
+**验证集与测试集:** 无数据增强，仅进行标准化处理
+
+### 📊 数据划分
+
+```
+原始数据集
+├── 训练集:   70% (用数据增强)
+├── 验证集:   15% (用于早停与学习率调整)
+└── 测试集:   15% (最终性能评估)
+```
+
+**划分策略:** 分层随机划分 (stratified split)
+- 确保各类别 (好/差胚胎) 在三个集合中比例一致
+- 使用 sklearn 的 train_test_split with stratify 参数
+
+---
+
+## 九、训练过程详解
+
+### 9.1 训练配置
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| **批次大小** | 4 | batch_size (取决于GPU显存) |
+| **总轮数** | 100 | 最多训练轮数 |
+| **学习率** | 1e-4 | 初始学习率 |
+| **权重衰减** | 1e-5 | L2 正则化系数 |
+| **损失函数** | BCE Loss 或 Focal Loss | 二分类交叉熵或焦点损失 |
+
+### 9.2 损失函数
+
+**Binary Cross-Entropy (BCE) Loss:**
+```
+L_BCE = -[y·log(p) + (1-y)·log(1-p)]
+```
+- 默认使用
+- 适用于样本较平衡的情况
+
+**Focal Loss** (可选):
+```
+L_Focal = -α·(1-pt)^γ·log(pt)
+```
+- 参数: γ=2.0, α=0.25
+- 用于处理类别不平衡情况
+- 通过降低简单样本权重，专注困难样本
+
+### 9.3 优化器与学习率策略
+
+**优化器:** AdamW
+```
+参数:
+- lr = 1e-4 (初始学习率)
+- weight_decay = 1e-5 (权重衰减)
+- β₁ = 0.9 (一阶矩估计系数)
+- β₂ = 0.999 (二阶矩估计系数)
+```
+
+**学习率调整:** ReduceLROnPlateau
+```
+- mode: 'max' (监控指标最大化，即AUC)
+- factor: 0.5 (学习率乘以0.5)
+- patience: 5 epochs (5个epoch无改进则调整)
+- min_lr: 1e-7 (最小学习率下界)
+```
+
+**示例:** 如果AUC 5个epoch未改进，学习率从1e-4 → 5e-5 → 2.5e-5 ...
+
+### 9.4 早停策略 (Early Stopping)
+
+```
+监控指标: Val AUC (验证集AUC)
+耐心值: 10 epochs (10个epoch无改进则停止)
+```
+
+- 每epoch计算验证集AUC
+- 若AUC未超过历史最高值：counter += 1
+- 若counter ≥ 10：停止训练，恢复最佳模型
+
+### 9.5 VGG16 微调策略 (STORK 风格)
+
+**单阶段统一训练方案:**
+
+```
+初始状态:
+├── VGG16 前 1/3 层: 冻结 (requires_grad=False)
+├── VGG16 后 2/3 层: 训练 (requires_grad=True)
+├── Transformer: 训练
+└── 分类头: 训练
+```
+
+**原理:**
+- 前1/3层学习 ImageNet 的通用低阶特征 (边缘、纹理)，无需微调
+- 后2/3层学习高阶语义特征，需要适应胚胎域特征
+- 统一训练优于两阶段，避免梯度流中断
+
+---
+
+## 十、评估与测试
+
+### 10.1 评估指标
+
+在训练、验证、测试阶段计算以下指标：
+
+| 指标 | 定义 | 解释 |
+|------|------|------|
+| **Accuracy** | (TP+TN)/(TP+TN+FP+FN) | 整体分类准确率 |
+| **Precision** | TP/(TP+FP) | "正样本预测正确的比例" |
+| **Recall** | TP/(TP+FN) | "真实正样本被识别的比例" |
+| **F1-Score** | 2·(Precision·Recall)/(Precision+Recall) | Precision和Recall的调和平均数 |
+| **AUC** | ROC曲线下面积 | 不同阈值下性能的综合度量 |
+
+**其中:**
+- TP (True Positive): 正确预测为"好" 的好胚胎
+- TN (True Negative): 正确预测为"差" 的差胚胎
+- FP (False Positive): 错误预测为"好" 的差胚胎
+- FN (False Negative): 错误预测为"差" 的好胚胎
+
+### 10.2 分类阈值
+
+```
+预测概率 p ∈ [0, 1]
+
+默认阈值 = 0.5:
+  p ≥ 0.5 → 预测为 "好" (1)
+  p <  0.5 → 预测为 "差" (0)
+```
+
+可根据实际需求调整阈值以平衡精确率和召回率。
+
+### 10.3 验证集评估 (训练过程中)
+
+在每个 epoch 后评估：
+
+```python
+# 伪代码
+for epoch in range(num_epochs):
+    # ... 训练 ...
+
+    # 验证
+    val_loss, val_metrics = validate(model, val_loader)
+
+    # 检查是否需要调整学习率
+    scheduler.step(val_metrics['auc'])
+
+    # 检查是否需要早停
+    early_stopping(val_metrics['auc'], model)
+
+    # 记录历史
+    history['val_auc'].append(val_metrics['auc'])
+
+    if early_stopping.early_stop:
+        break
+```
+
+### 10.4 测试集最终评估
+
+模型训练完成后，在 **完全未见过的测试集** 上进行最终评估：
+
+```python
+model.eval()
+test_preds = []
+test_labels = []
+
+with torch.no_grad():
+    for images, labels in test_loader:
+        outputs = model(images)
+        test_preds.extend(outputs.cpu().numpy())
+        test_labels.extend(labels.cpu().numpy())
+
+# 计算最终指标
+test_metrics = calculate_metrics(test_labels, test_preds)
+print(f"Test AUC: {test_metrics['auc']:.4f}")
+print(f"Test Accuracy: {test_metrics['accuracy']:.4f}")
+print(f"Test F1-Score: {test_metrics['f1_score']:.4f}")
+```
+
+### 10.5 训练历史保存
+
+每个阶段的训练历史保存为 JSON：
+
+```json
+{
+  "train_loss": [0.6931, 0.6245, ..., 0.4523],
+  "val_loss": [0.6812, 0.6111, ..., 0.4678],
+  "val_auc": [0.5234, 0.6123, ..., 0.8756]
+}
+```
+
+可用于：
+- 绘制学习曲线
+- 分析过拟合/欠拟合情况
+- 调试训练过程
+
+---
+
+## 十一、模型架构详解
 
 详细的模型架构说明请查看：
 - **[MODEL_ARCHITECTURE.md](./MODEL_ARCHITECTURE.md)** - 完整的架构文档（推荐）
