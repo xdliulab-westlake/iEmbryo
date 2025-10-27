@@ -392,39 +392,96 @@ class MultiFocalEmbryoDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Returns aggregated image from all focal planes for a single embryo
+        Returns time series of aggregated focal plane images for a single embryo
+
+        Processing:
+        1. Group images by TargetHour (timepoint)
+        2. For each timepoint, aggregate all focal planes by averaging
+        3. Return: (33, 3, H, W) - 33 timepoints with focal planes aggregated
+           embryo_id: str - Embryo identifier
 
         Returns:
-            image: (3, H, W) - Aggregated from all focal planes and timepoints
+            time_series: (33, 3, 224, 224) - Time series of aggregated images
             embryo_id: str - Embryo identifier
         """
         embryo_id = self.embryo_ids[idx]
         embryo_df = self.multi_focal_df[self.multi_focal_df['EmbryoID'] == embryo_id]
 
-        # Aggregate all images across timepoints and focal planes
-        all_images = []
+        # Group by TargetHour to get all focal planes for each timepoint
+        timepoint_images = {}  # {TargetHour: [image_tensors for different focal planes]}
 
         for _, row in embryo_df.iterrows():
+            target_hour = row['TargetHour']
             full_path = row['FullPath']
+
             try:
                 image = self._load_image(full_path)
-                all_images.append(image)
+
+                if target_hour not in timepoint_images:
+                    timepoint_images[target_hour] = []
+
+                timepoint_images[target_hour].append(image)
+
             except Exception as e:
-                print(f"Failed to load {full_path}: {e}")
+                print(f"Failed to load {full_path} (t={target_hour}): {e}")
                 continue
 
-        if not all_images:
-            # Return black image if all loading failed
-            return torch.zeros(3, self.image_size, self.image_size), embryo_id
+        # Sort by timepoint and aggregate focal planes
+        sorted_timepoints = sorted(timepoint_images.keys())
+        time_series = []
 
-        # Average across all loaded images
-        stacked = torch.stack(all_images)  # (num_images, 3, H, W)
-        aggregated_image = torch.mean(stacked, dim=0)  # (3, H, W)
+        for target_hour in sorted_timepoints:
+            focal_images = timepoint_images[target_hour]
 
-        return aggregated_image, embryo_id
+            if not focal_images:
+                # Add black image if no images for this timepoint
+                time_series.append(torch.zeros(3, self.image_size, self.image_size))
+            else:
+                # Average all focal planes for this timepoint
+                stacked = torch.stack(focal_images)  # (num_focal_planes, 3, H, W)
+                aggregated = torch.mean(stacked, dim=0)  # (3, H, W)
+                time_series.append(aggregated)
+
+        if not time_series:
+            # Return black time series if all loading failed
+            time_series = [torch.zeros(3, self.image_size, self.image_size)
+                          for _ in range(self.target_timepoints)]
+
+        # Stack to (T, 3, H, W)
+        time_series_tensor = torch.stack(time_series)  # (num_timepoints, 3, H, W)
+
+        # Pad or truncate to target_timepoints if needed
+        if time_series_tensor.shape[0] < self.target_timepoints:
+            # Pad with black images
+            padding = torch.zeros(
+                self.target_timepoints - time_series_tensor.shape[0],
+                3, self.image_size, self.image_size
+            )
+            time_series_tensor = torch.cat([time_series_tensor, padding], dim=0)
+        elif time_series_tensor.shape[0] > self.target_timepoints:
+            # Truncate (shouldn't happen if validation works correctly)
+            time_series_tensor = time_series_tensor[:self.target_timepoints]
+
+        # Apply transform to each timepoint if provided
+        if self.transform:
+            # Convert tensor back to PIL to apply transform, then convert back
+            transformed_series = []
+            for t in range(time_series_tensor.shape[0]):
+                img_t = time_series_tensor[t]  # (3, H, W) in [0,1]
+                # Convert to PIL Image
+                img_pil = transforms.ToPILImage()(img_t)
+                # Apply transform
+                img_transformed = self.transform(img_pil)
+                transformed_series.append(img_transformed)
+            time_series_tensor = torch.stack(transformed_series)
+
+        return time_series_tensor, embryo_id
 
     def _load_image(self, image_path):
-        """Load and preprocess a single image"""
+        """Load and preprocess a single image without transform
+
+        Returns raw tensor (3, H, W) - transform is applied in __getitem__
+        """
         try:
             img = cv2.imread(str(image_path))
             if img is None:
@@ -440,13 +497,10 @@ class MultiFocalEmbryoDataset(Dataset):
                 img = self.preprocessor.crop_center_square(img)
 
             img = cv2.resize(img, (self.image_size, self.image_size))
-            img = Image.fromarray(img.astype(np.uint8))
 
-            if self.transform:
-                img = self.transform(img)
-            else:
-                img = transforms.ToTensor()(img)
-
+            # Convert to tensor without normalization
+            # Normalization will be done by transform in __getitem__
+            img = transforms.ToTensor()(Image.fromarray(img.astype(np.uint8)))
             return img
 
         except Exception as e:
@@ -556,15 +610,28 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
     train_transform = get_transforms(augment=True)
     val_transform = get_transforms(augment=False)
 
-    # Create dataset
-    full_dataset = MultiFocalEmbryoDataset(
+    # Create dataset for training (with augmentation)
+    train_dataset_base = MultiFocalEmbryoDataset(
         multi_focal_df=multi_focal_df,
         image_size=config.get('image_size', 224),
         apply_petri_crop=config.get('apply_petri_crop', True),
         apply_center_crop=config.get('apply_center_crop', True),
-        transform=None,
+        transform=train_transform,  # Will apply to training data
         target_timepoints=config.get('time_steps', 33)
     )
+
+    # Create dataset for validation/test (without augmentation)
+    val_test_dataset_base = MultiFocalEmbryoDataset(
+        multi_focal_df=multi_focal_df,
+        image_size=config.get('image_size', 224),
+        apply_petri_crop=config.get('apply_petri_crop', True),
+        apply_center_crop=config.get('apply_center_crop', True),
+        transform=val_transform,  # Will apply to val/test data
+        target_timepoints=config.get('time_steps', 33)
+    )
+
+    # Use base dataset for getting embryo IDs and labels
+    full_dataset = val_test_dataset_base
 
     embryo_ids = full_dataset.embryo_ids
     labels = torch.tensor([embryo_to_label[eid] for eid in embryo_ids], dtype=torch.float32)
@@ -595,9 +662,10 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
 
     from torch.utils.data import Subset
 
-    train_dataset = Subset(full_dataset, train_indices)
-    val_dataset = Subset(full_dataset, val_indices)
-    test_dataset = Subset(full_dataset, test_indices)
+    # Create subsets using appropriate datasets
+    train_dataset = Subset(train_dataset_base, train_indices)
+    val_dataset = Subset(val_test_dataset_base, val_indices)
+    test_dataset = Subset(val_test_dataset_base, test_indices)
 
     # Create dataloaders
     train_loader = DataLoader(
