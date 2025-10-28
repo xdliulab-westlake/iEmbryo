@@ -1,5 +1,9 @@
 # ViT-Hybrid：胚胎质量评估深度学习系统
 
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![Version](https://img.shields.io/badge/version-v2.0-green.svg)](https://github.com/lzzsh/IVF_AI)
+
 ViT-Hybrid 是一个专为胚胎质量二分类（好/差）设计的深度学习系统。该系统采用 **VGG16 + Transformer** 架构，通过时空联合建模实现精准的胚胎评估。
 
 ## 5 分钟快速入门
