@@ -9,26 +9,32 @@ ViT-Hybrid 是一个专为胚胎质量二分类（好/差）设计的深度学�
 ## 5 分钟快速入门
 
 ```bash
-# 1. 进入项目目录
-cd /path/to/ViT-Hybrid
+# 1. 首次运行（验证数据并缓存）
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage
 
-# 2. 生成配置文件
-python main.py generate-config --output config.json
+# 2. 后续运行（使用缓存，极速）
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage \
+  --skip_validation
 
-# 3. 编辑 config.json，修改数据路径
-# 编辑以下字段：
-#   data.DATA_ROOT: /path/to/your/embryo/data
-#   training.BATCH_SIZE: 根据GPU内存调整
-
-# 4. 开始训练
-python main.py train --data_root /path/to/data --config_file config.json --two_stage
-
-# 5. 查看结果
+# 3. 查看结果
 ls results/        # 训练历史和评估指标
 ls checkpoints/    # 模型权重
+ls cache/          # 验证缓存（下次可复用）
 ```
 
-**就这么简单！** 系统自动处理 GPU 配置、数据预处理、模型训练等所有细节。
+**就这么简单！** 系统自动处理数据验证、缓存、模型训练等所有细节。第一次运行约 5-10 分钟（取决于数据量），后续运行使用缓存仅需 1-2 分钟。
 
 ---
 
@@ -43,69 +49,69 @@ pip install numpy pillow scikit-learn opencv-python
 
 ### 2. 数据准备
 
-支持两种数据格式：
+数据结构（多焦距多时间点）：
 
-**格式 A（BiLSTM 风格）：**
 ```
-data_root/
+project_root/
 ├── image/
-│   ├── embryo_001.jpg
-│   ├── embryo_002.jpg
-│   └── ...
-└── score_dict.json
+│   ├── embryo_id_1/
+│   │   └── images/
+│   │       ├── F-15/           # 焦平面
+│   │       │   ├── embryo_id_1_RUN_000_F-15.jpeg
+│   │       │   └── ...
+│   │       ├── F0/
+│   │       │   └── ...
+│   │       └── ...             # 共11个焦平面
+│   └── embryo_id_2/
+│       └── ...
+├── selected_image_paths.csv    # 时间点和焦平面映射
+├── MainDB.csv                  # 质量标签（ICM, TE, Quality）
+└── filtered_clean_embryos.csv  # 补充标签（可选）
 ```
 
-**格式 B（时间序列风格）：**
-```
-data_root/
-├── good/
-│   ├── embryo_001/
-│   │   ├── time_000/focal_00.jpg, focal_01.jpg, ...
-│   │   ├── time_001/...
-│   │   └── ...
-│   └── ...
-└── poor/
-    └── ...
-```
+关键文件说明：
+- **selected_image_paths.csv**：包含 (PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath)
+- **MainDB.csv**：包含 (EmbryoID, ICM, TE, Quality)
+- **filtered_clean_embryos.csv**：补充低质量胚胎标签
 
 ### 3. 快速训练
 
-#### 单阶段训练
-```bash
-python main.py train --data_root /path/to/data
-```
+#### 首次运行（自动验证并缓存）
 
-#### 两阶段训练（推荐）
-```bash
-python main.py train --data_root /path/to/data --two_stage
-```
-
-#### 处理类别不平衡
-```bash
-python main.py train --data_root /path/to/data --two_stage --use_focal_loss
-```
-
-#### 多焦距数据训练
 ```bash
 python main.py train \
-  --data_root /path/to/data \
+  --data_root /liaozizhuo/ \
   --multi_focal \
-  --selected_images_csv /path/to/selected_image_paths.csv \
-  --maindb_csv /path/to/MainDB.csv \
-  --filtered_csv /path/to/filtered_clean_embryos.csv \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
   --two_stage
 ```
 
-**后续运行使用缓存（加速 50-100 倍）：**
+#### 后续运行（使用缓存，加速 50-100 倍）
+
 ```bash
 python main.py train \
-  --data_root /path/to/data \
+  --data_root /liaozizhuo/ \
   --multi_focal \
-  --selected_images_csv /path/to/selected_image_paths.csv \
-  --maindb_csv /path/to/MainDB.csv \
-  --filtered_csv /path/to/filtered_clean_embryos.csv \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
   --two_stage \
-  --skip_validation  # 使用缓存结果，跳过重复验证
+  --skip_validation  # 跳过验证，直接使用 ./cache/ 中的缓存
+```
+
+#### 处理类别不平衡（可选）
+
+```bash
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage \
+  --use_focal_loss
 ```
 
 ---
@@ -190,13 +196,16 @@ python main.py train \
 
 ## 配置管理
 
-### 生成配置文件
+### 配置文件（可选）
+
+多焦距模式运行时默认使用内置配置，无需显式配置。若需自定义，可生成配置文件：
 
 ```bash
 python main.py generate-config --output my_config.json
+python main.py train --data_root /liaozizhuo/ --multi_focal ... --config_file my_config.json
 ```
 
-### 配置文件模板
+### 默认配置模板
 
 ```json
 {
@@ -406,18 +415,18 @@ ViT-Hybrid/
 ```bash
 python main.py train [选项]
 
-必需参数：
+多焦距模式参数（必需）：
   --data_root DIR              数据根目录
+  --multi_focal                启用多焦距模式
+  --selected_images_csv PATH   时间点映射 CSV（PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath）
+  --maindb_csv PATH            质量标签 CSV（EmbryoID, ICM, TE, Quality）
 
 可选参数：
-  --config_file FILE, -c FILE  配置文件路径
-  --two_stage                  启用两阶段训练
-  --use_focal_loss             使用 Focal Loss
-  --multi_focal                启用多焦距模式
-  --skip_validation            跳过验证，使用缓存
-  --selected_images_csv PATH   多焦距 CSV 路径
-  --maindb_csv PATH            质量标签 CSV 路径
-  --filtered_csv PATH          补充标签 CSV 路径
+  --filtered_csv PATH          补充标签 CSV（EmbryoID, EmbryoQuality）
+  --two_stage                  启用两阶段训练（推荐）
+  --use_focal_loss             使用 Focal Loss（处理类别不平衡）
+  --skip_validation            跳过验证，使用缓存（第一次后运行）
+  --config_file FILE, -c FILE  自定义配置文件（可选）
 ```
 
 ---
