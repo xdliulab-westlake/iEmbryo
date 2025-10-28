@@ -366,26 +366,6 @@ GlobalAvgPool → (batch, 4096)
 输出：(batch, 1) → Sigmoid → p ∈ [0, 1]
 ```
 
-**参数量统计：**
-```
-VGG16（预训练）：~138M
-├─ 冻结部分（Block 1-2）：~15M
-└─ 训练部分（Block 3-5 + fc）：~123M
-
-Transformer × 4 层：~71M
-├─ 多头注意力（4 × 3 个投影 + 输出投影）
-├─ 前馈网络（4096 → 2048 → 4096）
-└─ LayerNorm × 2
-
-分类头：~2M
-├─ Linear(4096, 512)
-└─ Linear(512, 1)
-
-总计：~209M 参数
-└─ 冻结部分：~15M（预训练权重）
-└─ 训练部分：~194M
-```
-
 ---
 
 ### 训练策略
@@ -455,7 +435,7 @@ python main.py train \
   --two_stage
 ```
 
-#### 后续运行（使用缓存，加速 50-100 倍）
+#### 后续运行（使用缓存）
 
 ```bash
 python main.py train \
@@ -466,19 +446,6 @@ python main.py train \
   --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
   --two_stage \
   --skip_validation  # 跳过验证，直接使用 ./cache/ 中的缓存
-```
-
-#### 处理类别不平衡（可选）
-
-```bash
-python main.py train \
-  --data_root /liaozizhuo/ \
-  --multi_focal \
-  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
-  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
-  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
-  --two_stage \
-  --use_focal_loss
 ```
 
 ---
@@ -593,29 +560,7 @@ ViT-Hybrid/
 
 ---
 
-## 八、常见问题
-
-**Q: 模型需要多少 GPU 显存？**
-A: 每个样本约 2-3 GB（V100 32GB 可运行 batch_size=4-8）
-
-**Q: 训练需要多长时间？**
-A: GPU (V100) 上约 1-2 小时（30-50 epochs）
-
-**Q: 如何加速多焦距训练？**
-A: 第一次运行自动缓存验证结果，后续用 `--skip_validation` 跳过验证
-
-**Q: 模型参数量？**
-A: ~209M 总参数，~140M 训练参数
-
-**Q: 如何处理类别不平衡？**
-A: 使用 `--use_focal_loss` 参数
-
-**Q: 如何调整模型容量？**
-A: 修改 config.json 中的 `NUM_TRANSFORMER_LAYERS` 和 `NUM_HEADS`
-
----
-
-## 九、版本历史
+## 八、版本历史
 
 ### v2.0 (2025-10)
 - 多焦平面融合架构
