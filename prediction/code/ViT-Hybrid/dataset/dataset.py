@@ -592,6 +592,30 @@ def create_data_loaders(data_root, config):
     return train_loader, val_loader, test_loader
 
 
+def multi_focal_collate_fn(batch, embryo_to_label):
+    """
+    Custom collate function for multi-focal data
+    Converts embryo_id to label tensor
+
+    Args:
+        batch: List of (time_series, embryo_id) tuples
+        embryo_to_label: Dict mapping embryo_id to label
+
+    Returns:
+        (images_tensor, labels_tensor)
+    """
+    images = []
+    labels = []
+
+    for image_tensor, embryo_id in batch:
+        images.append(image_tensor)
+        # Get label from embryo_id
+        label = embryo_to_label.get(embryo_id, 0)
+        labels.append(label)
+
+    return torch.stack(images), torch.tensor(labels, dtype=torch.float32)
+
+
 def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
     """
     Create data loaders for multi-focal multi-timepoint data
@@ -667,13 +691,18 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
     val_dataset = Subset(val_test_dataset_base, val_indices)
     test_dataset = Subset(val_test_dataset_base, test_indices)
 
+    # Create custom collate function with embryo_to_label
+    from functools import partial
+    collate_fn = partial(multi_focal_collate_fn, embryo_to_label=embryo_to_label)
+
     # Create dataloaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.get('batch_size', 4),
         shuffle=True,
         num_workers=config.get('num_workers', 0),
-        pin_memory=config.get('pin_memory', False)
+        pin_memory=config.get('pin_memory', False),
+        collate_fn=collate_fn
     )
 
     val_loader = DataLoader(
@@ -681,7 +710,8 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
         batch_size=config.get('batch_size', 4),
         shuffle=False,
         num_workers=config.get('num_workers', 0),
-        pin_memory=config.get('pin_memory', False)
+        pin_memory=config.get('pin_memory', False),
+        collate_fn=collate_fn
     )
 
     test_loader = DataLoader(
@@ -689,7 +719,8 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
         batch_size=config.get('batch_size', 4),
         shuffle=False,
         num_workers=config.get('num_workers', 0),
-        pin_memory=config.get('pin_memory', False)
+        pin_memory=config.get('pin_memory', False),
+        collate_fn=collate_fn
     )
 
     print(f"\nData split summary:")
