@@ -392,16 +392,16 @@ class MultiFocalEmbryoDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Returns time series of aggregated focal plane images for a single embryo
+        Returns time series with focal planes preserved for a single embryo
 
         Processing:
         1. Group images by TargetHour (timepoint)
-        2. For each timepoint, aggregate all focal planes by averaging
-        3. Return: (33, 3, H, W) - 33 timepoints with focal planes aggregated
+        2. For each timepoint, keep all focal planes (up to 11)
+        3. Return: (33, 11, 3, H, W) - 33 timepoints × 11 focal planes
            embryo_id: str - Embryo identifier
 
         Returns:
-            time_series: (33, 3, 224, 224) - Time series of aggregated images
+            time_series: (33, 11, 3, 224, 224) - Time series preserving focal plane dimension
             embryo_id: str - Embryo identifier
         """
         embryo_id = self.embryo_ids[idx]
@@ -426,7 +426,7 @@ class MultiFocalEmbryoDataset(Dataset):
                 print(f"Failed to load {full_path} (t={target_hour}): {e}")
                 continue
 
-        # Sort by timepoint and aggregate focal planes
+        # Sort by timepoint and preserve focal planes
         sorted_timepoints = sorted(timepoint_images.keys())
         time_series = []
 
@@ -434,45 +434,59 @@ class MultiFocalEmbryoDataset(Dataset):
             focal_images = timepoint_images[target_hour]
 
             if not focal_images:
-                # Add black image if no images for this timepoint
-                time_series.append(torch.zeros(3, self.image_size, self.image_size))
+                # Add black focal plane stack if no images for this timepoint
+                time_series.append(torch.zeros(11, 3, self.image_size, self.image_size))
             else:
-                # Average all focal planes for this timepoint
-                stacked = torch.stack(focal_images)  # (num_focal_planes, 3, H, W)
-                aggregated = torch.mean(stacked, dim=0)  # (3, H, W)
-                time_series.append(aggregated)
+                # Pad or truncate focal planes to 11
+                num_focal_planes = len(focal_images)
+                if num_focal_planes < 11:
+                    # Pad with black images
+                    padding = [torch.zeros(3, self.image_size, self.image_size)
+                              for _ in range(11 - num_focal_planes)]
+                    focal_images = focal_images + padding
+                elif num_focal_planes > 11:
+                    # Truncate to 11
+                    focal_images = focal_images[:11]
+
+                # Stack focal planes: (11, 3, H, W)
+                stacked = torch.stack(focal_images)
+                time_series.append(stacked)
 
         if not time_series:
             # Return black time series if all loading failed
-            time_series = [torch.zeros(3, self.image_size, self.image_size)
+            time_series = [torch.zeros(11, 3, self.image_size, self.image_size)
                           for _ in range(self.target_timepoints)]
 
-        # Stack to (T, 3, H, W)
-        time_series_tensor = torch.stack(time_series)  # (num_timepoints, 3, H, W)
+        # Stack to (T, 11, 3, H, W)
+        time_series_tensor = torch.stack(time_series)  # (num_timepoints, 11, 3, H, W)
 
         # Pad or truncate to target_timepoints if needed
         if time_series_tensor.shape[0] < self.target_timepoints:
-            # Pad with black images
+            # Pad with black focal plane stacks
             padding = torch.zeros(
                 self.target_timepoints - time_series_tensor.shape[0],
-                3, self.image_size, self.image_size
+                11, 3, self.image_size, self.image_size
             )
             time_series_tensor = torch.cat([time_series_tensor, padding], dim=0)
         elif time_series_tensor.shape[0] > self.target_timepoints:
             # Truncate (shouldn't happen if validation works correctly)
             time_series_tensor = time_series_tensor[:self.target_timepoints]
 
-        # Apply transform to each timepoint if provided
+        # Apply transform to each timepoint and focal plane if provided
         if self.transform:
             # Convert tensor back to PIL to apply transform, then convert back
             transformed_series = []
             for t in range(time_series_tensor.shape[0]):
-                img_t = time_series_tensor[t]  # (3, H, W) in [0,1]
-                # Convert to PIL Image
-                img_pil = transforms.ToPILImage()(img_t)
-                # Apply transform
-                img_transformed = self.transform(img_pil)
-                transformed_series.append(img_transformed)
+                focal_stack = time_series_tensor[t]  # (11, 3, H, W)
+                transformed_focal = []
+                for f in range(focal_stack.shape[0]):
+                    img_t = focal_stack[f]  # (3, H, W)
+                    # Convert to PIL Image
+                    img_pil = transforms.ToPILImage()(img_t)
+                    # Apply transform
+                    img_transformed = self.transform(img_pil)
+                    transformed_focal.append(img_transformed)
+                transformed_series.append(torch.stack(transformed_focal))
             time_series_tensor = torch.stack(transformed_series)
 
         return time_series_tensor, embryo_id

@@ -167,7 +167,7 @@ class ViTHybridModel(nn.Module):
         """
         前向传播
 
-        输入: (batch_size, 33, 11, 3, 224, 224)
+        输入: (batch_size, 33, 11, 3, 224, 224) - 批次 × 时间点 × 焦平面 × RGB × 高 × 宽
         返回:
             - 如果return_attention_weights=False: (batch_size, 1) 胚胎质量概率
             - 如果return_attention_weights=True: (output, attention_weights) 元组
@@ -177,10 +177,10 @@ class ViTHybridModel(nn.Module):
         # 将所有图像展平为4D张量: (batch*33*11, 3, 224, 224)
         x = x.view(-1, 3, 224, 224)
 
-        # VGG16特征提取: (batch*33*11) -> (batch*33*11, 4096)
+        # VGG16特征提取: (batch*33*11, 3, 224, 224) -> (batch*33*11, 4096)
         vgg_features = self.vgg16_extractor(x)
 
-        # 重新整形为 (batch, 33, 11, 4096)
+        # 重新整形为 (batch, 33, 11, 4096) - 保持原始的 batch × time × focal 维度
         vgg_features = vgg_features.view(batch_size, self.time_steps, self.focal_planes, self.vgg16_feature_dim)
 
         # 焦平面融合：对每个时间点的11个焦平面进行融合
