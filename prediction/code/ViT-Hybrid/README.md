@@ -38,18 +38,9 @@ ls cache/          # 验证缓存（下次可复用）
 
 ---
 
-## 快速开始
+## 一、数据结构
 
-### 1. 环境安装
-
-```bash
-pip install torch torchvision
-pip install numpy pillow scikit-learn opencv-python
-```
-
-### 2. 数据准备
-
-数据结构（多焦距多时间点）：
+### 多焦距多时间点数据
 
 ```
 project_root/
@@ -69,54 +60,19 @@ project_root/
 └── filtered_clean_embryos.csv  # 补充标签（可选）
 ```
 
-关键文件说明：
+**关键文件说明：**
 - **selected_image_paths.csv**：包含 (PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath)
 - **MainDB.csv**：包含 (EmbryoID, ICM, TE, Quality)
 - **filtered_clean_embryos.csv**：补充低质量胚胎标签
 
-### 3. 快速训练
-
-#### 首次运行（自动验证并缓存）
-
-```bash
-python main.py train \
-  --data_root /liaozizhuo/ \
-  --multi_focal \
-  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
-  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
-  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
-  --two_stage
-```
-
-#### 后续运行（使用缓存，加速 50-100 倍）
-
-```bash
-python main.py train \
-  --data_root /liaozizhuo/ \
-  --multi_focal \
-  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
-  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
-  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
-  --two_stage \
-  --skip_validation  # 跳过验证，直接使用 ./cache/ 中的缓存
-```
-
-#### 处理类别不平衡（可选）
-
-```bash
-python main.py train \
-  --data_root /liaozizhuo/ \
-  --multi_focal \
-  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
-  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
-  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
-  --two_stage \
-  --use_focal_loss
-```
+**数据规模：**
+- 时间点：33 个（96-112 小时，每 0.5 小时采样）
+- 焦平面：11 个（不同深度）
+- 单个胚胎：33 × 11 = 363 张图像
 
 ---
 
-## 系统架构
+## 二、系统架构
 
 ### 核心设计理念
 
@@ -194,7 +150,44 @@ python main.py train \
 
 ---
 
-## 配置管理
+## 三、环境与数据准备
+
+### 环境安装
+
+```bash
+pip install torch torchvision
+pip install numpy pillow scikit-learn opencv-python
+```
+
+### 数据预处理流程
+
+**图像预处理步骤：**
+
+1. **读取图像** - OpenCV / PIL 加载，转 RGB
+2. **培养皿检测**（可选） - Hough 圆检测，自动裁剪
+3. **中心裁剪**（可选） - 提取图像中心正方形
+4. **尺寸调整** - 统一为 224×224（双线性插值）
+5. **张量化与归一化** - ImageNet 标准化
+
+```python
+# ImageNet 官方参数
+mean = [0.485, 0.456, 0.406]
+std  = [0.229, 0.224, 0.225]
+```
+
+**数据分割：**
+
+```
+训练集：70%（应用数据增强：水平翻转、颜色抖动）
+验证集：15%（无增强，用于早停与学习率调整）
+测试集：15%（无增强，最终性能评估）
+
+策略：分层随机划分（确保类别比例一致）
+```
+
+---
+
+## 四、配置管理
 
 ### 配置文件（可选）
 
@@ -288,37 +281,30 @@ python main.py train --data_root /liaozizhuo/ --multi_focal ... --config_file my
 
 ---
 
-## 数据处理流程
+## 五、训练过程
 
-### 图像预处理步骤
+### 命令行参数
 
-1. **读取图像** - OpenCV / PIL 加载，转 RGB
-2. **培养皿检测**（可选） - Hough 圆检测，自动裁剪
-3. **中心裁剪**（可选） - 提取图像中心正方形
-4. **尺寸调整** - 统一为 224×224（双线性插值）
-5. **张量化与归一化** - ImageNet 标准化
+```bash
+python main.py train [选项]
 
-```python
-# ImageNet 官方参数
-mean = [0.485, 0.456, 0.406]
-std  = [0.229, 0.224, 0.225]
+多焦距模式参数（必需）：
+  --data_root DIR              数据根目录
+  --multi_focal                启用多焦距模式
+  --selected_images_csv PATH   时间点映射 CSV（PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath）
+  --maindb_csv PATH            质量标签 CSV（EmbryoID, ICM, TE, Quality）
+
+可选参数：
+  --filtered_csv PATH          补充标签 CSV（EmbryoID, EmbryoQuality）
+  --two_stage                  启用两阶段训练（推荐）
+  --use_focal_loss             使用 Focal Loss（处理类别不平衡）
+  --skip_validation            跳过验证，使用缓存（第一次后运行）
+  --config_file FILE, -c FILE  自定义配置文件（可选）
 ```
 
-### 数据分割
+### 训练策略
 
-```
-训练集：70%（应用数据增强：水平翻转、颜色抖动）
-验证集：15%（无增强，用于早停与学习率调整）
-测试集：15%（无增强，最终性能评估）
-
-策略：分层随机划分（确保类别比例一致）
-```
-
----
-
-## 训练策略
-
-### 损失函数
+#### 损失函数
 
 **Binary Cross-Entropy（默认）：** 适用于样本平衡的情况
 ```
@@ -331,7 +317,7 @@ L_Focal = -α·(1-pt)^γ·log(pt)
 参数：γ=2.0, α=0.25
 ```
 
-### 学习率调整
+#### 学习率调整
 
 ```
 策略：ReduceLROnPlateau
@@ -344,7 +330,7 @@ L_Focal = -α·(1-pt)^γ·log(pt)
   epoch 11-15: LR = 2.5e-5 (继续衰减)
 ```
 
-### 早停机制
+#### 早停机制
 
 ```
 监控指标：Val AUC
@@ -356,7 +342,7 @@ L_Focal = -α·(1-pt)^γ·log(pt)
   - 若计数器 ≥ 10：停止训练，恢复最佳权重
 ```
 
-### 两阶段 vs 单阶段训练
+#### 两阶段 vs 单阶段训练
 
 ```
 单阶段（推荐）：
@@ -369,9 +355,51 @@ L_Focal = -α·(1-pt)^γ·log(pt)
   - Stage 2：VGG16 解冻，整体微调（学习率 0.1 倍）
 ```
 
+### 快速训练示例
+
+#### 首次运行（自动验证并缓存）
+
+```bash
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage
+```
+
+#### 后续运行（使用缓存，加速 50-100 倍）
+
+```bash
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage \
+  --skip_validation  # 跳过验证，直接使用 ./cache/ 中的缓存
+```
+
+#### 处理类别不平衡（可选）
+
+```bash
+python main.py train \
+  --data_root /liaozizhuo/ \
+  --multi_focal \
+  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
+  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
+  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --two_stage \
+  --use_focal_loss
+```
+
 ---
 
-## 评估指标
+## 六、评估与输出
+
+### 评估指标
 
 | 指标 | 定义 | 解释 |
 |------|------|------|
@@ -381,9 +409,78 @@ L_Focal = -α·(1-pt)^γ·log(pt)
 | **F1-Score** | 2·(P·R)/(P+R) | Precision 和 Recall 的调和平均 |
 | **AUC** | ROC 曲线下面积 | 不同阈值下的综合性能 |
 
+### 训练输出
+
+训练完成后生成：
+
+```
+checkpoints/
+├── final_model.pth             # 最终模型权重
+├── stage1_best.pth             # 第一阶段最佳模型
+└── stage2_best.pth             # 第二阶段最佳模型（两阶段训练）
+
+results/
+├── stage1_history.json         # 训练历史（loss, auc, etc）
+└── stage2_history.json         # 第二阶段历史
+
+logs/
+└── tensorboard/                # TensorBoard 日志
+
+cache/
+└── validation_cache_*.json     # 验证缓存（下次可复用）
+```
+
+### 模型可解释性分析
+
+理解模型如何利用不同时间点做决策。
+
+#### 方法 1：梯度归因法（快速）
+
+```bash
+python analyze_temporal_interpretability.py \
+    --model checkpoints/final_model.pth \
+    --output results/temporal_analysis \
+    --device cuda
+```
+
+输出：重要性分数 (33,)
+
+#### 方法 2：注意力权重可视化
+
+```python
+from analysis.attention_visualization import extract_attention_weights
+
+attn_weights = extract_attention_weights(model, images, device='cuda')
+# 输出：4 个张量，每个 (batch, 8, 33, 33)
+```
+
+#### 方法 3：特征相关性分析
+
+```python
+from analysis.temporal_interpretability import compute_temporal_correlation
+
+corr_matrix, info = compute_temporal_correlation(model, images, device='cuda')
+# 输出：(33, 33) 相关性矩阵
+```
+
+#### 方法 4：消融分析（最可信但较慢）
+
+```python
+from analysis.ablation_analysis import temporal_ablation_analysis
+
+ablation_scores, _ = temporal_ablation_analysis(model, images, device='cuda')
+# 输出：(33,) 消融分数
+```
+
+生成的文件：
+- `temporal_importance.json` - 梯度归因结果
+- `attention_analysis.json` - 注意力统计
+- `ablation_analysis.json` - 消融分析结果
+- 4 张可视化图表（热力图、流图、条形图、相关性矩阵）
+
 ---
 
-## 项目结构
+## 七、项目结构
 
 ```
 ViT-Hybrid/
@@ -410,98 +507,7 @@ ViT-Hybrid/
 
 ---
 
-## 命令行参数
-
-```bash
-python main.py train [选项]
-
-多焦距模式参数（必需）：
-  --data_root DIR              数据根目录
-  --multi_focal                启用多焦距模式
-  --selected_images_csv PATH   时间点映射 CSV（PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath）
-  --maindb_csv PATH            质量标签 CSV（EmbryoID, ICM, TE, Quality）
-
-可选参数：
-  --filtered_csv PATH          补充标签 CSV（EmbryoID, EmbryoQuality）
-  --two_stage                  启用两阶段训练（推荐）
-  --use_focal_loss             使用 Focal Loss（处理类别不平衡）
-  --skip_validation            跳过验证，使用缓存（第一次后运行）
-  --config_file FILE, -c FILE  自定义配置文件（可选）
-```
-
----
-
-## 模型可解释性分析
-
-理解模型如何利用不同时间点做决策。
-
-### 方法 1：梯度归因法（快速）
-
-```bash
-python analyze_temporal_interpretability.py \
-    --model checkpoints/final_model.pth \
-    --output results/temporal_analysis \
-    --device cuda
-```
-
-输出：重要性分数 (33,)
-
-### 方法 2：注意力权重可视化
-
-```python
-from analysis.attention_visualization import extract_attention_weights
-
-attn_weights = extract_attention_weights(model, images, device='cuda')
-# 输出：4 个张量，每个 (batch, 8, 33, 33)
-```
-
-### 方法 3：特征相关性分析
-
-```python
-from analysis.temporal_interpretability import compute_temporal_correlation
-
-corr_matrix, info = compute_temporal_correlation(model, images, device='cuda')
-# 输出：(33, 33) 相关性矩阵
-```
-
-### 方法 4：消融分析（最可信但较慢）
-
-```python
-from analysis.ablation_analysis import temporal_ablation_analysis
-
-ablation_scores, _ = temporal_ablation_analysis(model, images, device='cuda')
-# 输出：(33,) 消融分数
-```
-
-生成的文件：
-- `temporal_importance.json` - 梯度归因结果
-- `attention_analysis.json` - 注意力统计
-- `ablation_analysis.json` - 消融分析结果
-- 4 张可视化图表（热力图、流图、条形图、相关性矩阵）
-
----
-
-## 训练输出
-
-训练完成后生成：
-
-```
-checkpoints/
-├── final_model.pth             # 最终模型权重
-├── stage1_best.pth             # 第一阶段最佳模型
-└── stage2_best.pth             # 第二阶段最佳模型（两阶段训练）
-
-results/
-├── stage1_history.json         # 训练历史（loss, auc, etc）
-└── stage2_history.json         # 第二阶段历史
-
-logs/
-└── tensorboard/                # TensorBoard 日志
-```
-
----
-
-## 常见问题
+## 八、常见问题
 
 **Q: 模型需要多少 GPU 显存？**
 A: 每个样本约 2-3 GB（V100 32GB 可运行 batch_size=4-8）
@@ -523,7 +529,7 @@ A: 修改 config.json 中的 `NUM_TRANSFORMER_LAYERS` 和 `NUM_HEADS`
 
 ---
 
-## 版本历史
+## 九、版本历史
 
 ### v2.0 (2025-10)
 - 多焦平面融合架构
