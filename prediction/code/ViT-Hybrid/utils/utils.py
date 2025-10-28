@@ -132,8 +132,7 @@ def create_directories():
     dirs = [
         PathConfig.MODEL_SAVE_DIR,
         PathConfig.LOG_DIR,
-        PathConfig.RESULT_DIR,
-        PathConfig.CACHE_DIR
+        PathConfig.RESULT_DIR
     ]
 
     for dir_path in dirs:
