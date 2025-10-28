@@ -19,8 +19,13 @@ from datetime import datetime
 class ValidationCache:
     """Caches validation results to avoid redundant checks"""
 
-    def __init__(self, cache_dir='~/.vit_hybrid_cache'):
-        self.cache_dir = Path(cache_dir).expanduser()
+    def __init__(self, cache_dir=None):
+        # 使用绝对路径：优先使用传入的 cache_dir，否则使用项目的 cache 目录
+        if cache_dir is None:
+            from config.config import PathConfig
+            cache_dir = PathConfig.CACHE_DIR
+
+        self.cache_dir = Path(cache_dir).expanduser().absolute()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def get_cache_path(self, csv_path: str) -> Path:

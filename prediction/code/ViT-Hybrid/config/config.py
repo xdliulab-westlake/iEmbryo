@@ -4,6 +4,8 @@ Author: Liao Zizhuo
 Date: 2025-10-27
 """
 
+from pathlib import Path
+
 
 class ModelConfig:
     """模型配置"""
@@ -56,11 +58,15 @@ class DataConfig:
 
 
 class PathConfig:
-    """路径配置"""
-    MODEL_SAVE_DIR = './checkpoints'
-    LOG_DIR = './logs'
-    RESULT_DIR = './results'
-    CACHE_DIR = './cache'  # Validation cache directory
+    """路径配置（使用绝对路径）"""
+    # 项目根目录
+    PROJECT_ROOT = Path(__file__).parent.parent
+
+    # 所有路径均为绝对路径
+    MODEL_SAVE_DIR = str(PROJECT_ROOT / 'checkpoints')
+    LOG_DIR = str(PROJECT_ROOT / 'logs')
+    RESULT_DIR = str(PROJECT_ROOT / 'results')
+    CACHE_DIR = str(PROJECT_ROOT / 'cache')  # Validation cache directory
 
 
 def get_model_config():
