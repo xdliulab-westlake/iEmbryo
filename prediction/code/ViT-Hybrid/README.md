@@ -1,15 +1,20 @@
-# 🧠 ViT-Hybrid 模型架构文档（多焦平面融合版）
+# ViT-Hybrid 模型架构文档（多焦平面融合版）
 
-**任务目标：** 胚胎好/坏二分类  
-**模型类型：** ViT-Hybrid（VGG16 + Transformer）  
-**版本：** v2.0（多焦平面融合）  
+**任务目标：** 胚胎好/坏二分类
+**模型类型：** ViT-Hybrid（VGG16 + Transformer）
+**版本：** v2.0（多焦平面融合）
 **设计者：** Liao Zizhuo（2025）
 
 ---
 
 ## 一、设计动机
 
-胚胎在 0–112 小时的发育过程中，其形态变化呈现明显的时间连续性；而在每个时间点，不同焦平面（focal depths）共同记录了胚胎的三维形态特征。为了在有限样本下充分利用这些时空信息，本模型结合卷积神经网络（CNN）与 Transformer 的优势：使用 **VGG16** 提取空间特征，并通过 **Transformer** 建模时间维度变化，同时对所有焦平面进行**多平面信息融合**（而非单平面选择），以最大限度保留胚胎结构的整体信息，构建时空联合特征表达，实现胚胎好坏分类。
+胚胎在 0–112 小时的发育过程中，其形态变化呈现明显的时间连续性；而在每个时间点，不同焦平面（focal depths）共同记录了胚胎的三维形态特征。为了充分利用这些时空信息，本模型采用：
+- **VGG16** 提取空间特征（预训练权重，针对胚胎微调）
+- **Transformer** 建模时间维度变化（自注意力机制）
+- **多焦平面融合** 聚合所有焦平面信息，避免单平面偏差
+
+构建时空联合特征表达，实现胚胎二分类。
 
 ---
 
@@ -17,7 +22,7 @@
 
 | 维度 | 含义 |
 |------|------|
-| `time_steps = 33` | 时间点（0–112 小时，每 0.5h 采样一次） |
+| `time_steps = 33` | 时间点（96–112 小时，每 0.5h 采样） |
 | `focal_planes = 11` | 每个时间点的焦平面数量 |
 | `image_shape = (224, 224, 3)` | 单张图像的尺寸 |
 | **输入张量** | `(batch_size, 33, 11, 224, 224, 3)` |
@@ -25,1202 +30,559 @@
 
 ---
 
-## 三、模型结构概览
-输入：(33 × 11 × 224 × 224 × 3)
-│
-├── VGG16（共享权重）
-│       ↓
-│   每张图像 → 512维特征向量
-│
-├── 多焦平面融合（Focal Fusion）
-│       ↓
-│   将11个焦平面平均融合 → 每个时间点输出1个512维特征
-│
-├── Transformer 编码器（Temporal Transformer）
-│       ↓
-│   建模0–112小时的时序变化 → 输出33×512时序特征
-│
-├── 全局平均池化（Global Average Pooling）
-│
-├── 全连接层（Dense 256, ReLU 激活） + Dropout(0.3)
-│
-└── 输出层（Dense 1, Sigmoid 激活） → 胚胎好坏概率
+## 三、模型架构
 
----
-
-## 四、模块说明
-
-### 1️⃣ VGG16 卷积特征提取模块
-- 使用预训练的 **VGG16（ImageNet 权重，STORK风格实现）**：该模型在初次运行时自动从 PyTorch torchvision 库下载。无需手动提供预训练权重。
-- 架构遵循STORK标准：`features + avgpool(7x7) + flatten + classifier[:4]`
-- 输出每张图像 **4096 维**特征向量（来自原始VGG16分类器的FC层）
-- 所有时间点与焦平面图像共用同一权重，实现高效共享特征提取。
-- **微调策略采用STORK最优方案**：冻结前1/3层，解冻后2/3层进行联合训练（无需两阶段训练）
-
-### 2️⃣ 多焦平面融合模块（Focal Fusion）
-- 输入：单一时间点的 11 张焦平面特征 `(11, 4096)`
-- 采用**平均融合策略**对所有焦平面特征进行聚合，确保不同深度信息均被利用。
-- 输出：单个时间点的 **4096 维**特征向量 `(1, 4096)`
-- 此操作在保持整体结构信息的同时避免注意力偏置，提高特征稳定性。
-
-### 3️⃣ Transformer 编码器（Temporal Transformer）
-- 输入：33×**4096** 的时间序列特征矩阵。
-- 添加可学习的位置编码，显式建模时间顺序。
-- 包含 4 层 Transformer 块，每层由多头自注意力（8 heads × 512维）、前馈网络（2048 单元）、Layer Normalization 和残差连接组成。
-- 该模块学习胚胎在发育过程中形态变化的全局动态模式。
-
-### 4️⃣ 分类头（Classification Head）
-- 将 Transformer 输出经全局平均池化（GlobalAveragePooling1D）得到整体时序特征向量 (4096D)。
-- 通过三层全连接网络进行非线性映射：
-  - Dropout(0.5) + Linear(4096, 512) + ReLU + Dropout(0.3)
-  - Linear(512, 1) + Sigmoid
-- 最终输出值 `p ∈ [0,1]` 表示胚胎为"好"的概率。
-
----
-
-
-## 五、完整的预处理到评估流程
-
-### 📋 数据预处理流程
-
-#### 5.1 图像加载与标准化
-
-**输入:** 原始胚胎显微镜图像 (任意分辨率，RGB格式)
-
-**处理步骤:**
-
-1. **读取图像**
-   - 使用 OpenCV (cv2.imread) 或 PIL 加载
-   - 转换为 RGB 颜色空间 (OpenCV默认为BGR)
-
-2. **培养皿检测与裁剪** (可选，默认启用)
-   - 使用 **Hough 圆检测** 找到圆形培养皿边界
-   - 参数范围: 半径 15%-45% 图像对角线
-   - 遍历多组参数组合确保鲁棒性: (60,40), (70,45), (50,35), (80,50), (90,55)
-   - 取检测到的最大圆形作为培养皿
-
-3. **中心正方形裁剪** (可选，默认启用)
-   - 从裁剪后的图像提取中心正方形区域
-   - 目的: 进一步标准化输入
-
-4. **调整尺寸到 224×224**
-   - 使用双线性插值 (cv2.INTER_LINEAR)
-   - 这是 VGG16 的标准输入尺寸
-
-5. **转换为张量并归一化**
-   ```python
-   # ImageNet 标准化参数
-   mean = [0.485, 0.456, 0.406]
-   std  = [0.229, 0.224, 0.225]
-
-   # 处理流程
-   img_tensor = ToTensor()(img_ndarray)  # [0, 1] 范围
-   img_normalized = Normalize(mean, std)(img_tensor)  # ImageNet 标准化
-   ```
-
-   这些是 **ImageNet 数据集的官方统计参数**，与 VGG16 预训练时使用的标准化一致
-
-#### 5.2 数据增强 (仅用于训练集)
-
-**增强策略:**
-
-| 增强方法 | 参数 | 用途 |
-|---------|------|------|
-| **随机水平翻转** | p=0.5 | 提高空间不变性 |
-| **颜色抖动** | brightness=0.1, contrast=0.1 | 增强光照鲁棒性 |
-
-**验证集与测试集:** 无数据增强，仅进行标准化处理
-
-### 📊 数据划分
+### 整体流程
 
 ```
-原始数据集
-├── 训练集:   70% (用数据增强)
-├── 验证集:   15% (用于早停与学习率调整)
-└── 测试集:   15% (最终性能评估)
+输入：(batch, 33, 11, 224, 224, 3)
+  │
+  ├→ VGG16 特征提取 (33×11 张图像 → 33×11×4096)
+  │
+  ├→ 焦平面融合 (33×11×4096 → 33×4096)
+  │
+  ├→ Transformer 编码 (33×4096 → 33×4096)
+  │  └─ 4 层 MultiHeadAttention (8 heads)
+  │
+  ├→ 全局平均池化 (33×4096 → 4096)
+  │
+  ├→ 分类头 (4096 → 512 → 1)
+  │
+  └→ 输出：胚胎为"好"的概率 ∈ [0,1]
 ```
 
-**划分策略:** 分层随机划分 (stratified split)
-- 确保各类别 (好/差胚胎) 在三个集合中比例一致
-- 使用 sklearn 的 train_test_split with stratify 参数
+### 模块详解
+
+#### 1. VGG16 卷积特征提取
+
+- **权重来源：** 预训练的 VGG16（ImageNet 权重，PyTorch torchvision 自动下载）
+- **架构：** `features + avgpool(7×7) + flatten + classifier[:4]`
+  - features: 13层卷积 (conv-relu-pool)
+  - avgpool: 7×7 全局平均池化
+  - classifier[:4]: 前4层 FC 层（4096 → 4096 → 4096 → 4096）
+- **输出维度：** 每张图像 4096 维特征向量
+- **参数共享：** 所有 33×11 张图像共用同一权重，实现高效特征提取
+- **微调策略：** 冻结前 1/3 层（低阶边缘纹理特征不变），训练后 2/3 层（高阶胚胎特征适应）
+
+#### 2. 焦平面融合模块 (Focal Plane Fusion)
+
+**输入：** 单个时间点的 11 张焦平面特征 `(11, 4096)`
+**操作：** 平均池化聚合
+```
+fusion(f₀, f₁, ..., f₁₀) = (f₀ + f₁ + ... + f₁₀) / 11
+```
+**输出：** `(1, 4096)` 融合特征向量
+
+**为什么用平均而非注意力？**
+- 避免模型过度关注某个焦平面，导致其他信息丢失
+- 确保三维结构信息均匀融合
+- 降低计算复杂度和过拟合风险
+
+#### 3. Transformer 编码器（时间序列建模）
+
+**输入：** 33 个时间点的特征序列 `(33, 4096)`
+
+**位置编码：** 可学习的位置编码，显式表示时间顺序
+```
+PE(t) = learnable_embedding(t)  ∈ ℝ^4096
+```
+
+**Transformer块结构（共4层）：**
+```
+MultiHeadAttention(
+  query, key, value = x_t
+  num_heads = 8
+  head_dim = 4096 / 8 = 512
+)
+  ↓
+FeedForward(
+  Linear(4096 → 2048, ReLU)
+  Linear(2048 → 4096)
+)
+  ↓
+LayerNorm + Residual
+```
+
+**每层的操作细节：**
+1. 多头自注意力：8 个注意力头，每个 512 维
+   - Query/Key/Value: (batch, 33, 4096) → (batch, 8, 33, 512)
+   - Attention: softmax(QK^T / √512)
+   - 输出合并：(batch, 8, 33, 512) → (batch, 33, 4096)
+
+2. 前馈网络：
+   - 隐层：4096 → 2048（降维）
+   - 输出层：2048 → 4096（升维）
+   - 激活：ReLU
+
+3. 归一化和残差：
+   - LayerNorm(x + attention(x))
+   - LayerNorm(x + feedforward(x))
+
+**模型容量：**
+```
+总参数量：
+  - VGG16: ~138M（其中微调部分 ~70M）
+  - Transformer 4层：~70M
+  - 分类头：~1M
+  合计：~209M（其中训练参数 ~140M）
+```
+
+#### 4. 分类头（Classification Head）
+
+**输入：** (33, 4096) 时间序列特征
+
+**步骤 1：全局平均池化**
+```
+GAP: (33, 4096) → (4096)
+每个维度在 33 个时间点上平均
+```
+
+**步骤 2：全连接网络**
+```
+Dropout(0.5)
+  ↓
+Linear(4096 → 512) + ReLU
+  ↓
+Dropout(0.3)
+  ↓
+Linear(512 → 1) + Sigmoid
+  ↓
+输出：p ∈ [0, 1]（胚胎为"好"的概率）
+```
 
 ---
 
-## 六、训练过程详解
+## 四、训练配置与策略
 
-### 6.1 训练配置
+### 超参数设置
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| **批次大小** | 4 | batch_size (取决于GPU显存) |
-| **总轮数** | 100 | 最多训练轮数 |
-| **学习率** | 1e-4 | 初始学习率 |
+| **批次大小** | 4 | 取决于GPU显存（V100: 32GB 可用 ~4-8） |
+| **总轮数** | 100 | 最多训练轮数（通常 30-50 epoch 早停） |
+| **学习率** | 1e-4 | 初始学习率（AdamW） |
 | **权重衰减** | 1e-5 | L2 正则化系数 |
-| **损失函数** | BCE Loss 或 Focal Loss | 二分类交叉熵或焦点损失 |
+| **优化器** | AdamW | 自适应学习率优化 |
 
-### 6.2 损失函数
+### 损失函数
 
-**Binary Cross-Entropy (BCE) Loss:**
+**Binary Cross-Entropy Loss（默认）：**
 ```
 L_BCE = -[y·log(p) + (1-y)·log(1-p)]
-```
-- 默认使用
-- 适用于样本较平衡的情况
 
-**Focal Loss** (可选):
+其中 p = sigmoid(logit) ∈ [0, 1]
+      y ∈ {0, 1}（标签）
+```
+适用于样本较平衡的情况。
+
+**Focal Loss（可选）：**
 ```
 L_Focal = -α·(1-pt)^γ·log(pt)
-```
-- 参数: γ=2.0, α=0.25
-- 用于处理类别不平衡情况
-- 通过降低简单样本权重，专注困难样本
 
-### 6.3 优化器与学习率策略
-
-**优化器:** AdamW
+其中 pt = p if y=1 else 1-p
+      γ = 2.0（聚焦参数）
+      α = 0.25（权重参数）
 ```
-参数:
-- lr = 1e-4 (初始学习率)
-- weight_decay = 1e-5 (权重衰减)
-- β₁ = 0.9 (一阶矩估计系数)
-- β₂ = 0.999 (二阶矩估计系数)
-```
+用于处理类别不平衡，通过降低简单样本权重专注困难样本。
 
-**学习率调整:** ReduceLROnPlateau
-```
-- mode: 'max' (监控指标最大化，即AUC)
-- factor: 0.5 (学习率乘以0.5)
-- patience: 5 epochs (5个epoch无改进则调整)
-- min_lr: 1e-7 (最小学习率下界)
-```
+### 学习率调整
 
-**示例:** 如果AUC 5个epoch未改进，学习率从1e-4 → 5e-5 → 2.5e-5 ...
-
-### 6.4 早停策略 (Early Stopping)
-
+**ReduceLROnPlateau 策略：**
 ```
-监控指标: Val AUC (验证集AUC)
-耐心值: 10 epochs (10个epoch无改进则停止)
+监控指标：Val AUC（验证集AUC）
+模式：最大化（mode='max'）
+参数：
+  - factor: 0.5（每次衰减为原来的 50%）
+  - patience: 5 epochs（5 epoch 无改进则调整）
+  - min_lr: 1e-7（学习率下界）
+
+示例：
+  epoch  1-5: LR = 1e-4（无改进 → 触发）
+  epoch  6-10: LR = 5e-5（无改进 → 触发）
+  epoch 11-15: LR = 2.5e-5（...）
 ```
 
-- 每epoch计算验证集AUC
-- 若AUC未超过历史最高值：counter += 1
-- 若counter ≥ 10：停止训练，恢复最佳模型
-
-### 6.5 VGG16 微调策略 (STORK 风格)
-
-**单阶段统一训练方案:**
+### 早停机制
 
 ```
-初始状态:
-├── VGG16 前 1/3 层: 冻结 (requires_grad=False)
-├── VGG16 后 2/3 层: 训练 (requires_grad=True)
-├── Transformer: 训练
-└── 分类头: 训练
+监控指标：Val AUC
+耐心值：10 epochs
+
+逻辑：
+  - 记录验证集最高 AUC
+  - 每 epoch 对比当前 AUC 与历史最高
+  - 若无改进：计数器 +1
+  - 若计数器 ≥ 10：停止训练，恢复最佳权重
+  - 若有改进：计数器归零，保存当前权重
 ```
 
-**原理:**
-- 前1/3层学习 ImageNet 的通用低阶特征 (边缘、纹理)，无需微调
-- 后2/3层学习高阶语义特征，需要适应胚胎域特征
-- 统一训练优于两阶段，避免梯度流中断
+### VGG16 微调策略（单阶段）
+
+**初始状态：**
+```
+VGG16 层分析：
+  第 1-5 层（Block 1-2）：边缘、纹理检测器 → 冻结
+  第 6-13 层（Block 3-5）：高阶特征提取器 → 训练
+
+Transformer：训练
+分类头：训练
+```
+
+**微调原理：**
+- 前 1/3 层学习的是通用视觉基础（边缘、颜色梯度），ImageNet 预训练足够
+- 后 2/3 层学习的是高层语义特征，需要在胚胎数据上适应
+- 统一训练优于两阶段（避免梯度流中断，充分利用数据）
 
 ---
 
-## 七、评估与测试
+## 五、数据处理流程
 
-### 7.1 评估指标
+### 图像预处理步骤
 
-在训练、验证、测试阶段计算以下指标：
+1. **读取图像**
+   - 使用 OpenCV 或 PIL 加载
+   - 转换为 RGB 颜色空间
+
+2. **培养皿检测与裁剪**（可选，默认启用）
+   - 使用 Hough 圆检测找到圆形培养皿边界
+   - 参数范围：半径 15%-45% 图像对角线
+   - 参数组合：(60,40), (70,45), (50,35), (80,50), (90,55)
+   - 取最大检测圆作为培养皿
+
+3. **中心正方形裁剪**（可选，默认启用）
+   - 从裁剪后的图像提取中心正方形
+   - 标准化输入范围
+
+4. **尺寸调整**
+   - 调整为 224×224（VGG16 标准输入）
+   - 使用双线性插值
+
+5. **张量转换与归一化**
+   ```python
+   img_tensor = ToTensor()(img_ndarray)  # [0, 1]
+   mean = [0.485, 0.456, 0.406]  # ImageNet 官方参数
+   std  = [0.229, 0.224, 0.225]
+   img_normalized = Normalize(mean, std)(img_tensor)
+   ```
+
+### 数据分割
+
+```
+训练集：70%（应用数据增强）
+验证集：15%（用于早停与学习率调整）
+测试集：15%（最终性能评估，完全不见过）
+
+划分策略：分层随机划分（stratified split）
+确保各类别（好/差）在三个集合中比例一致
+```
+
+### 数据增强（仅用于训练集）
+
+| 增强方法 | 参数 | 作用 |
+|---------|------|------|
+| 随机水平翻转 | p=0.5 | 增强空间不变性 |
+| 颜色抖动 | brightness=0.1, contrast=0.1 | 光照鲁棒性 |
+
+---
+
+## 六、评估指标
+
+### 性能指标定义
 
 | 指标 | 定义 | 解释 |
 |------|------|------|
 | **Accuracy** | (TP+TN)/(TP+TN+FP+FN) | 整体分类准确率 |
 | **Precision** | TP/(TP+FP) | "正样本预测正确的比例" |
 | **Recall** | TP/(TP+FN) | "真实正样本被识别的比例" |
-| **F1-Score** | 2·(Precision·Recall)/(Precision+Recall) | Precision和Recall的调和平均数 |
-| **AUC** | ROC曲线下面积 | 不同阈值下性能的综合度量 |
+| **F1-Score** | 2·(Precision·Recall)/(Precision+Recall) | Precision 和 Recall 的调和平均 |
+| **AUC** | ROC 曲线下面积 | 不同阈值下性能的综合度量 |
 
-**其中:**
-- TP (True Positive): 正确预测为"好" 的好胚胎
-- TN (True Negative): 正确预测为"差" 的差胚胎
-- FP (False Positive): 错误预测为"好" 的差胚胎
-- FN (False Negative): 错误预测为"差" 的好胚胎
+其中：TP（真正样本）、TN（真负样本）、FP（假正样本）、FN（假负样本）
 
-### 7.2 分类阈值
+### 分类阈值
 
+默认阈值 = 0.5：
 ```
-预测概率 p ∈ [0, 1]
-
-默认阈值 = 0.5:
-  p ≥ 0.5 → 预测为 "好" (1)
-  p <  0.5 → 预测为 "差" (0)
+p ≥ 0.5 → 预测为"好" (1)
+p <  0.5 → 预测为"差" (0)
 ```
 
 可根据实际需求调整阈值以平衡精确率和召回率。
 
-### 7.3 验证集评估 (训练过程中)
-
-在每个 epoch 后评估：
-
-```python
-# 伪代码
-for epoch in range(num_epochs):
-    # ... 训练 ...
-
-    # 验证
-    val_loss, val_metrics = validate(model, val_loader)
-
-    # 检查是否需要调整学习率
-    scheduler.step(val_metrics['auc'])
-
-    # 检查是否需要早停
-    early_stopping(val_metrics['auc'], model)
-
-    # 记录历史
-    history['val_auc'].append(val_metrics['auc'])
-
-    if early_stopping.early_stop:
-        break
-```
-
-### 7.4 测试集最终评估
-
-模型训练完成后，在 **完全未见过的测试集** 上进行最终评估：
-
-```python
-model.eval()
-test_preds = []
-test_labels = []
-
-with torch.no_grad():
-    for images, labels in test_loader:
-        outputs = model(images)
-        test_preds.extend(outputs.cpu().numpy())
-        test_labels.extend(labels.cpu().numpy())
-
-# 计算最终指标
-test_metrics = calculate_metrics(test_labels, test_preds)
-print(f"Test AUC: {test_metrics['auc']:.4f}")
-print(f"Test Accuracy: {test_metrics['accuracy']:.4f}")
-print(f"Test F1-Score: {test_metrics['f1_score']:.4f}")
-```
-
-### 7.5 训练历史保存
-
-每个阶段的训练历史保存为 JSON：
-
-```json
-{
-  "train_loss": [0.6931, 0.6245, ..., 0.4523],
-  "val_loss": [0.6812, 0.6111, ..., 0.4678],
-  "val_auc": [0.5234, 0.6123, ..., 0.8756]
-}
-```
-
-可用于：
-- 绘制学习曲线
-- 分析过拟合/欠拟合情况
-- 调试训练过程
-
 ---
 
-## 八、代码实现（PyTorch）
+## 七、模型实现细节
 
 ### 项目结构
 
 ```
 ViT-Hybrid/
-├── main.py                      # 主入口点
-├── README.md                    # 项目文档
-├── model/                       # 模型相关
-│   ├── __init__.py
-│   ├── layers.py               # 自定义层（FocalPlaneFusion、PositionalEncoding、TransformerBlock）
-│   └── model.py                # 模型架构（VGG16FeatureExtractor、ViTHybridModel、create_model）
-├── dataset/                     # 数据处理
-│   ├── __init__.py
-│   └── dataset.py              # 数据加载器（EmbryoDataset、ImagePreprocessor、create_data_loaders）
-├── config/                      # 配置管理
-│   ├── __init__.py
-│   └── config.py               # 配置类（ModelConfig、TrainingConfig、DataConfig、PathConfig）
-├── utils/                       # 工具函数
-│   ├── __init__.py
-│   └── utils.py                # 工具（FocalLoss、EarlyStopping、calculate_metrics等）
-├── training/                    # 训练
-│   ├── __init__.py
-│   └── train.py                # 训练脚本（两阶段训练、早停、学习率调度）
-├── checkpoints/                 # 模型保存目录
-├── logs/                        # 训练日志
-└── results/                     # 结果输出
+├── main.py                      # 主入口（训练、配置生成）
+├── README.md                    # 本文件
+├── config/
+│   └── config.py               # 配置类（Model/Training/Data/Path）
+├── model/
+│   ├── model.py                # ViT-Hybrid 模型定义
+│   └── layers.py               # 自定义层（Fusion、Encoding、Block）
+├── dataset/
+│   ├── dataset.py              # 数据加载器
+│   └── multi_focal_data_loader.py  # 多焦距加载器（带缓存）
+├── training/
+│   └── train.py                # 训练脚本
+├── utils/
+│   └── utils.py                # 工具函数（损失、早停、指标）
+├── analysis/                   # 可解释性分析模块
+├── checkpoints/                # 模型保存
+├── results/                    # 训练历史与结果
+├── logs/                       # TensorBoard 日志
+└── cache/                      # 验证缓存
 ```
 
 ### 环境依赖
 
 ```bash
 pip install torch torchvision
-pip install numpy pillow
-pip install scikit-learn
+pip install numpy pillow scikit-learn opencv-python
 ```
 
-### 数据组织格式
+### 快速开始
 
-支持两种数据结构:
+#### 0. 数据准备
 
-**方式1 (BiLSTM风格-推荐):**
+确保数据结构如下：
+
+**方式 1（BiLSTM 风格）：**
 ```
 data_root/
 ├── image/
 │   ├── embryo_001.jpg
 │   ├── embryo_002.jpg
 │   └── ...
-└── score_dict.json (包含quality标签)
+└── score_dict.json
 ```
 
-**方式2 (时间序列风格):**
+**方式 2（时间序列风格）：**
 ```
 data_root/
 ├── good/
 │   ├── embryo_001/
-│   │   ├── time_000/
-│   │   │   ├── focal_00.jpg
-│   │   │   ├── focal_01.jpg
-│   │   │   └── ...
-│   │   ├── time_001/
+│   │   ├── time_000/focal_00.jpg, focal_01.jpg, ...
+│   │   ├── time_001/...
 │   │   └── ...
-│   └── embryo_002/
+│   └── ...
 └── poor/
-    └── embryo_003/
-        └── ...
-```
-
-score_dict.json格式示例:
-```json
-{
-  "embryo_001.jpg": {"quality": 1},
-  "embryo_002.jpg": {"quality": 0},
-  "embryo_003.jpg": {"quality": 1}
-}
-```
-
-### 快速开始
-
-#### 0. 生成评分字典（数据准备）
-
-如果使用 BiLSTM 风格的数据（单张图像 + score_dict.json），需要先生成评分字典：
-
-```bash
-python generate_score_dict.py --maindb MainDB.csv --image_dir ./image -o score_dict.json
-```
-
-**参数说明：**
-- `--maindb`: MainDB.csv 文件路径（必需）
-- `--image_dir`: 胚胎图像目录（可选，用于验证图像存在）
-- `--filtered`: filtered_clean_embryos.csv 文件路径（可选）
-- `--output`: 输出文件路径（默认：score_dict.json）
-
-**数据处理过程：**
-1. 读取 MainDB.csv 中的胚胎数据
-2. 从 ICM/TE 评分计算 BS_prime 分数
-3. 映射质量标签 (good=1, poor=0)
-4. 筛选有有效质量标签的胚胎
-5. 生成 JSON 格式的评分字典
-
-**输出示例：**
-```json
-{
-  "embryo_001": {
-    "bs_score": 3.5,
-    "quality": 1
-  },
-  "embryo_002": {
-    "bs_score": 6.2,
-    "quality": 0
-  }
-}
-```
-
-将生成的 `score_dict.json` 放在数据目录中：
-```
-data_root/
-  ├── image/
-  │   ├── embryo_001.jpg
-  │   ├── embryo_002.jpg
-  │   └── ...
-  └── score_dict.json
+    └── ...
 ```
 
 #### 1. 生成配置文件
 
-使用 main.py 生成配置模板：
-
 ```bash
-python main.py generate-config --output my_config.json
+python main.py generate-config --output config.json
 ```
 
-#### 2. 配置文件设置
+编辑 `config.json` 设置数据路径和训练参数。
 
-生成的 `my_config.json` 配置文件需编辑以下必需字段：
+#### 2. 训练模型
 
-```json
-{
-  "data": {
-    "DATA_ROOT": "/path/to/your/embryo/data",
-    "SCORE_DICT_PATH": "score_dict.json"
-  },
-  "training": {
-    "BATCH_SIZE": 4,
-    "EPOCHS": 100
-  }
-}
-```
-
-#### 3. 单阶段训练
-
+**单阶段训练：**
 ```bash
-python main.py train --data_root /path/to/data
+python main.py train --data_root /path/to/data --config_file config.json
 ```
 
-#### 4. 两阶段训练（推荐）
-
+**两阶段训练（推荐）：**
 ```bash
-python main.py train --data_root /path/to/data --two_stage
+python main.py train --data_root /path/to/data --config_file config.json --two_stage
 ```
 
-#### 5. 使用Focal Loss（适用于类别不平衡）
-
+**使用 Focal Loss（类别不平衡）：**
 ```bash
 python main.py train --data_root /path/to/data --two_stage --use_focal_loss
 ```
 
-#### 6. 多焦距多时间点训练（Multi-Focal Mode）
-
-**背景**：从 `selected_image_paths.csv` 中加载多焦距多时间点的完整胚胎数据，支持完整性检查（必须有33个时间点）。
-
-**数据准备**：
-1. 生成 `selected_image_paths.csv`（包含所有时间点和焦距的图像路径）
-2. 准备 `MainDB.csv`（包含 EmbryoID, ICM, TE, Quality）
-3. 准备 `filtered_clean_embryos.csv`（补充低质量胚胎）
-
-**训练命令**：
+#### 3. 多焦距训练（Multi-Focal Mode）
 
 ```bash
 python main.py train \
-  --data_root /liaozizhuo/ \
+  --data_root /path/to/data \
   --multi_focal \
-  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
-  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
-  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
+  --selected_images_csv /path/to/selected_image_paths.csv \
+  --maindb_csv /path/to/MainDB.csv \
+  --filtered_csv /path/to/filtered_clean_embryos.csv \
   --two_stage
 ```
 
-**多焦距模式的工作流**：
-
-```
-selected_image_paths.csv
-  (PatientID, EmbryoNumber, FocalPlane, TargetHour, FullPath)
-           ↓
-加载质量标签
-  (MainDB.csv + filtered_clean_embryos.csv)
-           ↓
-验证完整性
-  (检查每个胚胎是否有完整的33个时间点)
-           ↓
-聚合焦距
-  (对每个胚胎平均所有焦距和时间点的图像)
-           ↓
-创建数据加载器
-  (train/val/test 分层划分)
-           ↓
-训练二分类模型
-```
-
-**完整性检查详情**：
-- **要求**：每个胚胎必须有完整的33个时间点（96-112小时，每0.5小时采样）
-- **验证**：检查所有图像文件是否存在
-- **拒绝**：时间点不完整或缺少图像的胚胎会被跳过
-- **统计**：自动输出验证统计（总胚胎数、有效胚胎数、拒绝原因）
-
-**示例输出**：
-```
-MULTI-FOCAL DATA VALIDATION SUMMARY
-================================================================================
-Total embryos: 150
-Valid embryos: 142
-Rejected embryos: 8
-Success rate: 94.7%
-
-Rejection reasons:
-  Incomplete timepoints: 5
-  Missing image files: 3
-
-Final dataset: 4686 images from 142 embryos
-```
-
-#### 7. 使用自定义配置文件
-
-修改 encoder 层数和注意力头数量：
-
+**后续运行（使用缓存跳过验证）：**
 ```bash
-# 编辑 my_config.json，修改：
-# "NUM_TRANSFORMER_LAYERS": 6,  # 改为 6 层 encoder
-# "NUM_HEADS": 16,              # 改为 16 个注意力头
-
-python main.py train --data_root /path/to/data --config_file my_config.json --two_stage
-```
-
-### 完整示例工作流
-
-```bash
-# 1. 生成评分字典（数据准备）
-python generate_score_dict.py --maindb MainDB.csv --image_dir ./image -o score_dict.json
-
-# 2. 生成配置文件
-python main.py generate-config --output my_config.json
-
-# 3. 编辑 my_config.json，设置数据路径和训练参数
-# 编辑以下字段：
-# - data.DATA_ROOT: /path/to/embryo/data
-# - training.BATCH_SIZE: 4 (根据GPU内存调整)
-# - training.EPOCHS: 100
-# - model.NUM_TRANSFORMER_LAYERS: 4 (可选)
-# - model.NUM_HEADS: 8 (可选)
-
-# 4. 执行两阶段训练
 python main.py train \
-  --data_root /path/to/embryo/data \
-  --config_file my_config.json \
+  --data_root /path/to/data \
+  --multi_focal \
+  --selected_images_csv /path/to/selected_image_paths.csv \
+  --maindb_csv /path/to/MainDB.csv \
+  --filtered_csv /path/to/filtered_clean_embryos.csv \
   --two_stage \
-  --use_focal_loss
-
-# 5. 查看训练结果
-# 结果保存在 results/ 目录中
+  --skip_validation
 ```
 
-### 多焦距训练完整工作流
-
-```bash
-# 1. 生成 selected_image_paths.csv（如果还没有）
-# 使用 BiLSTM/select_TimePoint_time_lapse.py 或类似脚本
-
-# 2. 准备数据文件
-# - selected_image_paths.csv (包含所有时间点和焦距)
-# - MainDB.csv (包含 EmbryoID, ICM, TE, Quality)
-# - filtered_clean_embryos.csv (补充低质量胚胎)
-
-# 3. 生成配置文件
-python main.py generate-config --output multi_focal_config.json
-
-# 4. 编辑 multi_focal_config.json（可选）
-# 调整 BATCH_SIZE, EPOCHS, LEARNING_RATE 等参数
-
-# 5. 执行多焦距训练（含完整性验证）
-python main.py train \
-  --data_root /liaozizhuo/ \
-  --multi_focal \
-  --selected_images_csv /liaozizhuo/selected_image_paths.csv \
-  --maindb_csv /liaozizhuo/scripts/MainDB.csv \
-  --filtered_csv /liaozizhuo/scripts/filtered_clean_embryos.csv \
-  --config_file multi_focal_config.json \
-  --two_stage
-
-# 6. 查看训练结果
-# 结果保存在 results/ 目录中
-# 包括：loss 曲线、evaluation metrics、最终模型权重
-```
+验证结果会自动缓存到 `./cache/` 目录，使用 `--skip_validation` 可加速重复运行。
 
 ### 训练流程
 
-main.py 自动执行以下8个步骤：
+main.py 自动执行以下步骤：
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 1: 环境设置 (ENVIRONMENT SETUP)                        │
-│ - 创建 checkpoints/, logs/, results/ 目录                   │
-│ - 检测 GPU/CPU 可用性                                       │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 2: 配置加载 (CONFIGURATION LOADING)                    │
-│ - 加载模型配置 (time_steps, focal_planes等)                 │
-│ - 加载训练配置 (batch_size, learning_rate等)                │
-│ - 加载数据配置 (data_root, score_dict_path等)               │
-│ - 合并命令行参数                                            │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 3: 数据准备 (DATA PREPARATION)                         │
-│ - 创建数据加载器 (train_loader, val_loader, test_loader)    │
-│ - 进行图像预处理 (Petri dish crop, center crop, resize)    │
-│ - 应用数据增强 (flip, brightness, contrast)                 │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 4: 模型构建 (MODEL BUILDING)                           │
-│ - 初始化 VGG16 特征提取器                                   │
-│ - 初始化 Transformer 编码器                                 │
-│ - 初始化分类头                                              │
-│ - 冻结 VGG16 参数                                           │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 5: 模型训练 (MODEL TRAINING)                           │
-│                                                              │
-│ 两阶段训练:                                                 │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ STAGE 1: Transformer训练 (VGG16冻结)                │  │
-│  │ - 固定 VGG16 权重                                   │  │
-│  │ - 仅训练 Transformer + 分类头                        │  │
-│  │ - 持续 epochs/2 轮                                  │  │
-│  │ - 使用早停和学习率调整                               │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                   │                                         │
-│                   ▼                                         │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ STAGE 2: VGG16微调 (解冻)                           │  │
-│  │ - 解冻 VGG16 高层卷积层                              │  │
-│  │ - 以0.1倍学习率联合训练                               │  │
-│  │ - 持续 epochs/2 轮                                  │  │
-│  │ - 进一步优化所有参数                                 │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                   │                                         │
-│ 单阶段训练:                                                 │
-│  └─ 仅执行 STAGE 1                                        │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 6: 模型评估 (MODEL EVALUATION)                         │
-│ - 在测试集上评估模型性能                                    │
-│ - 计算 Accuracy, Precision, Recall, F1-Score, AUC         │
-│ - 输出详细的性能指标                                        │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 7: 保存模型 (SAVE FINAL MODEL)                         │
-│ - 保存最终模型到 checkpoints/final_model.pth               │
-│ - 保存训练历史到 results/stage1_history.json              │
-│ - 如两阶段则保存 results/stage2_history.json              │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│ STEP 8: 结果总结 (SUMMARY)                                  │
-│ - 展示生成的所有文件                                        │
-│ - 输出后续步骤建议                                          │
-└─────────────────────────────────────────────────────────────┘
-```
+1. **环境设置** - 创建目录，检测 GPU
+2. **配置加载** - 合并命令行参数
+3. **数据准备** - 创建数据加载器
+4. **模型构建** - 初始化模型，冻结 VGG16 前层
+5. **模型训练** - 执行单/双阶段训练
+6. **模型评估** - 测试集性能评估
+7. **保存模型** - checkpoints/final_model.pth
+8. **结果总结** - 生成训练报告
 
-详细步骤说明：
+### 模型配置参数
 
-| 步骤 | 功能 | 输入 | 输出 |
-|------|------|------|------|
-| 1 | 环境设置 | 命令行参数 | GPU/CPU设备, 目录结构 |
-| 2 | 配置加载 | config类 | 合并后的配置字典 |
-| 3 | 数据准备 | 数据路径 | train/val/test加载器 |
-| 4 | 模型构建 | 模型配置 | 初始化的模型 |
-| 5 | 模型训练 | 数据加载器, 模型 | 训练后的模型 |
-| 6 | 模型评估 | 测试数据, 模型 | 性能指标 |
-| 7 | 保存模型 | 模型 | 模型文件 (.pth) |
-| 8 | 结果总结 | 文件系统 | 训练报告 |
-
-或直接使用训练脚本：
-
-```bash
-python training/train.py --data_root /path/to/data --two_stage
-```
-
-### 模型使用示例
-
-#### 训练模型
-
-```python
-from model.model import create_model
-from config.config import get_model_config
-import torch
-
-# 创建模型
-config = get_model_config()
-model = create_model(config)
-
-# 查看模型结构
-print(model)
-
-# 测试输入输出
-batch_size = 2
-dummy_input = torch.randn(batch_size, 33, 11, 3, 224, 224)
-output = model(dummy_input)
-print(f"Output shape: {output.shape}")  # (2, 1)
-```
-
-#### 加载预训练模型
-
-```python
-import torch
-from model.model import create_model
-
-model = create_model()
-model.load_state_dict(torch.load('checkpoints/final_model.pth'))
-model.eval()
-
-# 进行预测
-with torch.no_grad():
-    output = model(input_data)
-    prediction = (output > 0.5).float()
-```
-
-### 配置参数说明
-
-#### 模型配置（config/config.py - ModelConfig）
+#### ModelConfig
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `TIME_STEPS` | 33 | 时间点数量 |
 | `FOCAL_PLANES` | 11 | 焦平面数量 |
 | `IMAGE_SIZE` | 224 | 图像尺寸 |
-| `NUM_TRANSFORMER_LAYERS` | 4 | Transformer层数 |
+| `NUM_TRANSFORMER_LAYERS` | 4 | Transformer 层数 |
 | `NUM_HEADS` | 8 | 注意力头数 |
-| `D_MODEL` | **4096** | 特征维度（与VGG16输出保持一致，STORK风格） |
-| `DFF` | **2048** | 前馈网络维度 |
-| `DROPOUT_RATE` | 0.1 | Dropout率 |
+| `D_MODEL` | 4096 | 特征维度（与 VGG16 输出保持一致） |
+| `DFF` | 2048 | 前馈网络隐层维度 |
+| `DROPOUT_RATE` | 0.1 | Dropout 比率 |
 
-#### 训练配置（config/config.py - TrainingConfig）
+#### TrainingConfig
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `BATCH_SIZE` | 4 | 批次大小 |
-| `EPOCHS` | 100 | 训练轮数 |
-| `LEARNING_RATE` | 1e-4 | 学习率 |
-| `WEIGHT_DECAY` | 1e-5 | 权重衰减 |
-| `TRAIN_RATIO` | 0.7 | 训练集比例（70%） |
-| `VAL_RATIO` | 0.15 | 验证集比例（15%）；测试集为 15% |
+| `EPOCHS` | 100 | 最多训练轮数 |
+| `LEARNING_RATE` | 1e-4 | 初始学习率 |
+| `WEIGHT_DECAY` | 1e-5 | L2 正则化 |
 | `EARLY_STOPPING_PATIENCE` | 10 | 早停耐心值 |
 | `REDUCE_LR_PATIENCE` | 5 | 学习率调整耐心值 |
 
 ### 训练输出
 
-训练过程会生成以下文件：
+训练完成后生成：
 
-- `checkpoints/stage1_best.pth` - 第一阶段最佳模型
-- `checkpoints/stage2_best.pth` - 第二阶段最佳模型（两阶段训练）
-- `checkpoints/final_model.pth` - 最终模型
+- `checkpoints/final_model.pth` - 最终模型权重
 - `results/stage1_history.json` - 第一阶段训练历史
 - `results/stage2_history.json` - 第二阶段训练历史（两阶段训练）
-- `logs/` - TensorBoard日志
-
-### 模型评估指标
-
-训练过程中会输出以下指标：
-
-- **Accuracy**: 分类准确率
-- **AUC**: ROC曲线下面积
-- **Precision**: 精确率
-- **Recall**: 召回率
-- **F1-Score**: F1分数
-
-### GPU加速
-
-代码自动检测GPU可用性：
-
-```python
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-```
-
-如需指定GPU：
-
-```python
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 使用第0号GPU
-```
-
-### 图像预处理
-
-数据加载器自动进行以下预处理操作：
-
-1. **培养皿检测与裁剪** (Petri Dish Crop)
-   - 使用Hough圆检测算法自动检测培养皿边界
-   - 通过多参数组合确保高检测率(>96%)
-   - 自动生成圆形掩膜并应用到图像
-
-2. **中心正方形裁剪** (Center Square Crop)
-   - 从图像中心裁剪正方形区域
-   - 移除图像边界的无关信息
-
-3. **尺寸调整**
-   - 统一调整为224×224分辨率
-
-4. **数据增强** (训练集)
-   - 随机水平翻转
-   - 随机亮度调整
-   - 随机对比度调整
-
-可在config/config.py中控制预处理选项：
-
-```python
-APPLY_PETRI_CROP = True    # 启用培养皿裁剪
-APPLY_CENTER_CROP = True   # 启用中心裁剪
-```
-
-### 配置文件和标签生成
-
-#### 修改配置
-
-编辑 `config/config.py`：
-
-**方式1：BiLSTM风格（单张图像）**
-```python
-class DataConfig:
-    DATA_ROOT = '/path/to/data'      # 数据根目录
-    SCORE_DICT_PATH = 'score_dict.json'  # 标签文件路径
-```
-
-**方式2：时间序列风格（good/poor目录）**
-```python
-class DataConfig:
-    DATA_ROOT = '/path/to/data'      # 数据根目录（包含good/poor子目录）
-    SCORE_DICT_PATH = None           # 不使用score_dict
-```
-
-#### 生成score_dict.json
-
-如果使用BiLSTM风格数据，需要创建score_dict.json来标注图像质量。
-
-**方法1：从CSV文件生成**
-
-创建CSV文件 `labels.csv`（格式：filename,quality）：
-```csv
-filename,quality
-embryo_001.jpg,1
-embryo_002.jpg,0
-embryo_003.jpg,1
-```
-
-然后在config/config.py中设置：
-```python
-class DataConfig:
-    DATA_ROOT = '/path/to/data'
-    SCORE_DICT_PATH = 'score_dict.json'
-```
-
-**方法2：手动创建JSON**
-
-在数据根目录创建 `score_dict.json`：
-```json
-{
-    "embryo_001.jpg": {"quality": 1},
-    "embryo_002.jpg": {"quality": 0},
-    "embryo_003.jpg": {"quality": 1}
-}
-```
-
-quality值说明：
-- `1` = 好胚胎 (Good embryo)
-- `0` = 差胚胎 (Poor embryo)
-
-### 注意事项
-
-1. 数据路径必须按照指定格式组织
-2. 图像命名格式：`time_XXX/focal_XX.jpg`
-3. 推荐使用两阶段训练策略
-4. 类别不平衡时建议使用Focal Loss
-5. 根据GPU显存调整batch_size
-6. 训练前确保有足够的磁盘空间保存检查点
-7. 图像预处理会自动进行，无需手动处理
+- `logs/` - TensorBoard 日志（可选）
 
 ---
 
-## 九、模型可解释性分析（时间点重要性）
+## 八、模型可解释性分析
 
 ### 背景
 
-训练好的模型能够进行预测，但其内部决策过程是"黑箱"的。为了理解模型**如何关注不同的时间点**、**哪些时间点最重要**，我们提供了一套完整的可解释性分析工具。
+训练好的模型能进行预测，但内部决策过程是"黑箱"。为理解模型如何利用不同时间点做决策，提供四种互补的分析方法。
 
 ### 分析方法
 
-#### 方法1：梯度归因法（Gradient Attribution）
+#### 方法 1：梯度归因法（Gradient Attribution）
 
-**原理：** 计算预测输出对输入的梯度，衡量每个时间点对最终预测的影响程度
+**原理：** 计算预测输出对输入的梯度 ∂output/∂input，衡量每个时间点的影响程度
 
-**特点：**
-- ✓ 计算快速，直观理解
-- ✓ 显示每个时间点对预测的敏感性
-- ✓ 输出：33维重要性分数
-
-**使用：**
 ```python
 from analysis.temporal_interpretability import compute_temporal_importance
 
-importance_scores = compute_temporal_importance(model, images, device='cuda')
-# importance_scores: (33,) - 每个时间点的重要性分数
+importance = compute_temporal_importance(model, images, device='cuda')
+# 输出：(33,) 维重要性分数
 ```
 
-**结果解读：**
-- 高分值 → 该时间点对预测影响大，删除会显著改变输出
-- 低分值 → 该时间点不重要，模型较少依赖
-- 通常会发现某些关键时间段（如受精后72-96小时）的重要性显著高于其他时期
+**特点：** 快速、直观、可用于快速筛查
 
-#### 方法2：注意力权重可视化（Attention Weights）
+#### 方法 2：注意力权重可视化（Attention Visualization）
 
-**原理：** Transformer的多头注意力权重直接表示模型如何在时间点间分配注意力
+**原理：** Transformer 的多头注意力权重直接表示模型在时间点间的信息流动
 
-**特点：**
-- ✓ 显示时间点间的关联关系
-- ✓ 可视化为热力图，直观清晰
-- ✓ 提供每层Transformer的注意力分布
-
-**使用：**
 ```python
-from analysis.attention_visualization import (
-    extract_attention_weights,
-    visualize_attention_heatmap,
-    visualize_attention_flow
-)
+from analysis.attention_visualization import extract_attention_weights
 
-# 提取注意力权重
-attention_weights = extract_attention_weights(model, images)
-# 列表，长度4（4层Transformer），每元素形状(batch, 8, 33, 33)
-
-# 可视化热力图
-visualize_attention_heatmap(attention_weights, save_path='attention.png')
-
-# 可视化注意力流（某个时间点的信息流向）
-visualize_attention_flow(attention_weights, source_timepoint=0, save_path='flow.png')
+attn_weights = extract_attention_weights(model, images, device='cuda')
+# 输出：4 个张量，每个 (batch, 8, 33, 33)
 ```
 
-**结果解读：**
-- 热力图行：当前时间点（查询端）
-- 热力图列：被关注的时间点（键值端）
-- 颜色深度：注意力权重大小
-- 对角线强 → 时间点重视自身信息
-- 非对角线强 → 相邻时间点间信息交流密集
+**特点：** 显示时间点间的关联关系、信息流向
 
-#### 方法3：特征相关性矩阵（Temporal Correlation）
+#### 方法 3：特征相关性分析（Temporal Correlation）
 
-**原理：** 计算不同时间点的特征向量间的余弦相似度，理解时间点间的"特征距离"
+**原理：** 计算不同时间点特征向量间的余弦相似度，理解发育连续性
 
-**特点：**
-- ✓ 量化时间点间的相似性
-- ✓ 显示发育阶段的连续性
-- ✓ 输出：33×33相关性矩阵
-
-**使用：**
 ```python
 from analysis.temporal_interpretability import compute_temporal_correlation
 
-correlation_matrix, info = compute_temporal_correlation(
-    model, images, device='cuda'
-)
-# correlation_matrix: (33, 33) - 时间点间的特征相关性
+corr_matrix, info = compute_temporal_correlation(model, images, device='cuda')
+# 输出：(33, 33) 相关性矩阵
 ```
 
-**结果解读：**
-- 矩阵对角线值大 → 时间点自身特征一致
-- 近对角线值大 → 相邻时间点特征相似（连续发育）
-- 远离对角线区域高值 → 不同发育阶段仍有相似特征
+**特点：** 量化时间点间的相似性，显示发育阶段
 
-#### 方法4：消融分析（Ablation Analysis）
+#### 方法 4：消融分析（Ablation Analysis）
 
-**原理：** 逐个移除（遮挡）每个时间点，计算对预测的影响
+**原理：** 逐个遮挡（移除）每个时间点，计算对预测的影响
 
-**特点：**
-- ✓ 最直接的重要性度量方法
-- ✓ 物理意义明确：删除该时间点后预测变化多少
-- ✓ 计算量大，但结果最可信
-
-**使用：**
 ```python
 from analysis.ablation_analysis import temporal_ablation_analysis
 
-ablation_scores, ablated_preds = temporal_ablation_analysis(
-    model, images, device='cuda', ablation_mode='zero'
-)
-# ablation_scores: (33,) - 每个时间点的消融分数
+ablation_scores, _ = temporal_ablation_analysis(model, images, device='cuda')
+# 输出：(33,) 消融分数
 ```
 
-**结果解读：**
-- 高分值 → 该时间点对预测至关重要
-- 低分值 → 该时间点影响较小
-- 与梯度归因法通常高度相关，但计算成本更高
+**特点：** 最直接、最可信（但计算成本高）
 
-### 快速开始：完整分析流程
+### 快速分析
 
 ```bash
-# 1. 基础分析（推荐首先运行）
 python analyze_temporal_interpretability.py \
     --model checkpoints/final_model.pth \
-    --output results/temporal_analysis
-
-# 2. 使用GPU加速
-python analyze_temporal_interpretability.py \
-    --model checkpoints/final_model.pth \
-    --device cuda \
-    --output results/temporal_analysis
-
-# 3. 分析多个样本
-python analyze_temporal_interpretability.py \
-    --model checkpoints/final_model.pth \
-    --batch_size 8 \
-    --output results/temporal_analysis
+    --output results/temporal_analysis \
+    --device cuda
 ```
 
-### 输出文件说明
+生成输出：
+- `temporal_importance.json` - 梯度归因结果
+- `attention_analysis.json` - 注意力统计
+- `ablation_analysis.json` - 消融分析结果
+- `attention_heatmap.png` - 4 层热力图
+- `temporal_correlation.png` - 相关性矩阵
+- `temporal_ablation.png` - 消融分数条形图
 
-脚本执行后会在输出目录中生成：
-
-| 文件 | 说明 |
-|------|------|
-| `temporal_importance.json` | 梯度归因法的重要性分数 |
-| `attention_analysis.json` | 注意力权重的统计分析 |
-| `ablation_analysis.json` | 消融分析的结果 |
-| `attention_heatmap.png` | 4层Transformer的注意力热力图 |
-| `attention_flow_t0.png` | 第一个时间点(96h)的注意力流 |
-| `attention_flow_t16.png` | 中间时间点(104h)的注意力流 |
-| `temporal_correlation.png` | 时间点特征相关性热力图 |
-| `temporal_ablation.png` | 时间点消融分析条形图 |
-| `correlation_matrix.npy` | 相关性矩阵的数值存储 |
-
-### 编程接口
-
-#### 时间点重要性分析
+### 编程接口示例
 
 ```python
-from analysis.temporal_interpretability import (
-    compute_temporal_importance,
-    get_critical_timepoints,
-    print_temporal_importance_report
-)
+from analysis.temporal_interpretability import compute_temporal_importance, get_critical_timepoints
 
 # 计算重要性
 importance = compute_temporal_importance(model, images, device='cuda')
 
-# 找出最重要的5个时间点
+# 找出最重要的 5 个时间点
 critical = get_critical_timepoints(importance, topk=5)
-print(f"最重要的时间点: {critical['hours']}")
-
-# 生成报告
-report = print_temporal_importance_report(importance)
-print(report)
+print(f"关键时间点：{critical['hours']} 小时")
+print(f"重要性分数：{critical['scores']}")
 ```
 
-#### 注意力权重分析
+---
 
-```python
-from analysis.attention_visualization import (
-    extract_attention_weights,
-    get_most_attended_timepoints
-)
+## 九、常见问题
 
-# 提取权重
-attn_weights = extract_attention_weights(model, images, device='cuda')
+**Q: 模型参数量是多少？**
+A: 总计 ~209M，其中训练参数 ~140M（VGG16 后 2/3 层 + Transformer + 分类头）
 
-# 找出最被关注的时间点（最后一层）
-most_attended = get_most_attended_timepoints(
-    attn_weights,
-    layer_index=-1,
-    topk=5
-)
-print(f"最被关注的时间点: {most_attended['hours']}")
-```
+**Q: 训练需要多长时间？**
+A: GPU (V100) 上约 30-50 min/epoch，总计 1-2 小时（因早停通常 30-50 epochs）
 
-#### 焦平面级别的消融分析
+**Q: 如何调整模型容量？**
+A: 修改 config.json 中的 `NUM_TRANSFORMER_LAYERS` 和 `NUM_HEADS`
 
-```python
-from analysis.ablation_analysis import (
-    focal_plane_ablation_analysis,
-    visualize_focal_plane_ablation
-)
+**Q: 类别不平衡怎么办？**
+A: 使用 `--use_focal_loss` 参数
 
-# 分析特定时间点的不同焦平面的重要性
-ablation_scores, _ = focal_plane_ablation_analysis(
-    model, images, target_timepoint=16  # 104小时
-)
-
-# 可视化
-visualize_focal_plane_ablation(ablation_scores, target_timepoint=16)
-```
-
-### 案例解读
-
-假设分析结果显示：
-
-**时间点重要性：**
-- 96-98h：0.15（相对较低）
-- 102-104h：0.28（最高峰）
-- 108-110h：0.22（次高峰）
-- 110-112h：0.12（下降）
-
-**解读：**
-1. **关键发育阶段**：102-104小时是胚胎发育最关键的时期
-2. **特征动态**：在此阶段，细胞分裂、形态变化最显著
-3. **预测贡献**：模型的好坏判断主要依赖此时段的形态学特征
-4. **实际应用**：收集高质量的102-104小时图像至关重要
-
-**注意力权重显示：**
-- 104h时间点与其他时间点的注意力权重普遍较高
-- 形成"扇形"结构，指向104h
-- 表明模型显式地关注该时间点
-
-### 进阶用法
-
-#### 单个样本分析
-
-```python
-# 对单个胚胎进行详细分析
-single_embryo = images[0:1]  # (1, 33, 11, 3, 224, 224)
-
-importance = compute_temporal_importance(model, single_embryo)
-attn_weights = extract_attention_weights(model, single_embryo)
-ablation_scores, _ = temporal_ablation_analysis(model, single_embryo)
-
-# 三种方法的对比
-import matplotlib.pyplot as plt
-hours = np.arange(96, 112.5, 0.5)
-
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(hours, importance/importance.max(), label='Gradient', marker='o')
-ax.plot(hours, ablation_scores/ablation_scores.max(), label='Ablation', marker='s')
-ax.legend()
-ax.set_xlabel('Development Time (hours)')
-ax.set_ylabel('Normalized Score')
-plt.show()
-```
-
-#### 对比分析
-
-```python
-# 比较好胚胎与差胚胎的时间点重要性
-good_images = ...  # 好胚胎
-poor_images = ...  # 差胚胎
-
-importance_good = compute_temporal_importance(model, good_images)
-importance_poor = compute_temporal_importance(model, poor_images)
-
-diff = importance_good - importance_poor
-# 正值：该时间点对好胚胎的判别更重要
-# 负值：该时间点对差胚胎的判别更重要
-```
-
-### 局限与建议
-
-**梯度归因法：**
-- ✓ 计算快速
-- ✗ 对梯度饱和情况敏感（可考虑使用Integrated Gradient）
-
-**注意力权重：**
-- ✓ 直观清晰
-- ✗ 注意力权重不完全等同于重要性（can attend to unimportant features）
-
-**消融分析：**
-- ✓ 最可信
-- ✗ 计算成本高（需要33次前向传播）
-
-**建议：**
-1. 同时使用多种方法进行对比验证
-2. 关注不同方法的一致性
-3. 对关键时间点进行定性分析
-4. 定期更新分析结果以跟踪模型演进
+**Q: 如何加速多焦距训练？**
+A: 第一次运行后，使用 `--skip_validation` 跳过重复验证，缓存自动保存在 `./cache/` 目录
 
 ---
