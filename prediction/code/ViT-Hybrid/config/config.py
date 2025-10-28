@@ -59,8 +59,8 @@ class DataConfig:
 
 class PathConfig:
     """路径配置（使用绝对路径）"""
-    # 项目根目录
-    PROJECT_ROOT = Path(__file__).parent.parent
+    # 项目固定根目录
+    PROJECT_ROOT = Path('/liaozizhuo/scripts/ViT-Hybrid')
 
     # 所有路径均为绝对路径
     MODEL_SAVE_DIR = str(PROJECT_ROOT / 'checkpoints')
