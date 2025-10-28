@@ -314,8 +314,8 @@ def generate_config_command(args):
             "IMAGE_SIZE": 224,
             "NUM_TRANSFORMER_LAYERS": 4,
             "NUM_HEADS": 8,
-            "D_MODEL": 512,
-            "DFF": 1024,
+            "D_MODEL": 4096,
+            "DFF": 2048,
             "DROPOUT_RATE": 0.1,
             "FUSION_TYPE": "average"
         },
@@ -324,8 +324,8 @@ def generate_config_command(args):
             "EPOCHS": 100,
             "LEARNING_RATE": 0.0001,
             "WEIGHT_DECAY": 0.00001,
-            "TRAIN_RATIO": 0.8,
-            "VAL_RATIO": 0.1,
+            "TRAIN_RATIO": 0.7,
+            "VAL_RATIO": 0.15,
             "EARLY_STOPPING_PATIENCE": 10,
             "REDUCE_LR_PATIENCE": 5,
             "REDUCE_LR_FACTOR": 0.5,
@@ -336,16 +336,17 @@ def generate_config_command(args):
             "PIN_MEMORY": True
         },
         "data": {
-            "DATA_ROOT": "/path/to/embryo/data",
-            "SCORE_DICT_PATH": "score_dict.json",
-            "TEST_RATIO": 0.1,
+            "DATA_ROOT": "/liaozizhuo/",
+            "SCORE_DICT_PATH": "/liaozizhuo/score_dict.json",
+            "TEST_RATIO": 0.15,
             "APPLY_PETRI_CROP": True,
             "APPLY_CENTER_CROP": True
         },
         "paths": {
-            "MODEL_SAVE_DIR": "./checkpoints",
-            "LOG_DIR": "./logs",
-            "RESULT_DIR": "./results"
+            "MODEL_SAVE_DIR": "/liaozizhuo/scripts/ViT-Hybrid/checkpoints",
+            "LOG_DIR": "/liaozizhuo/scripts/ViT-Hybrid/logs",
+            "RESULT_DIR": "/liaozizhuo/scripts/ViT-Hybrid/results",
+            "CACHE_DIR": "/liaozizhuo/scripts/ViT-Hybrid/cache"
         }
     }
 
