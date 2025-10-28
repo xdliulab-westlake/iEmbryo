@@ -230,17 +230,17 @@ python main.py train --data_root /liaozizhuo/ --multi_focal ... --config_file my
     "PIN_MEMORY": true
   },
   "data": {
-    "DATA_ROOT": "/path/to/embryo/data",
-    "SCORE_DICT_PATH": "score_dict.json",
+    "DATA_ROOT": "/liaozizhuo/",
+    "SCORE_DICT_PATH": "/liaozizhuo/score_dict.json",
     "TEST_RATIO": 0.1,
     "APPLY_PETRI_CROP": true,
     "APPLY_CENTER_CROP": true
   },
   "paths": {
-    "MODEL_SAVE_DIR": "./checkpoints",
-    "LOG_DIR": "./logs",
-    "RESULT_DIR": "./results",
-    "CACHE_DIR": "./cache"
+    "MODEL_SAVE_DIR": "/liaozizhuo/scripts/ViT-Hybrid/checkpoints",
+    "LOG_DIR": "/liaozizhuo/scripts/ViT-Hybrid/logs",
+    "RESULT_DIR": "/liaozizhuo/scripts/ViT-Hybrid/results",
+    "CACHE_DIR": "/liaozizhuo/scripts/ViT-Hybrid/cache"
   }
 }
 ```
