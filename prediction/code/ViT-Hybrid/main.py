@@ -12,6 +12,7 @@ Date: 2025-10-27
 import sys
 import argparse
 import torch
+import torch.distributed as dist
 from pathlib import Path
 
 from config.config import get_model_config, get_training_config, get_data_config, PathConfig
@@ -19,6 +20,7 @@ from model.model import create_model
 from dataset.dataset import create_data_loaders
 from utils.utils import create_directories, count_parameters
 from training.train import train_stage1, train_stage2
+from optimization import setup_pytorch_optimization, MemoryMonitor
 
 
 def setup_environment(args):
@@ -27,24 +29,37 @@ def setup_environment(args):
     print("STEP 1: ENVIRONMENT SETUP")
     print("="*60)
 
-    create_directories()
-    print("Directories created successfully")
+    # Check if this is main process (for distributed training)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
+    if is_main_process:
+        create_directories()
+        print("Directories created successfully")
 
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA Version: {torch.version.cuda}")
+    # Setup PyTorch optimization (multi-GPU support)
+    device, is_distributed = setup_pytorch_optimization()
 
-    return device
+    # Create memory monitor
+    memory_monitor = MemoryMonitor(device)
+
+    if is_main_process:
+        print(f"\nTraining Mode:")
+        print(f"  Device: {device}")
+        print(f"  Distributed: {is_distributed}")
+        if torch.cuda.is_available():
+            print(f"  CUDA Version: {torch.version.cuda}")
+
+    return device, is_distributed, memory_monitor
 
 
 def load_configuration(args):
     """Step 2: Configuration - Load and merge configurations"""
-    print("\n" + "="*60)
-    print("STEP 2: CONFIGURATION LOADING")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
+
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 2: CONFIGURATION LOADING")
+        print("="*60)
 
     import json
     from pathlib import Path
@@ -88,34 +103,46 @@ def load_configuration(args):
 
     if args.use_focal_loss:
         training_config['use_focal_loss'] = True
-        print("Loss function: Focal Loss")
+        if is_main_process:
+            print("Loss function: Focal Loss")
     else:
-        print("Loss function: Binary Cross-Entropy")
+        if is_main_process:
+            print("Loss function: Binary Cross-Entropy")
 
-    print(f"Model config: time_steps={model_config['time_steps']}, focal_planes={model_config['focal_planes']}")
-    print(f"  num_transformer_layers={model_config['num_transformer_layers']}, num_heads={model_config['num_heads']}")
-    print(f"Batch size: {training_config['batch_size']}, Epochs: {training_config['epochs']}")
+    if is_main_process:
+        print(f"Model config: time_steps={model_config['time_steps']}, focal_planes={model_config['focal_planes']}")
+        print(f"  num_transformer_layers={model_config['num_transformer_layers']}, num_heads={model_config['num_heads']}")
+
+        # Show batch size info for multi-GPU
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        global_batch_size = training_config['batch_size'] * num_gpus
+        print(f"Batch size: {training_config['batch_size']} per GPU, {global_batch_size} global")
+        print(f"Epochs: {training_config['epochs']}")
 
     return model_config, training_config, data_config
 
 
 def prepare_data(data_config):
     """Step 3: Data Preparation - Load and prepare datasets"""
-    print("\n" + "="*60)
-    print("STEP 3: DATA PREPARATION")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
+
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 3: DATA PREPARATION")
+        print("="*60)
+        print("Creating data loaders...")
 
     try:
-        print("Creating data loaders...")
         train_loader, val_loader, test_loader = create_data_loaders(
             data_root=data_config['data_root'],
             config=data_config
         )
 
-        print(f"Data loaded successfully")
-        print(f"  Training samples: {len(train_loader.dataset)}")
-        print(f"  Validation samples: {len(val_loader.dataset)}")
-        print(f"  Test samples: {len(test_loader.dataset)}")
+        if is_main_process:
+            print(f"Data loaded successfully")
+            print(f"  Training samples: {len(train_loader.dataset)}")
+            print(f"  Validation samples: {len(val_loader.dataset)}")
+            print(f"  Test samples: {len(test_loader.dataset)}")
 
         return train_loader, val_loader, test_loader
 
@@ -128,39 +155,61 @@ def prepare_data(data_config):
         sys.exit(1)
 
 
-def build_model(model_config, device):
+def build_model(model_config, device, is_distributed=False):
     """Step 4: Model Building - Create and initialize model"""
-    print("\n" + "="*60)
-    print("STEP 4: MODEL BUILDING")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
-    print("Creating model...")
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 4: MODEL BUILDING")
+        print("="*60)
+        print("Creating model...")
+
+    # Create model
     model = create_model(model_config).to(device)
 
-    params = count_parameters(model)
-    print(f"Model created successfully")
-    print(f"  Total parameters: {params['total']:,}")
-    print(f"  Trainable parameters: {params['trainable']:,}")
-    print(f"  Non-trainable parameters: {params['non_trainable']:,}")
+    # Multi-GPU setup
+    if torch.cuda.device_count() > 1 and not is_distributed:
+        # Use DataParallel for single-process multi-GPU
+        model = torch.nn.DataParallel(model)
+        if is_main_process:
+            print(f"Enabled DataParallel for {torch.cuda.device_count()} GPUs")
+    elif is_distributed:
+        # DDP will be wrapped in training script
+        if is_main_process:
+            print(f"Model ready for DDP distributed training")
+
+    if is_main_process:
+        params = count_parameters(model)
+        print(f"Model created successfully")
+        print(f"  Total parameters: {params['total']:,}")
+        print(f"  Trainable parameters: {params['trainable']:,}")
+        print(f"  Non-trainable parameters: {params['non_trainable']:,}")
 
     return model
 
 
-def train_model(model, train_loader, val_loader, training_config, device, args):
+def train_model(model, train_loader, val_loader, training_config, device, args, is_distributed=False):
     """Step 5: Model Training - Execute training pipeline"""
-    print("\n" + "="*60)
-    print("STEP 5: MODEL TRAINING")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
+
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 5: MODEL TRAINING")
+        print("="*60)
 
     if args.two_stage:
-        print("Executing two-stage training...")
-        print("\nStage 1: Training Transformer (VGG16 frozen)")
+        if is_main_process:
+            print("Executing two-stage training...")
+            print("\nStage 1: Training Transformer (VGG16 frozen)")
         model = train_stage1(model, train_loader, val_loader, training_config, device)
 
-        print("\nStage 2: Fine-tuning with VGG16 unfrozen")
+        if is_main_process:
+            print("\nStage 2: Fine-tuning with VGG16 unfrozen")
         model = train_stage2(model, train_loader, val_loader, training_config, device)
     else:
-        print("Executing single-stage training...")
+        if is_main_process:
+            print("Executing single-stage training...")
         model = train_stage1(model, train_loader, val_loader, training_config, device)
 
     return model
@@ -168,9 +217,13 @@ def train_model(model, train_loader, val_loader, training_config, device, args):
 
 def evaluate_model(model, test_loader, device):
     """Step 6: Model Evaluation - Evaluate on test set"""
-    print("\n" + "="*60)
-    print("STEP 6: MODEL EVALUATION")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
+
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 6: MODEL EVALUATION")
+        print("="*60)
+        print("Running evaluation on test set...")
 
     from utils.utils import calculate_metrics
     import numpy as np
@@ -179,7 +232,6 @@ def evaluate_model(model, test_loader, device):
     all_preds = []
     all_labels = []
 
-    print("Running evaluation on test set...")
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs = inputs.to(device)
@@ -191,63 +243,80 @@ def evaluate_model(model, test_loader, device):
     all_labels = np.array(all_labels)
 
     metrics = calculate_metrics(all_labels, all_preds)
-    print(f"\nTest Set Results:")
-    print(f"  Accuracy:  {metrics['accuracy']:.4f}")
-    print(f"  Precision: {metrics['precision']:.4f}")
-    print(f"  Recall:    {metrics['recall']:.4f}")
-    print(f"  F1-Score:  {metrics['f1_score']:.4f}")
-    print(f"  AUC:       {metrics['auc']:.4f}")
+
+    if is_main_process:
+        print(f"\nTest Set Results:")
+        print(f"  Accuracy:  {metrics['accuracy']:.4f}")
+        print(f"  Precision: {metrics['precision']:.4f}")
+        print(f"  Recall:    {metrics['recall']:.4f}")
+        print(f"  F1-Score:  {metrics['f1_score']:.4f}")
+        print(f"  AUC:       {metrics['auc']:.4f}")
 
     return metrics
 
 
 def save_final_model(model):
     """Step 7: Save Final Model"""
-    print("\n" + "="*60)
-    print("STEP 7: SAVE FINAL MODEL")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
-    final_path = Path(PathConfig.MODEL_SAVE_DIR) / 'final_model.pth'
-    torch.save(model.state_dict(), final_path)
-    print(f"Final model saved to: {final_path}")
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 7: SAVE FINAL MODEL")
+        print("="*60)
 
-    return final_path
+        # Handle DataParallel wrapper
+        model_to_save = model
+        if hasattr(model, 'module'):  # DataParallel or DDP
+            model_to_save = model.module
+
+        final_path = Path(PathConfig.MODEL_SAVE_DIR) / 'final_model.pth'
+        torch.save(model_to_save.state_dict(), final_path)
+        print(f"Final model saved to: {final_path}")
+
+        return final_path
+    return None
 
 
 def summarize_results():
     """Step 8: Summary - Show training summary and next steps"""
-    print("\n" + "="*60)
-    print("STEP 8: TRAINING COMPLETE - SUMMARY")
-    print("="*60)
+    is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
-    checkpoint_dir = Path(PathConfig.MODEL_SAVE_DIR)
-    result_dir = Path(PathConfig.RESULT_DIR)
+    if is_main_process:
+        print("\n" + "="*60)
+        print("STEP 8: TRAINING COMPLETE - SUMMARY")
+        print("="*60)
 
-    print("\nGenerated files:")
-    if (checkpoint_dir / 'final_model.pth').exists():
-        print(f"  ✓ Model: {checkpoint_dir / 'final_model.pth'}")
-    if (result_dir / 'stage1_history.json').exists():
-        print(f"  ✓ History: {result_dir / 'stage1_history.json'}")
-    if (result_dir / 'stage2_history.json').exists():
-        print(f"  ✓ History: {result_dir / 'stage2_history.json'}")
+        checkpoint_dir = Path(PathConfig.MODEL_SAVE_DIR)
+        result_dir = Path(PathConfig.RESULT_DIR)
 
-    print("\nNext steps:")
-    print("  1. Review training history in results/")
-    print("  2. Run inference: python main.py infer --model_path checkpoints/final_model.pth --data_path /path/to/data")
-    print("  3. Deploy model to production")
+        print("\nGenerated files:")
+        if (checkpoint_dir / 'final_model.pth').exists():
+            print(f"  ✓ Model: {checkpoint_dir / 'final_model.pth'}")
+        if (result_dir / 'stage1_history.json').exists():
+            print(f"  ✓ History: {result_dir / 'stage1_history.json'}")
+        if (result_dir / 'stage2_history.json').exists():
+            print(f"  ✓ History: {result_dir / 'stage2_history.json'}")
+
+        print("\nNext steps:")
+        print("  1. Review training history in results/")
+        print("  2. Run inference: python main.py infer --model_path checkpoints/final_model.pth --data_path /path/to/data")
+        print("  3. Deploy model to production")
 
 
 def train_command(args):
     """Execute training workflow"""
     try:
-        device = setup_environment(args)
+        device, is_distributed, memory_monitor = setup_environment(args)
         model_config, training_config, data_config = load_configuration(args)
 
         # Check if using multi-focal mode
+        is_main_process = not dist.is_initialized() or dist.get_rank() == 0
+
         if args.multi_focal:
-            print("\n" + "="*60)
-            print("MULTI-FOCAL TRAINING MODE")
-            print("="*60)
+            if is_main_process:
+                print("\n" + "="*60)
+                print("MULTI-FOCAL TRAINING MODE")
+                print("="*60)
 
             from dataset.multi_focal_data_loader import (
                 load_score_dict_for_multi_focal,
@@ -279,15 +348,16 @@ def train_command(args):
             # Standard mode
             train_loader, val_loader, test_loader = prepare_data(data_config)
 
-        model = build_model(model_config, device)
-        model = train_model(model, train_loader, val_loader, training_config, device, args)
+        model = build_model(model_config, device, is_distributed)
+        model = train_model(model, train_loader, val_loader, training_config, device, args, is_distributed)
         metrics = evaluate_model(model, test_loader, device)
         save_final_model(model)
         summarize_results()
 
-        print("\n" + "="*60)
-        print("TRAINING PIPELINE COMPLETED SUCCESSFULLY")
-        print("="*60 + "\n")
+        if is_main_process:
+            print("\n" + "="*60)
+            print("TRAINING PIPELINE COMPLETED SUCCESSFULLY")
+            print("="*60 + "\n")
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
