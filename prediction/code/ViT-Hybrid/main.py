@@ -262,9 +262,13 @@ def train_command(args):
 
             # Load and validate multi-focal data
             selected_images_csv = args.selected_images_csv or "/liaozizhuo/selected_image_paths.csv"
-            loader = MultiFocalDataLoader(verbose=True)
+            loader = MultiFocalDataLoader(
+                verbose=True,
+                use_cache=True,
+                cache_dir=PathConfig.CACHE_DIR
+            )
             multi_focal_df, embryo_to_label = loader.load_multi_focal_data(
-                selected_images_csv, score_dict
+                selected_images_csv, score_dict, skip_validation=args.skip_validation
             )
 
             # Create data loaders
@@ -404,6 +408,7 @@ Examples:
     train_parser.add_argument('--selected_images_csv', type=str, default=None, help='Path to selected_image_paths.csv')
     train_parser.add_argument('--maindb_csv', type=str, default=None, help='Path to MainDB.csv')
     train_parser.add_argument('--filtered_csv', type=str, default=None, help='Path to filtered_clean_embryos.csv')
+    train_parser.add_argument('--skip_validation', action='store_true', help='Skip validation and use cached results (faster for repeated runs)')
 
     args = parser.parse_args()
 

@@ -1,6 +1,7 @@
 """
 Multi-focal Multi-timepoint Data Loader for ViT-Hybrid
 Loads and validates data from selected_image_paths.csv with completeness checks
+Supports caching validation results to avoid redundant checks
 
 Author: Liao Zizhuo
 Date: 2025-10-27
@@ -11,6 +12,52 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Tuple, Dict, List
+import hashlib
+from datetime import datetime
+
+
+class ValidationCache:
+    """Caches validation results to avoid redundant checks"""
+
+    def __init__(self, cache_dir='~/.vit_hybrid_cache'):
+        self.cache_dir = Path(cache_dir).expanduser()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_cache_path(self, csv_path: str) -> Path:
+        """Generate cache file path based on CSV hash"""
+        csv_hash = hashlib.md5(csv_path.encode()).hexdigest()[:8]
+        return self.cache_dir / f"validation_cache_{csv_hash}.json"
+
+    def load_cache(self, csv_path: str) -> Dict:
+        """Load cached validation results"""
+        cache_path = self.get_cache_path(csv_path)
+        if cache_path.exists():
+            try:
+                with open(cache_path, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️  无法读取缓存: {e}")
+                return None
+        return None
+
+    def save_cache(self, csv_path: str, data: Dict) -> None:
+        """Save validation results to cache"""
+        cache_path = self.get_cache_path(csv_path)
+        data['cached_at'] = datetime.now().isoformat()
+        data['csv_path'] = csv_path
+        try:
+            with open(cache_path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"⚠️  无法保存缓存: {e}")
+
+    def clear_cache(self) -> None:
+        """Clear all cached validation results"""
+        import shutil
+        if self.cache_dir.exists():
+            shutil.rmtree(self.cache_dir)
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            print("✓ 缓存已清除")
 
 
 class MultiFocalDataValidator:
@@ -18,8 +65,10 @@ class MultiFocalDataValidator:
 
     EXPECTED_TIMEPOINTS = 33  # Expected number of timepoints (96-112 hours, 0.5 hour intervals)
 
-    def __init__(self, verbose=True):
+    def __init__(self, verbose=True, use_cache=True, cache_dir=None):
         self.verbose = verbose
+        self.use_cache = use_cache
+        self.cache = ValidationCache(cache_dir=cache_dir) if use_cache else None
         self.validation_stats = {
             'total_embryos': 0,
             'valid_embryos': 0,
@@ -99,19 +148,22 @@ class MultiFocalDataValidator:
 class MultiFocalDataLoader:
     """Loads and prepares multi-focal time-lapse data from selected_image_paths.csv"""
 
-    def __init__(self, verbose=True):
+    def __init__(self, verbose=True, use_cache=True, cache_dir=None):
         self.verbose = verbose
-        self.validator = MultiFocalDataValidator(verbose=verbose)
+        self.use_cache = use_cache
+        self.validator = MultiFocalDataValidator(verbose=verbose, use_cache=use_cache, cache_dir=cache_dir)
 
     def load_multi_focal_data(self,
                             selected_images_csv: str,
-                            score_dict: Dict) -> Tuple[pd.DataFrame, Dict]:
+                            score_dict: Dict,
+                            skip_validation=False) -> Tuple[pd.DataFrame, Dict]:
         """
-        Load multi-focal data from selected_image_paths.csv with validation
+        Load multi-focal data from selected_image_paths.csv with optional validation caching
 
         Args:
             selected_images_csv: Path to selected_image_paths.csv
             score_dict: Quality labels dictionary
+            skip_validation: If True and cache exists, skip validation and use cached results
 
         Returns:
             Tuple of (validated_df, embryo_to_label)
@@ -134,7 +186,23 @@ class MultiFocalDataLoader:
                 multi_focal_df['EmbryoNumber'].astype(str)
             )
 
-        # Validate each embryo
+        # Try to load cached validation results
+        cached_results = None
+        if self.use_cache and skip_validation:
+            cached_results = self.validator.cache.load_cache(selected_images_csv)
+            if cached_results:
+                print("✓ 从缓存加载验证结果...")
+                valid_embryo_ids = cached_results.get('valid_embryo_ids', [])
+                embryo_to_label = cached_results.get('embryo_to_label', {})
+                self.validator.validation_stats = cached_results.get('validation_stats', {})
+                self.validator.print_summary()
+
+                validated_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(valid_embryo_ids)].copy()
+                print(f"\nFinal dataset: {len(validated_df)} images from {len(valid_embryo_ids)} embryos")
+                return validated_df, embryo_to_label
+
+        # Otherwise, perform validation
+        print("🔍 验证胚胎质量标签和时间点完整性...")
         valid_embryo_ids = []
         embryo_to_label = {}
 
@@ -155,6 +223,16 @@ class MultiFocalDataLoader:
                 self.validator.validation_stats['valid_embryos'] += 1
             else:
                 self.validator.validation_stats['rejected_embryos'] += 1
+
+        # Save validation results to cache
+        if self.use_cache:
+            cache_data = {
+                'valid_embryo_ids': valid_embryo_ids,
+                'embryo_to_label': embryo_to_label,
+                'validation_stats': self.validator.validation_stats
+            }
+            self.validator.cache.save_cache(selected_images_csv, cache_data)
+            print("✓ 验证结果已缓存")
 
         # Filter to valid embryos only
         validated_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(valid_embryo_ids)].copy()

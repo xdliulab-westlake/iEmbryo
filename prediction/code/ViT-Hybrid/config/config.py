@@ -60,6 +60,7 @@ class PathConfig:
     MODEL_SAVE_DIR = './checkpoints'
     LOG_DIR = './logs'
     RESULT_DIR = './results'
+    CACHE_DIR = './cache'  # Validation cache directory
 
 
 def get_model_config():
