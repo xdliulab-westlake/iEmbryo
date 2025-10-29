@@ -7,6 +7,7 @@
 !**/*.py
 !**/*.md
 !**/*.ipynb
+!*.ipynb
 !api/code/*.js
 .Rproj.user
 ref_code/
