@@ -6,8 +6,14 @@ Date: 2025-10-27
 
 import torch
 import torch.nn as nn
+import os
 from torchvision import models
 from .layers import FocalPlaneFusion, PositionalEncoding, TransformerBlock
+
+# 本地预训练模型路径（与STORK保持一致）
+PRETRAINED_PATHS = {
+    'vgg16': "/liaozizhuo/scripts/pretrain_models/vgg16-397923af.pth",
+}
 
 
 class VGG16FeatureExtractor(nn.Module):
@@ -17,9 +23,32 @@ class VGG16FeatureExtractor(nn.Module):
     输出：4096维特征向量（与STORK保持一致）
     结构：features + avgpool + flatten + classifier[:4]
     """
-    def __init__(self, pretrained=True):
+    def __init__(self, pretrained=True, pretrained_path=None):
         super(VGG16FeatureExtractor, self).__init__()
-        vgg16 = models.vgg16(pretrained=pretrained)
+
+        # 先创建模型架构（不加载预训练权重）
+        vgg16 = models.vgg16(pretrained=False)
+
+        # 加载预训练权重
+        if pretrained:
+            # 优先使用指定的路径
+            if pretrained_path and os.path.exists(pretrained_path):
+                print(f"[VGG16] 加载本地预训练模型: {pretrained_path}")
+                state_dict = torch.load(pretrained_path, map_location='cpu')
+                vgg16.load_state_dict(state_dict, strict=False)
+            # 其次使用默认路径
+            elif 'vgg16' in PRETRAINED_PATHS:
+                local_path = PRETRAINED_PATHS['vgg16']
+                if os.path.exists(local_path):
+                    print(f"[VGG16] 加载本地预训练模型: {local_path}")
+                    state_dict = torch.load(local_path, map_location='cpu')
+                    vgg16.load_state_dict(state_dict, strict=False)
+                else:
+                    print(f"[VGG16] 本地预训练模型不存在: {local_path}，使用在线模型")
+                    vgg16 = models.vgg16(pretrained=True)
+            else:
+                print("[VGG16] 使用在线模型")
+                vgg16 = models.vgg16(pretrained=True)
 
         # 提取卷积特征部分
         self.features = vgg16.features
@@ -125,7 +154,8 @@ class ViTHybridModel(nn.Module):
         d_model=4096,
         dff=2048,
         dropout_rate=0.1,
-        fusion_type='average'
+        fusion_type='average',
+        pretrained_path=None
     ):
         super(ViTHybridModel, self).__init__()
 
@@ -135,7 +165,8 @@ class ViTHybridModel(nn.Module):
         self.vgg16_feature_dim = 4096  # VGG16输出维度
 
         # 特征提取器：VGG16（输出4096维）
-        self.vgg16_extractor = VGG16FeatureExtractor(pretrained=True)
+        # 支持从本地加载预训练模型
+        self.vgg16_extractor = VGG16FeatureExtractor(pretrained=True, pretrained_path=pretrained_path)
 
         # 焦平面融合层：融合11个焦平面，输出4096维特征
         self.focal_fusion = FocalPlaneFusion(
@@ -232,7 +263,7 @@ def create_model(config=None):
     创建模型
 
     Args:
-        config: 配置字典
+        config: 配置字典，可以包含 'pretrained_path' 用于加载本地预训练模型
 
     Returns:
         model
@@ -248,7 +279,8 @@ def create_model(config=None):
         d_model=config.get('d_model', 512),
         dff=config.get('dff', 1024),
         dropout_rate=config.get('dropout_rate', 0.1),
-        fusion_type=config.get('fusion_type', 'average')
+        fusion_type=config.get('fusion_type', 'average'),
+        pretrained_path=config.get('pretrained_path', None)
     )
 
     return model

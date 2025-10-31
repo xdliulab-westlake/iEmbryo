@@ -69,7 +69,8 @@ def load_configuration(args):
     data_config = get_data_config()
 
     if args.config_file and Path(args.config_file).exists():
-        print(f"Loading config from: {args.config_file}")
+        if is_main_process:
+            print(f"Loading config from: {args.config_file}")
         with open(args.config_file, 'r') as f:
             json_config = json.load(f)
 
@@ -78,18 +79,27 @@ def load_configuration(args):
                 config_key = key.lower()
                 if config_key in model_config:
                     model_config[config_key] = value
+                    if is_main_process:
+                        print(f"  Model config '{key}': {value}")
 
         if 'training' in json_config:
             for key, value in json_config['training'].items():
                 config_key = key.lower()
                 if config_key in training_config:
                     training_config[config_key] = value
+                    if is_main_process:
+                        print(f"  Training config '{key}': {value}")
+                else:
+                    if is_main_process:
+                        print(f"  ⚠️ Training config '{key}' not found in training_config")
 
         if 'data' in json_config:
             for key, value in json_config['data'].items():
                 config_key = key.lower()
                 if config_key in data_config:
                     data_config[config_key] = value
+                    if is_main_process:
+                        print(f"  Data config '{key}': {value}")
 
     if args.data_root:
         data_config['data_root'] = args.data_root

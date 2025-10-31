@@ -1,49 +1,54 @@
 {
-  "_description": "ViT-Hybrid Configuration Template",
+  "_description": "ViT-Hybrid Configuration Template - All keys must be lowercase!",
   "_usage": "Copy and edit this file, then use: python main.py train --data_root /liaozizhuo/ --multi_focal ... --config_file your_config.json",
   "_doc_url": "See README.md for detailed parameter explanations",
+  "_important": "⚠️ All configuration keys MUST be lowercase (e.g., batch_size, not BATCH_SIZE)",
 
   "model": {
-    "TIME_STEPS": 33,
-    "FOCAL_PLANES": 11,
-    "IMAGE_SIZE": 224,
-    "NUM_TRANSFORMER_LAYERS": 4,
-    "NUM_HEADS": 8,
-    "D_MODEL": 4096,
-    "DFF": 2048,
-    "DROPOUT_RATE": 0.1,
-    "FUSION_TYPE": "average"
+    "time_steps": 33,
+    "focal_planes": 11,
+    "image_size": 224,
+    "num_transformer_layers": 4,
+    "num_heads": 8,
+    "d_model": 4096,
+    "dff": 2048,
+    "dropout_rate": 0.1,
+    "fusion_type": "average",
+    "pretrained_path": "/liaozizhuo/scripts/pretrain_models/vgg16-397923af.pth"
   },
 
   "training": {
-    "BATCH_SIZE": 4,
-    "EPOCHS": 100,
-    "LEARNING_RATE": 0.0001,
-    "WEIGHT_DECAY": 0.00001,
-    "TRAIN_RATIO": 0.7,
-    "VAL_RATIO": 0.15,
-    "EARLY_STOPPING_PATIENCE": 10,
-    "REDUCE_LR_PATIENCE": 5,
-    "REDUCE_LR_FACTOR": 0.5,
-    "MIN_LR": 0.0000001,
-    "MONITOR_METRIC": "val_auc",
-    "MONITOR_MODE": "max",
-    "NUM_WORKERS": 4,
-    "PIN_MEMORY": true
+    "batch_size": 4,
+    "epochs": 100,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.00001,
+    "train_ratio": 0.7,
+    "val_ratio": 0.15,
+    "early_stopping_patience": 10,
+    "reduce_lr_patience": 5,
+    "reduce_lr_factor": 0.5,
+    "min_lr": 0.0000001,
+    "monitor_metric": "val_auc",
+    "monitor_mode": "max",
+    "num_workers": 4,
+    "pin_memory": true,
+    "two_stage": false
   },
 
   "data": {
-    "DATA_ROOT": "/liaozizhuo/",
-    "SCORE_DICT_PATH": "/liaozizhuo/score_dict.json",
-    "TEST_RATIO": 0.15,
-    "APPLY_PETRI_CROP": true,
-    "APPLY_CENTER_CROP": true
+    "data_root": "/liaozizhuo/",
+    "score_dict_path": "/liaozizhuo/score_dict.json",
+    "test_ratio": 0.15,
+    "apply_petri_crop": true,
+    "apply_center_crop": true,
+    "train_ratio": 0.7,
+    "val_ratio": 0.15
   },
 
   "paths": {
-    "MODEL_SAVE_DIR": "/liaozizhuo/scripts/ViT-Hybrid/checkpoints",
-    "LOG_DIR": "/liaozizhuo/scripts/ViT-Hybrid/logs",
-    "RESULT_DIR": "/liaozizhuo/scripts/ViT-Hybrid/results",
-    "CACHE_DIR": "/liaozizhuo/scripts/ViT-Hybrid/cache"
+    "model_save_dir": "/liaozizhuo/scripts/ViT-Hybrid/checkpoints",
+    "log_dir": "/liaozizhuo/scripts/ViT-Hybrid/logs",
+    "result_dir": "/liaozizhuo/scripts/ViT-Hybrid/results",
+    "cache_dir": "/liaozizhuo/scripts/ViT-Hybrid/cache"
   }
 }
