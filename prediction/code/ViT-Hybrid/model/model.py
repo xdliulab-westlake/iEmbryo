@@ -208,8 +208,18 @@ class ViTHybridModel(nn.Module):
         # 将所有图像展平为4D张量: (batch*33*11, 3, 224, 224)
         x = x.view(-1, 3, 224, 224)
 
-        # VGG16特征提取: (batch*33*11, 3, 224, 224) -> (batch*33*11, 4096)
-        vgg_features = self.vgg16_extractor(x)
+        # VGG16特征提取: 分批处理避免整数溢出
+        # 原始 x shape: (batch*33*11, 3, 224, 224)
+        # 对于 4 个 GPU，每个 GPU 分到 8 个样本，所以最多可以处理 512 个（显存足够）
+        vgg_batch_size = 512  # 增大批次大小以减少循环次数
+        vgg_features_list = []
+
+        for i in range(0, x.shape[0], vgg_batch_size):
+            batch_x = x[i:i+vgg_batch_size]
+            batch_features = self.vgg16_extractor(batch_x)
+            vgg_features_list.append(batch_features)
+
+        vgg_features = torch.cat(vgg_features_list, dim=0)
 
         # 重新整形为 (batch, 33, 11, 4096) - 保持原始的 batch × time × focal 维度
         vgg_features = vgg_features.view(batch_size, self.time_steps, self.focal_planes, self.vgg16_feature_dim)

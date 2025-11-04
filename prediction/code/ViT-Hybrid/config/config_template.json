@@ -2,7 +2,7 @@
   "_description": "ViT-Hybrid Configuration Template - All keys must be lowercase!",
   "_usage": "Copy and edit this file, then use: python main.py train --data_root /liaozizhuo/ --multi_focal ... --config_file your_config.json",
   "_doc_url": "See README.md for detailed parameter explanations",
-  "_important": "⚠️ All configuration keys MUST be lowercase (e.g., batch_size, not BATCH_SIZE)",
+  "_important": "⚠️ All configuration keys MUST be lowercase (e.g., batch_size, not BATCH_SIZE). batch_size should be in 'data' section, not 'training'!",
 
   "model": {
     "time_steps": 33,
@@ -18,7 +18,6 @@
   },
 
   "training": {
-    "batch_size": 4,
     "epochs": 100,
     "learning_rate": 0.0001,
     "weight_decay": 0.00001,
@@ -29,20 +28,20 @@
     "reduce_lr_factor": 0.5,
     "min_lr": 0.0000001,
     "monitor_metric": "val_auc",
-    "monitor_mode": "max",
-    "num_workers": 4,
-    "pin_memory": true,
-    "two_stage": false
+    "monitor_mode": "max"
   },
 
   "data": {
+    "batch_size": 4,
     "data_root": "/liaozizhuo/",
     "score_dict_path": "/liaozizhuo/score_dict.json",
     "test_ratio": 0.15,
-    "apply_petri_crop": true,
-    "apply_center_crop": true,
     "train_ratio": 0.7,
-    "val_ratio": 0.15
+    "val_ratio": 0.15,
+    "num_workers": 4,
+    "pin_memory": true,
+    "apply_petri_crop": true,
+    "apply_center_crop": true
   },
 
   "paths": {

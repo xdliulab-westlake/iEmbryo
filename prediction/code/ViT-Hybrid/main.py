@@ -125,9 +125,14 @@ def load_configuration(args):
 
         # Show batch size info for multi-GPU
         num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        global_batch_size = training_config['batch_size'] * num_gpus
-        print(f"Batch size: {training_config['batch_size']} per GPU, {global_batch_size} global")
+        # Use batch_size from data_config (where it should be loaded from JSON)
+        batch_size_per_gpu = data_config.get('batch_size', training_config['batch_size'])
+        global_batch_size = batch_size_per_gpu * num_gpus
+        print(f"Batch size: {batch_size_per_gpu} per GPU, {global_batch_size} global")
         print(f"Epochs: {training_config['epochs']}")
+
+        # Sync batch_size to training_config for backward compatibility
+        training_config['batch_size'] = batch_size_per_gpu
 
     return model_config, training_config, data_config
 
