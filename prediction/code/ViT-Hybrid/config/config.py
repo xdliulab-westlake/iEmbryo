@@ -40,8 +40,10 @@ class TrainingConfig:
     MONITOR_METRIC = 'val_auc'
     MONITOR_MODE = 'max'
 
-    NUM_WORKERS = 4
+    NUM_WORKERS = 1  # 改为 1 以避免内存溢出（使用 LRU 缓存时不需要多 workers）
     PIN_MEMORY = True
+
+    VGG_BATCH_SIZE_PER_GPU = 64
 
 
 class DataConfig:
@@ -97,7 +99,8 @@ def get_training_config():
         'monitor_metric': TrainingConfig.MONITOR_METRIC,
         'monitor_mode': TrainingConfig.MONITOR_MODE,
         'num_workers': TrainingConfig.NUM_WORKERS,
-        'pin_memory': TrainingConfig.PIN_MEMORY
+        'pin_memory': TrainingConfig.PIN_MEMORY,
+        'vgg_batch_size_per_gpu': TrainingConfig.VGG_BATCH_SIZE_PER_GPU
     }
 
 

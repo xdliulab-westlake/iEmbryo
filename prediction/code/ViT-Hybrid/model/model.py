@@ -7,13 +7,36 @@ Date: 2025-10-27
 import torch
 import torch.nn as nn
 import os
+import sys
+from pathlib import Path
 from torchvision import models
 from .layers import FocalPlaneFusion, PositionalEncoding, TransformerBlock
 
 # 本地预训练模型路径（与STORK保持一致）
 PRETRAINED_PATHS = {
-    'vgg16': "/liaozizhuo/scripts/pretrain_models/vgg16-397923af.pth",
+    'vgg16': "/liaozizhuo/scripts/STORK_lzz_torch/models/best_models/vgg16_best_val_accuracy.pth",
 }
+
+
+def _safe_load_state_dict(filepath):
+    """
+    安全地加载模型权重，处理模块导入冲突
+    防止local models目录与torchvision.models的冲突
+    """
+    # 确保torchvision.models在sys.modules中
+    from torchvision import models as tv_models
+    if 'models' not in sys.modules:
+        sys.modules['models'] = tv_models
+
+    try:
+        # 使用weights_only=False来支持旧的pickle格式，但注意安全性
+        state_dict = torch.load(filepath, map_location='cpu', weights_only=False)
+    except Exception as e:
+        print(f"Error loading weights from {filepath}: {e}")
+        print("Will initialize with random weights instead")
+        return None
+
+    return state_dict
 
 
 class VGG16FeatureExtractor(nn.Module):
@@ -34,15 +57,17 @@ class VGG16FeatureExtractor(nn.Module):
             # 优先使用指定的路径
             if pretrained_path and os.path.exists(pretrained_path):
                 print(f"[VGG16] 加载本地预训练模型: {pretrained_path}")
-                state_dict = torch.load(pretrained_path, map_location='cpu')
-                vgg16.load_state_dict(state_dict, strict=False)
+                state_dict = _safe_load_state_dict(pretrained_path)
+                if state_dict is not None:
+                    vgg16.load_state_dict(state_dict, strict=False)
             # 其次使用默认路径
             elif 'vgg16' in PRETRAINED_PATHS:
                 local_path = PRETRAINED_PATHS['vgg16']
                 if os.path.exists(local_path):
                     print(f"[VGG16] 加载本地预训练模型: {local_path}")
-                    state_dict = torch.load(local_path, map_location='cpu')
-                    vgg16.load_state_dict(state_dict, strict=False)
+                    state_dict = _safe_load_state_dict(local_path)
+                    if state_dict is not None:
+                        vgg16.load_state_dict(state_dict, strict=False)
                 else:
                     print(f"[VGG16] 本地预训练模型不存在: {local_path}，使用在线模型")
                     vgg16 = models.vgg16(pretrained=True)
@@ -155,7 +180,8 @@ class ViTHybridModel(nn.Module):
         dff=2048,
         dropout_rate=0.1,
         fusion_type='average',
-        pretrained_path=None
+        pretrained_path=None,
+        vgg_batch_size_per_gpu=64
     ):
         super(ViTHybridModel, self).__init__()
 
@@ -163,6 +189,7 @@ class ViTHybridModel(nn.Module):
         self.focal_planes = focal_planes
         self.d_model = d_model
         self.vgg16_feature_dim = 4096  # VGG16输出维度
+        self.vgg_batch_size_per_gpu = vgg_batch_size_per_gpu
 
         # 特征提取器：VGG16（输出4096维）
         # 支持从本地加载预训练模型
@@ -209,9 +236,12 @@ class ViTHybridModel(nn.Module):
         x = x.view(-1, 3, 224, 224)
 
         # VGG16特征提取: 分批处理避免整数溢出
+        # 根据 GPU 数量和配置动态计算 vgg_batch_size
         # 原始 x shape: (batch*33*11, 3, 224, 224)
-        # 对于 4 个 GPU，每个 GPU 分到 8 个样本，所以最多可以处理 512 个（显存足够）
-        vgg_batch_size = 512  # 增大批次大小以减少循环次数
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        # vgg_batch_size = 每 GPU 处理数 * GPU 数量
+        vgg_batch_size = self.vgg_batch_size_per_gpu * num_gpus
+
         vgg_features_list = []
 
         for i in range(0, x.shape[0], vgg_batch_size):
@@ -290,7 +320,8 @@ def create_model(config=None):
         dff=config.get('dff', 1024),
         dropout_rate=config.get('dropout_rate', 0.1),
         fusion_type=config.get('fusion_type', 'average'),
-        pretrained_path=config.get('pretrained_path', None)
+        pretrained_path=config.get('pretrained_path', None),
+        vgg_batch_size_per_gpu=config.get('vgg_batch_size_per_gpu', 64)
     )
 
     return model

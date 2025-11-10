@@ -11,7 +11,10 @@ from PIL import Image
 import numpy as np
 import cv2
 import copy
+import pickle
 from pathlib import Path
+from tqdm import tqdm
+from collections import OrderedDict
 
 
 class ImagePreprocessor:
@@ -82,6 +85,339 @@ class ImagePreprocessor:
 
         result = cv2.bitwise_and(cimg, mask)
         return result if result.any() else frame
+
+
+class OfflineImagePreprocessor:
+    """
+    离线预处理所有图像以加速训练
+    将确定性预处理步骤提前完成，保存为 pickle 格式
+    在 __getitem__ 中只需加载预处理好的图像，显著减少 CPU 开销
+    """
+
+    def __init__(self, image_size=224, verbose=True):
+        """
+        Args:
+            image_size: 目标图像大小
+            verbose: 是否打印进度信息
+        """
+        self.image_size = image_size
+        self.verbose = verbose
+        self.preprocessor = ImagePreprocessor()
+        self.processed_count = 0
+        self.failed_count = 0
+
+    def preprocess_image(self, image_path, apply_petri_crop=True, apply_center_crop=True):
+        """
+        预处理单张图像（确定性操作）
+
+        Args:
+            image_path: 图像路径
+            apply_petri_crop: 是否应用 Petri 培养皿检测
+            apply_center_crop: 是否应用中心裁剪
+
+        Returns:
+            PIL Image 对象（保存为 pickle 后可快速加载）
+        """
+        try:
+            # 读取图像
+            img = cv2.imread(str(image_path))
+            if img is None:
+                img = Image.open(image_path).convert('RGB')
+                img = np.array(img)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # 应用确定性预处理
+            if apply_petri_crop:
+                img = self.preprocessor.crop_petri_dish(img)
+
+            if apply_center_crop:
+                img = self.preprocessor.crop_center_square(img)
+
+            # 调整大小
+            img = cv2.resize(img, (self.image_size, self.image_size))
+
+            # 转为 PIL Image（便于加载时应用数据增强）
+            img_pil = Image.fromarray(img.astype(np.uint8))
+
+            return img_pil
+
+        except Exception as e:
+            if self.verbose:
+                print(f"  Failed to preprocess {image_path}: {e}")
+            return None
+
+    def preprocess_multi_focal_dataset(
+        self,
+        multi_focal_df,
+        output_dir='preprocessed_data',
+        apply_petri_crop=True,
+        apply_center_crop=True,
+        num_processes=None,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        split_by_embryo=True
+    ):
+        """
+        Offline preprocess multi-focal dataset images and split into train/val/test sets
+        预处理多焦距胚胎图像数据，并按比例分开保存为训练/验证/测试集
+
+        Args:
+            multi_focal_df: DataFrame with 'EmbryoID', 'TargetHour', 'FullPath' columns
+            output_dir: Output directory
+            apply_petri_crop: Whether to apply Petri dish detection (enabled by default)
+            apply_center_crop: Whether to apply center square crop
+            num_processes: Number of processes for parallel processing (default: use all available cores)
+            train_ratio: Training set ratio (default 0.7)
+            val_ratio: Validation set ratio (default 0.15)
+            split_by_embryo: If True, split by embryo ID; if False, split by image (default True)
+
+        Returns:
+            (output_dir, processed_count, failed_count)
+        """
+        from multiprocessing import Pool
+        from sklearn.model_selection import train_test_split
+        import os
+
+        # 如果未指定进程数，使用所有可用的 CPU 核心
+        if num_processes is None:
+            num_processes = os.cpu_count()
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+
+        test_ratio = 1.0 - train_ratio - val_ratio
+
+        # Step 1: 按比例分割胚胎ID (确保同一胚胎的所有图像都在同一集合中)
+        if split_by_embryo:
+            embryo_ids = sorted(set(multi_focal_df['EmbryoID']))
+            train_embryos, temp_embryos = train_test_split(
+                embryo_ids,
+                test_size=(val_ratio + test_ratio),
+                random_state=42
+            )
+            val_embryos, test_embryos = train_test_split(
+                temp_embryos,
+                test_size=test_ratio / (val_ratio + test_ratio),
+                random_state=42
+            )
+
+            # 根据胚胎ID给行分类
+            train_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(train_embryos)]
+            val_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(val_embryos)]
+            test_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(test_embryos)]
+        else:
+            # 按图像分割
+            indices = list(range(len(multi_focal_df)))
+            train_indices, temp_indices = train_test_split(
+                indices,
+                test_size=(val_ratio + test_ratio),
+                random_state=42
+            )
+            val_indices, test_indices = train_test_split(
+                temp_indices,
+                test_size=test_ratio / (val_ratio + test_ratio),
+                random_state=42
+            )
+            train_df = multi_focal_df.iloc[train_indices]
+            val_df = multi_focal_df.iloc[val_indices]
+            test_df = multi_focal_df.iloc[test_indices]
+
+        total_images = len(multi_focal_df)
+        self.processed_count = 0
+        self.failed_count = 0
+
+        if self.verbose:
+            print(f"\n{'='*70}")
+            print(f"OFFLINE IMAGE PREPROCESSING - Multi-Focal Dataset (Split)")
+            print(f"{'='*70}")
+            print(f"Total images to process: {total_images}")
+            print(f"Output directory: {output_dir}")
+            print(f"Processes: {num_processes} (using all available CPU cores)")
+            print(f"Petri crop: {apply_petri_crop}")
+            print(f"Center crop: {apply_center_crop}")
+            print(f"Storage: Three pkl files (train/val/test)")
+            print(f"Split method: By {'Embryo ID' if split_by_embryo else 'Image'}")
+            print(f"Train: {len(train_df)} images ({100*len(train_df)/total_images:.1f}%)")
+            print(f"Val:   {len(val_df)} images ({100*len(val_df)/total_images:.1f}%)")
+            print(f"Test:  {len(test_df)} images ({100*len(test_df)/total_images:.1f}%)\n")
+
+        # Step 2: 并行处理所有数据
+        all_dfs = [
+            ('train', train_df),
+            ('val', val_df),
+            ('test', test_df)
+        ]
+
+        for split_name, split_df in all_dfs:
+            if len(split_df) == 0:
+                if self.verbose:
+                    print(f"Skipping {split_name} split (empty)")
+                continue
+
+            if self.verbose:
+                print(f"Processing {split_name} set ({len(split_df)} images)...")
+
+            # Prepare data for parallel processing
+            rows_data = [
+                (row['EmbryoID'], int(row['TargetHour']), row['FullPath'],
+                 apply_petri_crop, apply_center_crop)
+                for _, row in split_df.iterrows()
+            ]
+
+            # Parallel processing
+            with Pool(num_processes) as pool:
+                # 使用较小的 chunksize 以获得更频繁的进度条更新
+                # 128 个进程 * 50 chunk = 6400 任务/批次更新
+                results = tqdm(
+                    pool.imap_unordered(
+                        self._preprocess_single_image_static,
+                        rows_data,
+                        chunksize=50  # 减小到 50 以获得更频繁的进度更新
+                    ),
+                    total=len(rows_data),
+                    disable=not self.verbose,
+                    desc=f"Preprocessing {split_name}",
+                    ncols=100,
+                    mininterval=1.0  # 最少每 1 秒更新一次
+                )
+
+                # 收集预处理后的图像
+                preprocessed_data = {}
+                split_processed = 0
+                split_failed = 0
+                for result in results:
+                    if result is not None:
+                        embryo_id, target_hour, img_pil = result
+                        key = f"{embryo_id}_{target_hour:03d}"
+                        preprocessed_data[key] = img_pil
+                        split_processed += 1
+                    else:
+                        split_failed += 1
+
+                self.processed_count += split_processed
+                self.failed_count += split_failed
+
+                # 保存该分割的数据到单个 pkl 文件
+                pkl_path = output_dir / f'preprocessed_images_{split_name}.pkl'
+                if self.verbose:
+                    print(f"Saving {len(preprocessed_data)} {split_name} images...")
+
+                with open(pkl_path, 'wb') as f:
+                    pickle.dump(preprocessed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+                if self.verbose:
+                    print(f"{split_name.upper()} split: {split_processed} successful, {split_failed} failed")
+                    print(f"File size: {pkl_path.stat().st_size / (1024**3):.2f} GB\n")
+
+        if self.verbose:
+            print(f"{'='*70}")
+            print(f"PREPROCESSING COMPLETED")
+            print(f"{'='*70}")
+            print(f"Total successfully processed: {self.processed_count}/{total_images}")
+            print(f"Total failed: {self.failed_count}/{total_images}")
+            print(f"Success rate: {100*self.processed_count/total_images:.1f}%")
+            print(f"Output location: {output_dir}")
+            print(f"Files: preprocessed_images_train.pkl, preprocessed_images_val.pkl, preprocessed_images_test.pkl")
+            print(f"{'='*70}\n")
+
+        return output_dir, self.processed_count, self.failed_count
+
+    @staticmethod
+    def _preprocess_single_image_static(args):
+        """
+        Static method for parallel processing (required for multiprocessing)
+        返回预处理后的图像而不是直接保存，所有图像将在主进程中一次性保存到单个pkl文件
+
+        Args:
+            args: (embryo_id, target_hour, full_path, apply_petri_crop, apply_center_crop)
+
+        Returns:
+            (embryo_id, target_hour, img_pil) tuple if successful, None otherwise
+        """
+        embryo_id, target_hour, full_path, apply_petri_crop, apply_center_crop = args
+        preprocessor = ImagePreprocessor()
+
+        try:
+            # Read image
+            img = cv2.imread(str(full_path))
+            if img is None:
+                img = Image.open(full_path).convert('RGB')
+                img = np.array(img)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # Apply preprocessing
+            if apply_petri_crop:
+                img = preprocessor.crop_petri_dish(img)
+
+            if apply_center_crop:
+                img = preprocessor.crop_center_square(img)
+
+            # Resize to standard size
+            img = cv2.resize(img, (224, 224))
+
+            # Convert to PIL Image
+            img_pil = Image.fromarray(img.astype(np.uint8))
+
+            # 返回处理后的图像，而不是直接保存
+            return (embryo_id, target_hour, img_pil)
+
+        except Exception as e:
+            return None
+
+    def check_preprocessed_data(self, output_dir, multi_focal_df):
+        """
+        Check integrity of preprocessed data
+        检查三个 pkl 文件中是否包含所有必需的图像
+
+        Args:
+            output_dir: Preprocessed data output directory
+            multi_focal_df: Original DataFrame
+
+        Returns:
+            (is_complete, missing_count) tuple
+        """
+        output_dir = Path(output_dir)
+        splits = ['train', 'val', 'test']
+        all_preprocessed_data = {}
+
+        # 尝试加载所有三个 pkl 文件
+        for split in splits:
+            pkl_path = output_dir / f'preprocessed_images_{split}.pkl'
+
+            # 如果 pkl 文件不存在，尝试加载旧的单一 pkl 格式（向后兼容）
+            if not pkl_path.exists():
+                if split == 'train':
+                    # 尝试加载旧格式的单个 pkl 文件
+                    old_pkl_path = output_dir / 'preprocessed_images.pkl'
+                    if old_pkl_path.exists():
+                        try:
+                            with open(old_pkl_path, 'rb') as f:
+                                all_preprocessed_data.update(pickle.load(f))
+                        except Exception as e:
+                            return False, len(multi_focal_df)
+                        continue
+                return False, len(multi_focal_df)
+
+            # 加载当前分割的 pkl 文件
+            try:
+                with open(pkl_path, 'rb') as f:
+                    all_preprocessed_data.update(pickle.load(f))
+            except Exception as e:
+                return False, len(multi_focal_df)
+
+        # 检查是否包含所有必需的图像
+        missing_count = 0
+        for _, row in multi_focal_df.iterrows():
+            embryo_id = row['EmbryoID']
+            target_hour = int(row['TargetHour'])
+            key = f"{embryo_id}_{target_hour:03d}"
+            if key not in all_preprocessed_data:
+                missing_count += 1
+
+        is_complete = missing_count == 0
+        return is_complete, missing_count
 
 
 class EmbryoDataset(Dataset):
@@ -355,7 +691,11 @@ class EmbryoDataset(Dataset):
 class MultiFocalEmbryoDataset(Dataset):
     """
     多焦距多时间点胚胎数据集
-    从selected_image_paths.csv加载，支持完整性检查
+    从selected_image_paths.csv加载，支持完整性检查和离线预处理加载
+
+    使用模式：
+    1. 从原始图像加载：设置 preprocessed_dir=None
+    2. 从预处理图像加载：设置 preprocessed_dir='preprocessed_data'
     """
     def __init__(
         self,
@@ -364,7 +704,9 @@ class MultiFocalEmbryoDataset(Dataset):
         apply_petri_crop=True,
         apply_center_crop=True,
         transform=None,
-        target_timepoints=33
+        target_timepoints=33,
+        preprocessed_dir=None,
+        cache_size=1000
     ):
         """
         Args:
@@ -374,6 +716,8 @@ class MultiFocalEmbryoDataset(Dataset):
             apply_center_crop: Whether to apply center square crop
             transform: Image transforms
             target_timepoints: Expected number of timepoints
+            preprocessed_dir: 预处理数据目录。如果为 None，从原始图像加载；否则从预处理图像加载
+            cache_size: LRU 缓存大小（防止内存溢出，默认 1000 张图像）
         """
         self.multi_focal_df = multi_focal_df
         self.image_size = image_size
@@ -382,10 +726,60 @@ class MultiFocalEmbryoDataset(Dataset):
         self.transform = transform
         self.target_timepoints = target_timepoints
         self.preprocessor = ImagePreprocessor()
+        self.preprocessed_dir = Path(preprocessed_dir) if preprocessed_dir else None
 
-        # Create embryo index
+        # 预加载 pkl 文件到内存（在 DataLoader worker 中）
+        # 这样每次加载图像都是 O(1) 字典查找，而不是每次都打开文件
+        self._preprocessed_data_full = {}
+        if self.preprocessed_dir:
+            self._preload_preprocessed_data()
+
+        # LRU 缓存：作为后备方案（如果预加载失败）
+        self._image_cache = OrderedDict()
+        self.cache_size = cache_size
+
+        # Performance optimization: Pre-load embryo index using Dict instead of querying DataFrame each time
         self.embryo_ids = sorted(set(multi_focal_df['EmbryoID']))
-        self.embryo_index = {eid: i for i, eid in enumerate(self.embryo_ids)}
+        self.embryo_index = self._build_embryo_index()
+
+    def _preload_preprocessed_data(self):
+        """
+        预加载所有预处理的 pkl 文件到内存
+        这样 __getitem__ 中加载图像就是 O(1) 字典查找，而不是每次都打开文件
+        """
+        try:
+            # 尝试加载分割式 pkl 文件 (train/val/test)
+            splits = ['train', 'val', 'test']
+            for split in splits:
+                pkl_path = self.preprocessed_dir / f'preprocessed_images_{split}.pkl'
+                if pkl_path.exists():
+                    with open(pkl_path, 'rb') as f:
+                        split_data = pickle.load(f)
+                        self._preprocessed_data_full.update(split_data)
+
+            # 如果没找到分割式文件，尝试加载向后兼容的单一 pkl 文件
+            if not self._preprocessed_data_full:
+                pkl_path = self.preprocessed_dir / 'preprocessed_images.pkl'
+                if pkl_path.exists():
+                    with open(pkl_path, 'rb') as f:
+                        self._preprocessed_data_full = pickle.load(f)
+        except Exception as e:
+            print(f"Warning: Failed to preload preprocessed data: {e}")
+            self._preprocessed_data_full = {}
+
+    def _build_embryo_index(self):
+        """
+        构建胚胎ID到其所有行的映射（Dict 而不是 DataFrame）
+        这样 __getitem__ 中就不用每次都进行 DataFrame 过滤了
+        """
+        index = {}
+        for embryo_id in self.embryo_ids:
+            # 一次性获取该胚胎的所有行，转为列表（而不是保持为 DataFrame）
+            embryo_rows = self.multi_focal_df[
+                self.multi_focal_df['EmbryoID'] == embryo_id
+            ][['TargetHour', 'FullPath']].values.tolist()
+            index[embryo_id] = embryo_rows
+        return index
 
     def __len__(self):
         return len(self.embryo_ids)
@@ -405,17 +799,19 @@ class MultiFocalEmbryoDataset(Dataset):
             embryo_id: str - Embryo identifier
         """
         embryo_id = self.embryo_ids[idx]
-        embryo_df = self.multi_focal_df[self.multi_focal_df['EmbryoID'] == embryo_id]
+        # Use Dict lookup instead of DataFrame filtering (O(1) vs O(n))
+        embryo_records = self.embryo_index[embryo_id]
 
         # Group by TargetHour to get all focal planes for each timepoint
         timepoint_images = {}  # {TargetHour: [image_tensors for different focal planes]}
 
-        for _, row in embryo_df.iterrows():
-            target_hour = row['TargetHour']
-            full_path = row['FullPath']
-
+        for target_hour, full_path in embryo_records:
             try:
-                image = self._load_image(full_path)
+                # Load from preprocessed data or original images
+                if self.preprocessed_dir is not None:
+                    image = self._load_preprocessed_image(embryo_id, target_hour)
+                else:
+                    image = self._load_image(full_path)
 
                 if target_hour not in timepoint_images:
                     timepoint_images[target_hour] = []
@@ -423,7 +819,7 @@ class MultiFocalEmbryoDataset(Dataset):
                 timepoint_images[target_hour].append(image)
 
             except Exception as e:
-                print(f"Failed to load {full_path} (t={target_hour}): {e}")
+                print(f"Failed to load image for embryo {embryo_id} (t={target_hour}): {e}")
                 continue
 
         # Sort by timepoint and preserve focal planes
@@ -431,25 +827,34 @@ class MultiFocalEmbryoDataset(Dataset):
         time_series = []
 
         for target_hour in sorted_timepoints:
-            focal_images = timepoint_images[target_hour]
+            focal_images_pil = timepoint_images[target_hour]
 
-            if not focal_images:
+            if not focal_images_pil:
                 # Add black focal plane stack if no images for this timepoint
                 time_series.append(torch.zeros(11, 3, self.image_size, self.image_size))
             else:
+                # Apply transform and convert PIL images to tensors
+                focal_images_tensor = []
+                for img_pil in focal_images_pil:
+                    if self.transform:
+                        img_tensor = self.transform(img_pil)
+                    else:
+                        img_tensor = transforms.ToTensor()(img_pil)
+                    focal_images_tensor.append(img_tensor)
+
                 # Pad or truncate focal planes to 11
-                num_focal_planes = len(focal_images)
+                num_focal_planes = len(focal_images_tensor)
                 if num_focal_planes < 11:
                     # Pad with black images
                     padding = [torch.zeros(3, self.image_size, self.image_size)
                               for _ in range(11 - num_focal_planes)]
-                    focal_images = focal_images + padding
+                    focal_images_tensor = focal_images_tensor + padding
                 elif num_focal_planes > 11:
                     # Truncate to 11
-                    focal_images = focal_images[:11]
+                    focal_images_tensor = focal_images_tensor[:11]
 
                 # Stack focal planes: (11, 3, H, W)
-                stacked = torch.stack(focal_images)
+                stacked = torch.stack(focal_images_tensor)
                 time_series.append(stacked)
 
         if not time_series:
@@ -472,29 +877,40 @@ class MultiFocalEmbryoDataset(Dataset):
             # Truncate (shouldn't happen if validation works correctly)
             time_series_tensor = time_series_tensor[:self.target_timepoints]
 
-        # Apply transform to each timepoint and focal plane if provided
-        if self.transform:
-            # Convert tensor back to PIL to apply transform, then convert back
-            transformed_series = []
-            for t in range(time_series_tensor.shape[0]):
-                focal_stack = time_series_tensor[t]  # (11, 3, H, W)
-                transformed_focal = []
-                for f in range(focal_stack.shape[0]):
-                    img_t = focal_stack[f]  # (3, H, W)
-                    # Convert to PIL Image
-                    img_pil = transforms.ToPILImage()(img_t)
-                    # Apply transform
-                    img_transformed = self.transform(img_pil)
-                    transformed_focal.append(img_transformed)
-                transformed_series.append(torch.stack(transformed_focal))
-            time_series_tensor = torch.stack(transformed_series)
-
         return time_series_tensor, embryo_id
 
-    def _load_image(self, image_path):
-        """Load and preprocess a single image without transform
+    def _load_preprocessed_image(self, embryo_id, target_hour):
+        """
+        Load image from preprocessed pickle files (preloaded into memory)
+        从预加载的预处理图像中加载（O(1) 字典查找，极快）
 
-        Returns raw tensor (3, H, W) - transform is applied in __getitem__
+        Args:
+            embryo_id: Embryo ID
+            target_hour: Time point
+
+        Returns:
+            PIL Image (transform will be applied in __getitem__)
+        """
+        try:
+            key = f"{embryo_id}_{int(target_hour):03d}"
+
+            # 优先从预加载的数据中查找（O(1) 操作，极快）
+            if self._preprocessed_data_full and key in self._preprocessed_data_full:
+                return self._preprocessed_data_full[key]
+
+            # 如果预加载失败或图像不在预加载的数据中，返回黑色图像
+            return Image.new('RGB', (self.image_size, self.image_size))
+
+        except Exception as e:
+            print(f"Failed to load preprocessed image {embryo_id}_{int(target_hour):03d}: {e}")
+            return Image.new('RGB', (self.image_size, self.image_size))
+
+    def _load_image(self, image_path):
+        """
+        Load and preprocess image from file (for cases without preprocessed data)
+
+        Returns:
+            PIL Image (transform will be applied in __getitem__)
         """
         try:
             img = cv2.imread(str(image_path))
@@ -512,13 +928,13 @@ class MultiFocalEmbryoDataset(Dataset):
 
             img = cv2.resize(img, (self.image_size, self.image_size))
 
-            # Convert to tensor without normalization
-            # Normalization will be done by transform in __getitem__
-            img = transforms.ToTensor()(Image.fromarray(img.astype(np.uint8)))
-            return img
+            # Convert to PIL Image (transform will be applied in __getitem__)
+            img_pil = Image.fromarray(img.astype(np.uint8))
+
+            return img_pil
 
         except Exception as e:
-            return torch.zeros(3, self.image_size, self.image_size)
+            return Image.new('RGB', (self.image_size, self.image_size))
 
 
 def get_transforms(augment=False):
@@ -630,46 +1046,85 @@ def multi_focal_collate_fn(batch, embryo_to_label):
     return torch.stack(images), torch.tensor(labels, dtype=torch.float32)
 
 
-def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
+def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config, enable_preprocessing=True):
     """
     Create data loaders for multi-focal multi-timepoint data
+    支持自动离线预处理所有图像以加速数据加载
 
     Args:
         multi_focal_df: DataFrame from selected_image_paths.csv (already validated)
         embryo_to_label: Dictionary mapping embryo_id to quality label
         config: Configuration dictionary
+        enable_preprocessing: 是否启用自动离线预处理（默认 True）
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader, label_tensor)
     """
     import torch
     from sklearn.model_selection import train_test_split
+    import os
+
+    # Step 1: Auto preprocessing (if needed)
+    preprocessed_dir = None
+    if enable_preprocessing:
+        # Use absolute path: project_root / preprocessed_data
+        # project_root is the directory where main.py is located
+        project_root = Path(os.path.dirname(os.path.abspath(__file__))).parent
+        preprocessed_dir = project_root / 'preprocessed_data'
+
+        # 检查预处理数据是否完整
+        preprocessor = OfflineImagePreprocessor(
+            image_size=config.get('image_size', 224),
+            verbose=True
+        )
+
+        is_complete, missing_count = preprocessor.check_preprocessed_data(
+            preprocessed_dir, multi_focal_df
+        )
+
+        if not is_complete:
+            print(f"\nPreprocessed data incomplete ({missing_count} images missing)")
+            print(f"Starting offline preprocessing...\n")
+
+            # Execute offline preprocessing
+            preprocessed_dir, processed_count, failed_count = preprocessor.preprocess_multi_focal_dataset(
+                multi_focal_df,
+                output_dir=str(preprocessed_dir),
+                apply_petri_crop=config.get('apply_petri_crop', True),
+                apply_center_crop=config.get('apply_center_crop', True)
+            )
+        else:
+            print(f"\nPreprocessed data is complete, using cached preprocessed images\n")
 
     train_transform = get_transforms(augment=True)
     val_transform = get_transforms(augment=False)
 
+    # Step 2: Create datasets (specify preprocessed directory)
     # Create dataset for training (with augmentation)
+    # 创建数据集（自动从所有预处理文件加载）
     train_dataset_base = MultiFocalEmbryoDataset(
         multi_focal_df=multi_focal_df,
         image_size=config.get('image_size', 224),
         apply_petri_crop=config.get('apply_petri_crop', True),
         apply_center_crop=config.get('apply_center_crop', True),
-        transform=train_transform,  # Will apply to training data
-        target_timepoints=config.get('time_steps', 33)
+        transform=train_transform,
+        target_timepoints=config.get('time_steps', 33),
+        preprocessed_dir=str(preprocessed_dir) if preprocessed_dir else None
     )
 
-    # Create dataset for validation/test (without augmentation)
+    # 使用同一数据集对象处理 val 和 test（它们共享缓存）
     val_test_dataset_base = MultiFocalEmbryoDataset(
         multi_focal_df=multi_focal_df,
         image_size=config.get('image_size', 224),
         apply_petri_crop=config.get('apply_petri_crop', True),
         apply_center_crop=config.get('apply_center_crop', True),
-        transform=val_transform,  # Will apply to val/test data
-        target_timepoints=config.get('time_steps', 33)
+        transform=val_transform,
+        target_timepoints=config.get('time_steps', 33),
+        preprocessed_dir=str(preprocessed_dir) if preprocessed_dir else None
     )
 
     # Use base dataset for getting embryo IDs and labels
-    full_dataset = val_test_dataset_base
+    full_dataset = train_dataset_base
 
     embryo_ids = full_dataset.embryo_ids
     labels = torch.tensor([embryo_to_label[eid] for eid in embryo_ids], dtype=torch.float32)
@@ -709,13 +1164,17 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
     from functools import partial
     collate_fn = partial(multi_focal_collate_fn, embryo_to_label=embryo_to_label)
 
-    # Create dataloaders
+    # Step 3: Create DataLoaders (with optimized parameters)
+    # Use num_workers and pin_memory from config, with better defaults
+    num_workers = config.get('num_workers', 4)  # Default 4 workers
+    pin_memory = config.get('pin_memory', True)  # Default True
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.get('batch_size', 4),
         shuffle=True,
-        num_workers=config.get('num_workers', 0),
-        pin_memory=config.get('pin_memory', False),
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         collate_fn=collate_fn
     )
 
@@ -723,8 +1182,8 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
         val_dataset,
         batch_size=config.get('batch_size', 4),
         shuffle=False,
-        num_workers=config.get('num_workers', 0),
-        pin_memory=config.get('pin_memory', False),
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         collate_fn=collate_fn
     )
 
@@ -732,8 +1191,8 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config):
         test_dataset,
         batch_size=config.get('batch_size', 4),
         shuffle=False,
-        num_workers=config.get('num_workers', 0),
-        pin_memory=config.get('pin_memory', False),
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         collate_fn=collate_fn
     )
 

@@ -24,7 +24,9 @@ from utils.utils import (
     save_checkpoint,
     save_history,
     create_directories,
-    count_parameters
+    count_parameters,
+    print_confusion_matrix,
+    print_dataset_distribution
 )
 from config.config import (
     get_model_config,
@@ -46,8 +48,17 @@ def log_print(*args, **kwargs):
         sys.stdout.flush()
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    """Train one epoch with progress bar"""
+def train_one_epoch(model, dataloader, criterion, optimizer, device, print_cm=False):
+    """Train one epoch with progress bar
+
+    Args:
+        model: The model to train
+        dataloader: Training data loader
+        criterion: Loss function
+        optimizer: Optimizer
+        device: Device to run on
+        print_cm: Whether to print confusion matrix (default: False)
+    """
     model.train()
     total_loss = 0
     all_preds = []
@@ -75,13 +86,26 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
         iterator.set_postfix({'loss': f'{loss.item():.4f}'})
 
     avg_loss = total_loss / len(dataloader)
-    metrics = calculate_metrics(np.array(all_labels), np.array(all_preds))
+    all_preds_flat = np.array(all_preds).flatten()
+    all_labels_flat = np.array(all_labels).flatten()
+    metrics = calculate_metrics(all_labels_flat, all_preds_flat)
+
+    if print_cm and is_main_process():
+        print_confusion_matrix(all_labels_flat, all_preds_flat)
 
     return avg_loss, metrics
 
 
-def validate(model, dataloader, criterion, device):
-    """Validate with progress bar"""
+def validate(model, dataloader, criterion, device, print_cm=False):
+    """Validate with progress bar
+
+    Args:
+        model: The model to validate
+        dataloader: Validation data loader
+        criterion: Loss function
+        device: Device to run on
+        print_cm: Whether to print confusion matrix (default: False)
+    """
     model.eval()
     total_loss = 0
     all_preds = []
@@ -106,13 +130,27 @@ def validate(model, dataloader, criterion, device):
             iterator.set_postfix({'loss': f'{loss.item():.4f}'})
 
     avg_loss = total_loss / len(dataloader)
-    metrics = calculate_metrics(np.array(all_labels), np.array(all_preds))
+    all_preds_flat = np.array(all_preds).flatten()
+    all_labels_flat = np.array(all_labels).flatten()
+    metrics = calculate_metrics(all_labels_flat, all_preds_flat)
+
+    if print_cm and is_main_process():
+        print_confusion_matrix(all_labels_flat, all_preds_flat)
 
     return avg_loss, metrics
 
 
-def train_stage1(model, train_loader, val_loader, config, device):
-    """Stage 1: Train Transformer (VGG16 frozen)"""
+def train_stage1(model, train_loader, val_loader, config, device, print_cm=True):
+    """Stage 1: Train Transformer (VGG16 frozen)
+
+    Args:
+        model: The model to train
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        config: Training configuration
+        device: Device to run on
+        print_cm: Whether to print confusion matrices (default: True)
+    """
     log_print("\n" + "="*60)
     log_print("Stage 1: Training Transformer (VGG16 frozen)")
     log_print("="*60)
@@ -142,10 +180,10 @@ def train_stage1(model, train_loader, val_loader, config, device):
 
     for epoch in range(config['epochs'] // 2):
         train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, device, print_cm=print_cm
         )
         val_loss, val_metrics = validate(
-            model, val_loader, criterion, device
+            model, val_loader, criterion, device, print_cm=print_cm
         )
 
         scheduler.step(val_metrics['auc'])
@@ -155,9 +193,11 @@ def train_stage1(model, train_loader, val_loader, config, device):
         history['val_loss'].append(val_loss)
         history['val_auc'].append(val_metrics['auc'])
 
-        log_print(f"Epoch [{epoch+1}/{config['epochs']//2}]")
+        log_print(f"\nEpoch [{epoch+1}/{config['epochs']//2}]")
         log_print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
         log_print(f"  Val AUC: {val_metrics['auc']:.4f} | Val Acc: {val_metrics['accuracy']:.4f}")
+        log_print(f"  Train Metrics: Precision={train_metrics['precision']:.4f} | Recall={train_metrics['recall']:.4f} | F1={train_metrics['f1_score']:.4f}")
+        log_print(f"  Val Metrics:   Precision={val_metrics['precision']:.4f} | Recall={val_metrics['recall']:.4f} | F1={val_metrics['f1_score']:.4f}")
 
         if early_stopping.early_stop:
             log_print("Early stopping triggered")
@@ -180,8 +220,17 @@ def train_stage1(model, train_loader, val_loader, config, device):
     return model
 
 
-def train_stage2(model, train_loader, val_loader, config, device):
-    """Stage 2: Fine-tune with VGG16 unfrozen"""
+def train_stage2(model, train_loader, val_loader, config, device, print_cm=True):
+    """Stage 2: Fine-tune with VGG16 unfrozen
+
+    Args:
+        model: The model to train
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        config: Training configuration
+        device: Device to run on
+        print_cm: Whether to print confusion matrices (default: True)
+    """
     log_print("\n" + "="*60)
     log_print("Stage 2: Fine-tuning with VGG16 unfrozen")
     log_print("="*60)
@@ -212,10 +261,10 @@ def train_stage2(model, train_loader, val_loader, config, device):
 
     for epoch in range(config['epochs'] // 2):
         train_loss, train_metrics = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, device, print_cm=print_cm
         )
         val_loss, val_metrics = validate(
-            model, val_loader, criterion, device
+            model, val_loader, criterion, device, print_cm=print_cm
         )
 
         scheduler.step(val_metrics['auc'])
@@ -225,9 +274,11 @@ def train_stage2(model, train_loader, val_loader, config, device):
         history['val_loss'].append(val_loss)
         history['val_auc'].append(val_metrics['auc'])
 
-        log_print(f"Epoch [{epoch+1}/{config['epochs']//2}]")
+        log_print(f"\nEpoch [{epoch+1}/{config['epochs']//2}]")
         log_print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
         log_print(f"  Val AUC: {val_metrics['auc']:.4f} | Val Acc: {val_metrics['accuracy']:.4f}")
+        log_print(f"  Train Metrics: Precision={train_metrics['precision']:.4f} | Recall={train_metrics['recall']:.4f} | F1={train_metrics['f1_score']:.4f}")
+        log_print(f"  Val Metrics:   Precision={val_metrics['precision']:.4f} | Recall={val_metrics['recall']:.4f} | F1={val_metrics['f1_score']:.4f}")
 
         if early_stopping.early_stop:
             log_print("Early stopping triggered")
@@ -271,6 +322,10 @@ def main(args):
         data_root=data_config['data_root'],
         config=data_config
     )
+
+    # Print dataset distribution
+    if is_main_process():
+        print_dataset_distribution(train_loader, val_loader, test_loader)
 
     log_print("\nBuilding model...")
     model = create_model(model_config).to(device)

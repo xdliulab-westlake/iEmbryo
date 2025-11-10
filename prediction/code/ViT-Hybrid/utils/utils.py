@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
 import json
-from sklearn.metrics import roc_auc_score, precision_recall_fscore_support
+from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, confusion_matrix
 
 
 class FocalLoss(nn.Module):
@@ -149,3 +149,91 @@ def count_parameters(model):
         'trainable': trainable,
         'non_trainable': total - trainable
     }
+
+
+def print_confusion_matrix(y_true, y_pred, threshold=0.5):
+    """
+    Print confusion matrix and related metrics
+
+    Args:
+        y_true: Ground truth labels (numpy array)
+        y_pred: Predicted probabilities (numpy array)
+        threshold: Classification threshold (default: 0.5)
+    """
+    y_pred_binary = (y_pred >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred_binary)
+
+    # Extract confusion matrix components
+    if cm.shape == (2, 2):
+        tn, fp, fn, tp = cm.ravel()
+    else:
+        # Handle edge cases where only one class is present
+        if cm.shape == (1, 1):
+            tn = cm[0, 0]
+            fp = fn = tp = 0
+        else:
+            tn = fp = fn = tp = 0
+
+    # Calculate metrics
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+    # Print confusion matrix
+    print("\n  Confusion Matrix:")
+    print("                 Predicted")
+    print("                Poor    Good")
+    print(f"  Actual Poor   {tn:5d}   {fp:5d}")
+    print(f"         Good   {fn:5d}   {tp:5d}")
+    print(f"\n  Sensitivity (Recall):  {sensitivity:.4f}")
+    print(f"  Specificity:           {specificity:.4f}")
+    print(f"  TP: {tp} | TN: {tn} | FP: {fp} | FN: {fn}")
+
+
+def print_dataset_distribution(train_loader, val_loader, test_loader):
+    """
+    Print sample distribution across train/val/test sets
+
+    Args:
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        test_loader: Test data loader
+    """
+    def count_samples(loader):
+        """Count samples and their labels in a data loader"""
+        good_count = 0
+        poor_count = 0
+
+        for _, labels in loader:
+            labels_np = labels.cpu().numpy()
+            good_count += (labels_np == 1).sum()
+            poor_count += (labels_np == 0).sum()
+
+        return good_count, poor_count
+
+    train_good, train_poor = count_samples(train_loader)
+    val_good, val_poor = count_samples(val_loader)
+    test_good, test_poor = count_samples(test_loader)
+
+    print("\n" + "="*70)
+    print("DATASET DISTRIBUTION")
+    print("="*70)
+
+    # Calculate percentages
+    train_total = train_good + train_poor
+    val_total = val_good + val_poor
+    test_total = test_good + test_poor
+
+    train_good_pct = 100 * train_good / train_total if train_total > 0 else 0
+    val_good_pct = 100 * val_good / val_total if val_total > 0 else 0
+    test_good_pct = 100 * test_good / test_total if test_total > 0 else 0
+
+    print(f"\nTRAIN SET ({train_total} samples):")
+    print(f"  Good: {train_good:4d} ({train_good_pct:6.2f}%) | Poor: {train_poor:4d} ({100-train_good_pct:6.2f}%)")
+
+    print(f"\nVALIDATION SET ({val_total} samples):")
+    print(f"  Good: {val_good:4d} ({val_good_pct:6.2f}%) | Poor: {val_poor:4d} ({100-val_good_pct:6.2f}%)")
+
+    print(f"\nTEST SET ({test_total} samples):")
+    print(f"  Good: {test_good:4d} ({test_good_pct:6.2f}%) | Poor: {test_poor:4d} ({100-test_good_pct:6.2f}%)")
+
+    print("="*70)
