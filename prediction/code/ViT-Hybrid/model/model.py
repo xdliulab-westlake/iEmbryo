@@ -10,7 +10,13 @@ import os
 import sys
 from pathlib import Path
 from torchvision import models
-from .layers import FocalPlaneFusion, PositionalEncoding, TransformerBlock
+from .layers import (
+    FocalPlaneFusion,
+    PositionalEncoding,
+    TransformerBlock,
+    TemporalAttentionPooling,
+    TemporalMultiPooling
+)
 
 # 本地预训练模型路径（与STORK保持一致）
 PRETRAINED_PATHS = {
@@ -152,13 +158,14 @@ class VGG16FeatureExtractor(nn.Module):
 
 class ViTHybridModel(nn.Module):
     """
-    ViT-Hybrid模型: VGG16 + Transformer
+    ViT-Hybrid模型: VGG16 + Transformer + 增强的时间池化
 
     特征流：
     1. VGG16提取 4096维特征（STORK风格）
     2. 对焦平面进行融合
     3. Transformer建模时间序列
-    4. 分类头输出预测
+    4. 时间池化（新增）- 保留动态特征而非简单平均
+    5. 分类头输出预测
 
     Args:
         time_steps: 时间点数量（默认33）
@@ -169,6 +176,8 @@ class ViTHybridModel(nn.Module):
         dff: 前馈网络维度（默认2048）
         dropout_rate: Dropout率（默认0.1）
         fusion_type: 焦平面融合方式（默认'average'）
+        pretrained_path: VGG16预训练模型路径
+        vgg_batch_size_per_gpu: 每个GPU处理的VGG16批次大小
     """
     def __init__(
         self,
@@ -210,6 +219,10 @@ class ViTHybridModel(nn.Module):
             TransformerBlock(d_model, num_heads, dff, dropout_rate)
             for _ in range(num_transformer_layers)
         ])
+
+        # 时间池化层（新增）- 使用注意力机制学习每个时间步的重要性
+        print("[Model] 使用注意力时间池化")
+        self.temporal_pooling = TemporalAttentionPooling(d_model)
 
         # 分类头：输入d_model维特征，输出二分类概率
         self.classifier = nn.Sequential(
@@ -278,8 +291,9 @@ class ViTHybridModel(nn.Module):
             else:
                 x = transformer_block(x)
 
-        # 全局平均池化: (batch, 33, d_model) -> (batch, d_model)
-        x = torch.mean(x, dim=1)
+        # 时间池化：使用注意力机制学习每个时间步的重要性
+        # (batch, 33, d_model) -> (batch, d_model)
+        x = self.temporal_pooling(x)
 
         # 分类
         output = self.classifier(x)

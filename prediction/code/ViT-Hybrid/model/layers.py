@@ -136,3 +136,133 @@ class TransformerBlock(nn.Module):
         if return_attention:
             return x, attn_weights
         return x
+
+
+class TemporalAttentionPooling(nn.Module):
+    """
+    时间注意力池化 - 学习每个时间步的重要性权重
+
+    目的：用可学习的注意力权重替代简单的平均/最大池化
+    保留时间序列中的重要特征
+
+    Args:
+        d_model: 输入特征维度
+        num_heads: 多头注意力头数（可选，默认1）
+
+    输入: (batch, seq_len, d_model)
+    输出: (batch, d_model)
+    """
+    def __init__(self, d_model, num_heads=1):
+        super(TemporalAttentionPooling, self).__init__()
+        self.d_model = d_model
+
+        # 学习注意力权重的方式1: 简单的全连接层
+        self.attention_fc = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Linear(d_model // 2, 1)
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch, seq_len, d_model) 时间序列特征
+
+        Returns:
+            pooled: (batch, d_model) 加权后的特征
+        """
+        # 计算注意力权重
+        # (batch, seq_len, 1) -> (batch, seq_len)
+        attn_weights = self.attention_fc(x)  # (batch, seq_len, 1)
+        attn_weights = attn_weights.squeeze(-1)  # (batch, seq_len)
+        attn_weights = torch.softmax(attn_weights, dim=1)  # (batch, seq_len)
+
+        # 加权求和: (batch, d_model)
+        pooled = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)
+
+        return pooled
+
+
+class TemporalMultiPooling(nn.Module):
+    """
+    多种时间池化策略的组合
+
+    结合以下策略：
+    - 平均池化: 全局信息
+    - 最大池化: 峰值特征
+    - 注意力池化: 学习的重要性
+    - 最后时间步: 最新状态
+
+    目的：让模型自适应选择不同的时间特征
+
+    Args:
+        d_model: 输入特征维度
+        pooling_types: 要使用的池化策略列表
+                      可选: ['mean', 'max', 'attention', 'last']
+
+    输入: (batch, seq_len, d_model)
+    输出: (batch, d_model * num_strategies) 拼接后的特征
+    """
+    def __init__(self, d_model, pooling_types=['mean', 'max', 'attention']):
+        super(TemporalMultiPooling, self).__init__()
+        self.d_model = d_model
+        self.pooling_types = pooling_types
+
+        # 初始化注意力池化（如果需要）
+        if 'attention' in pooling_types:
+            self.attention_pooling = TemporalAttentionPooling(d_model)
+
+        # 初始化投影层用于融合多种策略
+        # 输出维度 = d_model（无论使用多少种策略都融合回原维度）
+        num_strategies = len(pooling_types)
+        self.fusion_fc = nn.Sequential(
+            nn.Linear(d_model * num_strategies, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch, seq_len, d_model) 时间序列特征
+
+        Returns:
+            fused: (batch, d_model) 融合后的特征
+        """
+        pooled_features = []
+
+        for pool_type in self.pooling_types:
+            if pool_type == 'mean':
+                # 平均池化
+                pooled = torch.mean(x, dim=1)  # (batch, d_model)
+
+            elif pool_type == 'max':
+                # 最大池化
+                pooled = torch.max(x, dim=1)[0]  # (batch, d_model)
+
+            elif pool_type == 'attention':
+                # 注意力池化
+                pooled = self.attention_pooling(x)  # (batch, d_model)
+
+            elif pool_type == 'last':
+                # 最后时间步
+                pooled = x[:, -1, :]  # (batch, d_model)
+
+            elif pool_type == 'first':
+                # 第一个时间步
+                pooled = x[:, 0, :]  # (batch, d_model)
+
+            else:
+                raise ValueError(f"不支持的池化类型: {pool_type}")
+
+            pooled_features.append(pooled)
+
+        # 拼接所有池化特征
+        # (batch, d_model * num_strategies)
+        concatenated = torch.cat(pooled_features, dim=1)
+
+        # 通过融合层融合多种策略
+        fused = self.fusion_fc(concatenated)  # (batch, d_model)
+
+        return fused
