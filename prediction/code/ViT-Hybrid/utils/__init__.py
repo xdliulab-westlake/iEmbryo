@@ -1,5 +1,4 @@
 from .utils import (
-    FocalLoss,
     EarlyStopping,
     calculate_metrics,
     save_checkpoint,
@@ -11,7 +10,6 @@ from .utils import (
 )
 
 __all__ = [
-    'FocalLoss',
     'EarlyStopping',
     'calculate_metrics',
     'save_checkpoint',

@@ -111,13 +111,8 @@ def load_configuration(args):
     else:
         print("Training mode: Single-stage")
 
-    if args.use_focal_loss:
-        training_config['use_focal_loss'] = True
-        if is_main_process:
-            print("Loss function: Focal Loss")
-    else:
-        if is_main_process:
-            print("Loss function: Binary Cross-Entropy")
+    if is_main_process:
+        print("Loss function: Binary Cross-Entropy")
 
     if is_main_process:
         print(f"Model config: time_steps={model_config['time_steps']}, focal_planes={model_config['focal_planes']}")
@@ -204,7 +199,7 @@ def build_model(model_config, device, is_distributed=False):
     return model
 
 
-def train_model(model, train_loader, val_loader, training_config, device, args, is_distributed=False):
+def train_model(model, train_loader, val_loader, training_config, device, args, is_distributed=False, train_labels=None):
     """Step 5: Model Training - Execute training pipeline"""
     is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
@@ -217,15 +212,15 @@ def train_model(model, train_loader, val_loader, training_config, device, args, 
         if is_main_process:
             print("Executing two-stage training...")
             print("\nStage 1: Training Transformer (VGG16 frozen)")
-        model = train_stage1(model, train_loader, val_loader, training_config, device)
+        model = train_stage1(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
 
         if is_main_process:
             print("\nStage 2: Fine-tuning with VGG16 unfrozen")
-        model = train_stage2(model, train_loader, val_loader, training_config, device)
+        model = train_stage2(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
     else:
         if is_main_process:
             print("Executing single-stage training...")
-        model = train_stage1(model, train_loader, val_loader, training_config, device)
+        model = train_stage1(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
 
     return model
 
@@ -359,12 +354,14 @@ def train_command(args):
             train_loader, val_loader, test_loader, labels = create_multi_focal_data_loaders(
                 multi_focal_df, embryo_to_label, data_config
             )
+            train_labels = labels  # Pass labels for auto focal_alpha calculation
         else:
             # Standard mode
             train_loader, val_loader, test_loader = prepare_data(data_config)
+            train_labels = None  # No labels available in standard mode
 
         model = build_model(model_config, device, is_distributed)
-        model = train_model(model, train_loader, val_loader, training_config, device, args, is_distributed)
+        model = train_model(model, train_loader, val_loader, training_config, device, args, is_distributed, train_labels=train_labels)
         metrics = evaluate_model(model, test_loader, device)
         save_final_model(model)
         summarize_results()
@@ -472,9 +469,6 @@ Examples:
 
   # Two-stage training (recommended)
   python main.py train --data_root /path/to/data --two_stage -c my_config.json
-
-  # With Focal Loss for imbalanced data
-  python main.py train --data_root /path/to/data --two_stage --use_focal_loss -c my_config.json
         """
     )
 
@@ -489,7 +483,6 @@ Examples:
     train_parser.add_argument('--data_root', type=str, required=True, help='Path to data root directory')
     train_parser.add_argument('--config_file', '-c', type=str, default=None, help='Path to config JSON file')
     train_parser.add_argument('--two_stage', action='store_true', help='Use two-stage training')
-    train_parser.add_argument('--use_focal_loss', action='store_true', help='Use Focal Loss for imbalanced data')
     train_parser.add_argument('--multi_focal', action='store_true', help='Use multi-focal multi-timepoint data mode')
     train_parser.add_argument('--selected_images_csv', type=str, default=None, help='Path to selected_image_paths.csv')
     train_parser.add_argument('--maindb_csv', type=str, default=None, help='Path to MainDB.csv')

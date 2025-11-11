@@ -13,20 +13,6 @@ import json
 from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, confusion_matrix
 
 
-class FocalLoss(nn.Module):
-    """Focal Loss for imbalanced classification"""
-    def __init__(self, gamma=2.0, alpha=0.25):
-        super(FocalLoss, self).__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-
-    def forward(self, inputs, targets):
-        bce_loss = F.binary_cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-        return focal_loss.mean()
-
-
 class EarlyStopping:
     """早停机制"""
     def __init__(self, patience=10, mode='max', delta=0):

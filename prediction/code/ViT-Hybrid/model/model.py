@@ -28,21 +28,33 @@ def _safe_load_state_dict(filepath):
     """
     安全地加载模型权重，处理模块导入冲突
     防止local models目录与torchvision.models的冲突
+    支持STORK_lzz_torch的自定义backbone模块
+
+    STORK保存的可能是整个模型对象，需要提取state_dict
     """
-    # 确保torchvision.models在sys.modules中
-    from torchvision import models as tv_models
-    if 'models' not in sys.modules:
-        sys.modules['models'] = tv_models
+    # 添加STORK_lzz_torch到import路径
+    stork_path = '/liaozizhuo/scripts/STORK_lzz_torch'
+    if stork_path not in sys.path:
+        sys.path.insert(0, stork_path)
 
     try:
-        # 使用weights_only=False来支持旧的pickle格式，但注意安全性
-        state_dict = torch.load(filepath, map_location='cpu', weights_only=False)
+        # 尝试加载STORK模型（包括backbone依赖）
+        loaded = torch.load(filepath, map_location='cpu', weights_only=False)
+
+        # 检查加载的是模型对象还是state_dict
+        if isinstance(loaded, dict):
+            # 是state_dict
+            state_dict = loaded
+        else:
+            # 是模型对象，提取state_dict
+            state_dict = loaded.state_dict()
+            print(f"[VGG16] 从模型对象中提取state_dict")
+
+        return state_dict
     except Exception as e:
         print(f"Error loading weights from {filepath}: {e}")
         print("Will initialize with random weights instead")
         return None
-
-    return state_dict
 
 
 class VGG16FeatureExtractor(nn.Module):

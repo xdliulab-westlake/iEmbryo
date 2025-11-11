@@ -18,7 +18,6 @@ from tqdm import tqdm
 from model.model import create_model
 from dataset.dataset import create_data_loaders
 from utils.utils import (
-    FocalLoss,
     EarlyStopping,
     calculate_metrics,
     save_checkpoint,
@@ -140,7 +139,7 @@ def validate(model, dataloader, criterion, device, print_cm=False):
     return avg_loss, metrics
 
 
-def train_stage1(model, train_loader, val_loader, config, device, print_cm=True):
+def train_stage1(model, train_loader, val_loader, config, device, print_cm=True, train_labels=None):
     """Stage 1: Train Transformer (VGG16 frozen)
 
     Args:
@@ -150,6 +149,7 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True)
         config: Training configuration
         device: Device to run on
         print_cm: Whether to print confusion matrices (default: True)
+        train_labels: Optional tensor of training labels for class weight calculation
     """
     log_print("\n" + "="*60)
     log_print("Stage 1: Training Transformer (VGG16 frozen)")
@@ -158,7 +158,7 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True)
     # Handle DataParallel wrapper
     model_for_params = model.module if hasattr(model, 'module') else model
 
-    criterion = nn.BCELoss() if not config.get('use_focal_loss') else FocalLoss()
+    criterion = nn.BCELoss()
     optimizer = optim.AdamW(
         model_for_params.parameters(),
         lr=config['learning_rate'],
@@ -220,7 +220,7 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True)
     return model
 
 
-def train_stage2(model, train_loader, val_loader, config, device, print_cm=True):
+def train_stage2(model, train_loader, val_loader, config, device, print_cm=True, train_labels=None):
     """Stage 2: Fine-tune with VGG16 unfrozen
 
     Args:
@@ -230,6 +230,7 @@ def train_stage2(model, train_loader, val_loader, config, device, print_cm=True)
         config: Training configuration
         device: Device to run on
         print_cm: Whether to print confusion matrices (default: True)
+        train_labels: Optional tensor of training labels for class weight calculation
     """
     log_print("\n" + "="*60)
     log_print("Stage 2: Fine-tuning with VGG16 unfrozen")
@@ -314,8 +315,6 @@ def main(args):
 
     if args.data_root:
         data_config['data_root'] = args.data_root
-    if args.use_focal_loss:
-        training_config['use_focal_loss'] = True
 
     log_print("\nCreating data loaders...")
     train_loader, val_loader, test_loader = create_data_loaders(
@@ -356,7 +355,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train ViT-Hybrid Model')
     parser.add_argument('--data_root', type=str, help='Path to data root directory')
     parser.add_argument('--two_stage', action='store_true', help='Use two-stage training')
-    parser.add_argument('--use_focal_loss', action='store_true', help='Use Focal Loss')
 
     args = parser.parse_args()
     main(args)

@@ -156,11 +156,23 @@ class TemporalAttentionPooling(nn.Module):
         super(TemporalAttentionPooling, self).__init__()
         self.d_model = d_model
 
-        # 学习注意力权重的方式1: 简单的全连接层
+        # 学习注意力权重的方式: 简单的全连接层，使用Xavier初始化
+        self.fc1 = nn.Linear(d_model, d_model // 2)
+        self.fc2 = nn.Linear(d_model // 2, 1)
+        self.relu = nn.ReLU()
+
+        # Xavier初始化以确保梯度流稳定
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
+
+        # 偏差初始化为小值而不是0，避免初期输出过小
+        nn.init.constant_(self.fc1.bias, 0.1)
+        nn.init.constant_(self.fc2.bias, 0.0)
+
         self.attention_fc = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, 1)
+            self.fc1,
+            self.relu,
+            self.fc2
         )
 
     def forward(self, x):

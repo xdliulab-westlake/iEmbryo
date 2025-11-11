@@ -957,7 +957,7 @@ def get_transforms(augment=False):
 
 def create_data_loaders(data_root, config):
     """
-    创建数据加载器
+    创建数据加载器（训练集使用下采样平衡）
 
     Args:
         data_root: 数据根目录
@@ -966,6 +966,9 @@ def create_data_loaders(data_root, config):
     Returns:
         train_loader, val_loader, test_loader
     """
+    from torch.utils.data import Subset
+    import random
+
     train_transform = get_transforms(augment=True)
     val_transform = get_transforms(augment=False)
 
@@ -991,12 +994,32 @@ def create_data_loaders(data_root, config):
         generator=torch.Generator().manual_seed(42)
     )
 
-    train_dataset.dataset.transform = train_transform
+    # 对训练集进行下采样平衡
+    train_indices = train_dataset.indices
+    train_labels = [full_dataset.labels[i] for i in train_indices]
+
+    poor_indices = [idx for idx, label in zip(train_indices, train_labels) if label == 0]
+    good_indices = [idx for idx, label in zip(train_indices, train_labels) if label == 1]
+
+    min_count = min(len(poor_indices), len(good_indices))
+
+    random.seed(42)
+    poor_sampled = random.sample(poor_indices, min_count) if len(poor_indices) > min_count else poor_indices
+    good_sampled = random.sample(good_indices, min_count) if len(good_indices) > min_count else good_indices
+
+    balanced_indices = poor_sampled + good_sampled
+    random.shuffle(balanced_indices)
+
+    print(f"Training set: {len(poor_indices)} Poor + {len(good_indices)} Good → "
+          f"{len(poor_sampled)} Poor + {len(good_sampled)} Good (balanced)")
+
+    train_dataset_balanced = Subset(full_dataset, balanced_indices)
+    train_dataset_balanced.dataset.transform = train_transform
     val_dataset.dataset.transform = val_transform
     test_dataset.dataset.transform = val_transform
 
     train_loader = DataLoader(
-        train_dataset,
+        train_dataset_balanced,
         batch_size=config.get('batch_size', 4),
         shuffle=True,
         num_workers=config.get('num_workers', 4),
@@ -1153,10 +1176,30 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config, ena
         random_state=42
     )
 
+    # 对训练集进行下采样平衡
+    import random
+    train_labels = labels[train_indices].numpy()
+    train_indices_list = list(train_indices)
+
+    poor_indices = [idx for idx, label in zip(train_indices_list, train_labels) if label == 0]
+    good_indices = [idx for idx, label in zip(train_indices_list, train_labels) if label == 1]
+
+    min_count = min(len(poor_indices), len(good_indices))
+
+    random.seed(42)
+    poor_sampled = random.sample(poor_indices, min_count) if len(poor_indices) > min_count else poor_indices
+    good_sampled = random.sample(good_indices, min_count) if len(good_indices) > min_count else good_indices
+
+    train_indices_balanced = poor_sampled + good_sampled
+    random.shuffle(train_indices_balanced)
+
+    print(f"Training set: {len(poor_indices)} Poor + {len(good_indices)} Good → "
+          f"{len(poor_sampled)} Poor + {len(good_sampled)} Good (balanced)")
+
     from torch.utils.data import Subset
 
-    # Create subsets using appropriate datasets
-    train_dataset = Subset(train_dataset_base, train_indices)
+    # Create subsets using appropriate datasets (训练集使用平衡后的索引)
+    train_dataset = Subset(train_dataset_base, train_indices_balanced)
     val_dataset = Subset(val_test_dataset_base, val_indices)
     test_dataset = Subset(val_test_dataset_base, test_indices)
 
