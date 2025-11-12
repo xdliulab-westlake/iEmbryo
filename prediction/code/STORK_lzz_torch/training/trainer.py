@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union, List
 import numpy as np
 from tqdm import tqdm
 
@@ -234,11 +234,23 @@ class STORKTrainer:
             else:
                 return nn.CrossEntropyLoss(weight=weight)
         elif loss_name == 'focal':
-            return FocalLoss(
-                alpha=train_config.get('focal_alpha', 0.25),
+            # Get class weights from config to apply per-class weighting
+            class_weights = train_config.get('class_weights', None)
+            alpha = class_weights if class_weights else train_config.get('focal_alpha', 0.25)
+
+            focal_loss = FocalLoss(
+                alpha=alpha,
                 gamma=train_config.get('focal_gamma', 2.0),
                 num_classes=2
             )
+
+            # Log the configuration
+            if class_weights:
+                print(f"FocalLoss使用class_weights: {class_weights}")
+            else:
+                print(f"FocalLoss使用scalar alpha: {alpha}")
+
+            return focal_loss
         else:
             raise ValueError(f"不支持的损失函数: {loss_name}")
 
@@ -536,19 +548,83 @@ class STORKTrainer:
 
 
 class FocalLoss(nn.Module):
-    """Focal Loss for addressing class imbalance"""
+    """Focal Loss for addressing class imbalance with per-class weighting
 
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, num_classes: int = 2):
+    Formula: FL(pt) = -alpha_t * (1-pt)^gamma * log(pt)
+
+    Where:
+    - alpha_t: per-class weight (selected based on target class)
+    - gamma: focusing parameter (typically 2.0)
+    - pt: probability of true class
+    """
+
+    def __init__(self,
+                 alpha: Union[float, List[float], torch.Tensor] = 0.25,
+                 gamma: float = 2.0,
+                 num_classes: int = 2,
+                 reduction: str = 'mean'):
+        """
+        Args:
+            alpha: Either scalar or list/tensor of per-class weights
+                   - Scalar: applies same weight to all classes (backward compatible)
+                   - List/Tensor: per-class weights [w0, w1, ...]
+            gamma: Focusing parameter (default 2.0)
+            num_classes: Number of classes (default 2)
+            reduction: 'mean', 'sum', or 'none'
+        """
         super().__init__()
-        self.alpha = alpha
         self.gamma = gamma
         self.num_classes = num_classes
+        self.reduction = reduction
+
+        # Handle alpha parameter - convert to per-class weights if needed
+        if isinstance(alpha, (list, tuple)):
+            self.alpha = torch.tensor(alpha, dtype=torch.float32)
+        elif isinstance(alpha, torch.Tensor):
+            self.alpha = alpha
+        elif isinstance(alpha, float):
+            # Scalar alpha - kept for backward compatibility
+            self.alpha = alpha
+        else:
+            # Fallback: uniform weights
+            self.alpha = torch.ones(num_classes, dtype=torch.float32)
 
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Focal Loss
+
+        Args:
+            inputs: Model logits (B, num_classes)
+            targets: Target class indices (B,)
+
+        Returns:
+            Focal loss (scalar if reduction='mean'/'sum', else (B,))
+        """
+        # Compute cross entropy loss (per-sample, no reduction)
         ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none')
+
+        # Compute pt: probability of true class
         pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        return focal_loss.mean()
+
+        # Apply focal term: (1-pt)^gamma
+        focal_weight = (1 - pt) ** self.gamma
+
+        # Apply class weighting if alpha is per-class
+        if isinstance(self.alpha, torch.Tensor) and self.alpha.numel() > 1:
+            # Per-class alpha: select weight based on target class
+            alpha_t = self.alpha.to(targets.device)[targets]
+            focal_loss = alpha_t * focal_weight * ce_loss
+        else:
+            # Scalar alpha (backward compatible)
+            focal_loss = self.alpha * focal_weight * ce_loss
+
+        # Apply reduction
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:  # 'none'
+            return focal_loss
 
 
 class LabelSmoothingCrossEntropy(nn.Module):
