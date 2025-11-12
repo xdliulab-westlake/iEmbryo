@@ -957,7 +957,7 @@ def get_transforms(augment=False):
 
 def create_data_loaders(data_root, config):
     """
-    创建数据加载器（训练集使用下采样平衡）
+    创建数据加载器（使用分层分割保持train/val/test的类别分布一致）
 
     Args:
         data_root: 数据根目录
@@ -968,6 +968,8 @@ def create_data_loaders(data_root, config):
     """
     from torch.utils.data import Subset
     import random
+    from sklearn.model_selection import StratifiedShuffleSplit
+    import numpy as np
 
     train_transform = get_transforms(augment=True)
     val_transform = get_transforms(augment=False)
@@ -984,25 +986,62 @@ def create_data_loaders(data_root, config):
     )
 
     total_size = len(full_dataset)
-    train_size = int(total_size * config.get('train_ratio', 0.8))
-    val_size = int(total_size * config.get('val_ratio', 0.1))
-    test_size = total_size - train_size - val_size
+    train_ratio = config.get('train_ratio', 0.7)
+    val_ratio = config.get('val_ratio', 0.15)
+    test_ratio = 1.0 - train_ratio - val_ratio
 
-    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-        full_dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(42)
+    # 使用分层分割保持类别分布一致
+    all_labels = np.array(full_dataset.labels)
+    all_indices = np.arange(total_size)
+
+    # 第一步：分割成 train+val 和 test
+    sss1 = StratifiedShuffleSplit(
+        n_splits=1,
+        test_size=test_ratio,
+        random_state=42
     )
+    train_val_indices, test_indices = next(sss1.split(all_indices, all_labels))
 
-    # 不进行下采样平衡，保留原始数据分布以使用加权损失处理类别不平衡
-    train_indices = train_dataset.indices
-    train_labels = [full_dataset.labels[i] for i in train_indices]
+    # 第二步：再从 train+val 中分割成 train 和 val
+    train_val_labels = all_labels[train_val_indices]
+    val_ratio_adjusted = val_ratio / (train_ratio + val_ratio)
+    sss2 = StratifiedShuffleSplit(
+        n_splits=1,
+        test_size=val_ratio_adjusted,
+        random_state=42
+    )
+    train_indices_local, val_indices_local = next(sss2.split(train_val_indices, train_val_labels))
+    train_indices = train_val_indices[train_indices_local]
+    val_indices = train_val_indices[val_indices_local]
 
-    poor_count = sum(1 for label in train_labels if label == 0)
-    good_count = sum(1 for label in train_labels if label == 1)
+    # 创建子数据集
+    train_dataset = Subset(full_dataset, train_indices)
+    val_dataset = Subset(full_dataset, val_indices)
+    test_dataset = Subset(full_dataset, test_indices)
 
-    print(f"\nTraining set: {poor_count} Poor + {good_count} Good (原始分布，保留所有样本)")
-    print(f"  注：将使用加权CrossEntropyLoss处理类别不平衡")
+    # 打印数据分布统计
+    train_labels = all_labels[train_indices]
+    val_labels = all_labels[val_indices]
+    test_labels = all_labels[test_indices]
+
+    train_poor = (train_labels == 0).sum()
+    train_good = (train_labels == 1).sum()
+    val_poor = (val_labels == 0).sum()
+    val_good = (val_labels == 1).sum()
+    test_poor = (test_labels == 0).sum()
+    test_good = (test_labels == 1).sum()
+
+    print(f"\n{'='*70}")
+    print(f"分层数据分割验证 (保持类别分布一致性)")
+    print(f"{'='*70}")
+    print(f"训练集: {train_poor:5d} Poor ({train_poor/(train_poor+train_good)*100:5.1f}%) + "
+          f"{train_good:5d} Good ({train_good/(train_poor+train_good)*100:5.1f}%)")
+    print(f"验证集: {val_poor:5d} Poor ({val_poor/(val_poor+val_good)*100:5.1f}%) + "
+          f"{val_good:5d} Good ({val_good/(val_poor+val_good)*100:5.1f}%)")
+    print(f"测试集: {test_poor:5d} Poor ({test_poor/(test_poor+test_good)*100:5.1f}%) + "
+          f"{test_good:5d} Good ({test_good/(test_poor+test_good)*100:5.1f}%)")
+    print(f"{'='*70}")
+    print(f"使用加权CrossEntropyLoss处理类别不平衡")
 
     train_dataset.dataset.transform = train_transform
     val_dataset.dataset.transform = val_transform
