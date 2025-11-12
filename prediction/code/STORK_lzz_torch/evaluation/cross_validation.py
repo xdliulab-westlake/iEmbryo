@@ -98,6 +98,18 @@ class CrossValidator:
         for fold, (train_idx, val_idx) in enumerate(kfold.split(range(len(dataset)), labels)):
             print(f"\n处理第 {fold + 1}/{self.n_folds} 折...")
 
+            # 记录该折的类别分布（用于验证分层）
+            train_fold_labels = labels[train_idx]
+            val_fold_labels = labels[val_idx]
+            train_counts = np.bincount(train_fold_labels)
+            val_counts = np.bincount(val_fold_labels)
+
+            print(f"  Fold {fold + 1} 类别分布:")
+            print(f"    训练集: Class 0: {train_counts[0]:5d}, Class 1: {train_counts[1]:5d} "
+                  f"(比例: {train_counts[1]/(train_counts[0]+train_counts[1])*100:5.1f}%)")
+            print(f"    验证集: Class 0: {val_counts[0]:5d}, Class 1: {val_counts[1]:5d} "
+                  f"(比例: {val_counts[1]/(val_counts[0]+val_counts[1])*100:5.1f}%)")
+
             # 运行单折验证
             fold_result = self._run_single_fold(
                 dataset, train_idx, val_idx, fold, create_model_fn

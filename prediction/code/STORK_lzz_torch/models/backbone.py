@@ -435,20 +435,26 @@ class BackboneModel(nn.Module):
             param.requires_grad = False
         print("骨干网络已冻结，仅训练分类头")
 
-    def forward(self, x: torch.Tensor, labels: torch.Tensor = None) -> torch.Tensor:
-        """前向传播"""
-        # GPU数据增强（如果启用且在训练模式）
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """前向传播 - 总是返回logits
+
+        Args:
+            x: 输入图像 [B, C, H, W]
+
+        Returns:
+            logits [B, num_classes]
+
+        Note:
+            GPU数据增强(MixUp/CutMix)在训练循环中处理，
+            不在forward方法中进行，以保持接口一致性。
+            参考: training/trainer.py:train_epoch()
+        """
+        # GPU数据增强（仅像素级增强，不包括MixUp/CutMix）
         if self.gpu_aug is not None and self.training:
-            if labels is not None:
-                # 有标签时，可能会应用MixUp/CutMix
-                x, labels_a, labels_b, lam = self.gpu_aug(x, labels)
-                features = self.backbone(x)
-                output = self.classifier(features)
-                return output, labels_a, labels_b, lam
-            else:
-                x = self.gpu_aug(x)
+            x = self.gpu_aug(x)
 
         # 特征提取和分类
+        # 总是返回logits张量
         features = self.backbone(x)
         output = self.classifier(features)
         return output

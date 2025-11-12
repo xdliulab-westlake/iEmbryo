@@ -23,6 +23,51 @@ def is_main_process() -> bool:
     return not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
 
 
+def verify_class_distribution(labels_list: List[np.ndarray],
+                            split_names: List[str],
+                            detailed: bool = True) -> Dict[str, Dict]:
+    """验证各分割中的类别分布是否保持一致
+
+    Args:
+        labels_list: 标签数组列表
+        split_names: 分割名称列表
+        detailed: 是否打印详细信息
+
+    Returns:
+        分布统计字典
+    """
+    if not is_main_process():
+        return {}
+
+    results = {}
+
+    if detailed:
+        print(f"\n{'='*70}")
+        print(f"类别分布验证 (分层检查)")
+        print(f"{'='*70}")
+
+    for labels, name in zip(labels_list, split_names):
+        counts = np.bincount(labels)
+        total = len(labels)
+        ratios = counts / total
+
+        results[name] = {
+            'counts': counts.tolist(),
+            'ratios': ratios.tolist(),
+            'total': total
+        }
+
+        if detailed:
+            ratio_str = " | ".join([f"Class {i}: {count:5d} ({ratio*100:5.1f}%)"
+                                   for i, (count, ratio) in enumerate(zip(counts, ratios))])
+            print(f"{name:20s}: {ratio_str}")
+
+    if detailed:
+        print(f"{'='*70}\n")
+
+    return results
+
+
 def optimized_preprocess_single_image(args: Tuple) -> np.ndarray:
     """
     优化的单图像预处理函数（专为多进程设计）
@@ -439,6 +484,12 @@ class STORKDataLoader:
             print(f"数据分割完成:")
             print(f"  训练集: {len(train_paths)} ({len(train_paths)/len(image_paths)*100:.1f}%)")
             print(f"  测试集: {len(test_paths)} ({len(test_paths)/len(image_paths)*100:.1f}%)")
+
+            # 验证分层：确保类别分布被保持
+            verify_class_distribution(
+                [labels, train_labels, test_labels],
+                ["Original", "Train+Val", "Test"]
+            )
 
         return train_paths, train_labels, test_paths, test_labels
 
