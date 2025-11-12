@@ -3,7 +3,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
 [![DeepSpeed](https://img.shields.io/badge/DeepSpeed-0.9+-green.svg)](https://deepspeed.ai/)
-[![Version](https://img.shields.io/badge/version-v2.1-green.svg)](https://github.com/your-repo/stork)
+[![Version](https://img.shields.io/badge/version-v2.2-brightgreen.svg)](https://github.com/your-repo/stork)
 
 STORK (Specialized Training and Optimization for Reproductive Knowledge) PyTorch版本是一个专为胚胎可行性二分类设计的深度学习系统。该系统集成了专业的胚胎图像预处理、多模型支持、分布式训练优化和全面的评估可视化功能。
 
@@ -315,16 +315,31 @@ tensorboard --logdir logs/tensorboard --port 6006
 
 ### 损失函数
 
-**Binary Cross-Entropy（默认）：** 适用于样本平衡的情况
+**CrossEntropyLoss（带类别权重）：** 标准多分类损失，支持自动或手动类别权重
 ```
-L_BCE = -[y·log(p) + (1-y)·log(1-p)]
+L_CE = -Σ weight[y] · log(p[y])
+自动计算类别权重: w[c] = total_samples / (num_classes * count[c])
 ```
 
-**Focal Loss（可选）：** 处理类别不平衡
+**Focal Loss（v2.2新增）：** 处理类别不平衡，特别适合胚胎图像分类
 ```
-L_Focal = -α·(1-pt)^γ·log(pt)
-参数：γ=2.0, α=0.25
+L_Focal = -α_t·(1-pt)^γ·log(pt)
+参数：
+  - α_t: 动态类别权重，从config自动计算
+  - γ: 聚焦参数（默认2.0）
+  - pt: 模型对正确类别的预测概率
+
+示例配置：
+  loss: "focal"
+  focal_alpha: 0.25      # 标量alpha（向后兼容）
+  focal_gamma: 2.0       # 聚焦参数
+  class_weights: [0.669, 1.978]  # 自动应用的类别权重
 ```
+
+**关键改进（v2.2）：**
+- ✅ FocalLoss现在支持**动态类别权重**，自动从config.class_weights读取
+- ✅ 每个类别使用独立的α权重：Class 0 → 0.669, Class 1 → 1.978
+- ✅ 22个单元测试验证FocalLoss的正确性
 
 ---
 
@@ -337,6 +352,7 @@ L_Focal = -α·(1-pt)^γ·log(pt)
 - **渐进式缓存** - 智能缓存机制，第一epoch边训练边缓存，后续epoch显著加速
 - **按需加载** - 避免内存溢出，支持大规模数据集训练
 - **动态数据增强** - 训练时实时应用随机变换，提升模型泛化能力
+- **分层数据分割（v2.2新增）** - 自动验证train/val/test分割的类别分布一致性
 
 ### 多模型支持
 
@@ -472,6 +488,35 @@ STORK_lzz_torch/
 
 ## 十二、版本历史
 
+### v2.2 (2025-01) - 代码质量优化版本
+**关键改进（代码审查和fixes）：**
+
+**✨ Fix #1: 代码清理**
+- 移除了多余的STORKDataLoader重复定义（~190行死代码）
+- 统一使用data/parallel_processing.py中的实现
+
+**✨ Fix #2: FocalLoss类权重优化**
+- FocalLoss现在支持动态类别权重，自动从config.class_weights读取
+- 每个类别独立的α权重应用：Class 0 → 0.669, Class 1 → 1.978
+- 22个单元测试验证正确性，全部通过 ✅
+
+**✨ Fix #3: 前向传播接口统一**
+- forward()方法现在始终返回logits张量（Tensor[B, num_classes]）
+- MixUp/CutMix逻辑从forward()移出，在训练循环中单独处理
+- 改进了代码的关注点分离和类型安全性
+
+**✨ Fix #4: 分层验证和日志增强**
+- 添加了verify_class_distribution()验证工具函数
+- train/val/test分割时自动验证并记录类别分布
+- 交叉验证时记录每个fold的类别分布
+- 11个单元测试验证分层正确性，全部通过 ✅
+
+**🎯 总体成果：**
+- 📈 33个新单元测试（所有通过）
+- 🔍 完整的代码审查和文档（4个详细分析文档）
+- 🧹 清理了~190行死代码
+- 💪 改进了代码质量和可维护性
+
 ### v2.1 (2024-12)
 **关键改进：**
 - ✨ 智能缓存系统 - 跨运行缓存复用，99%时间节省
@@ -488,4 +533,4 @@ STORK_lzz_torch/
 
 ---
 
-**STORK PyTorch v2.1 - 为胚胎分类优化，集成最新深度学习技术和专业医学图像处理算法。** 🧬✨🚀
+**STORK PyTorch v2.2 - 为胚胎分类优化，集成最新深度学习技术、专业医学图像处理算法和代码质量最佳实践。** 🧬✨🚀
