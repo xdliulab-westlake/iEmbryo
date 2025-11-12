@@ -106,6 +106,11 @@ class STORKTrainer:
         if self.use_amp and not self.use_deepspeed:
             self.scaler = GradScaler()
 
+        # 初始化MixUp/CutMix增强（在训练循环中使用）
+        self.mixup = None
+        self.cutmix = None
+        self._init_augmentations()
+
         print(f"训练器初始化完成: 设备={self.device}, 分布式={self.is_distributed}, DeepSpeed={self.use_deepspeed}, 混合精度={self.use_amp}")
 
     def _setup_deepspeed(self):
@@ -133,6 +138,44 @@ class STORKTrainer:
 
         # 学习率调度器
         self.lr_scheduler = self._create_scheduler()
+
+    def _init_augmentations(self):
+        """初始化MixUp/CutMix增强（在训练循环中使用）"""
+        try:
+            from data.gpu_transforms import MixUpGPU, CutMixGPU
+        except ImportError:
+            return
+
+        aug_config = self.config.get('augmentation', {})
+
+        if aug_config.get('mixup_alpha', 0) > 0:
+            self.mixup = MixUpGPU(alpha=aug_config['mixup_alpha'])
+            print(f"MixUp已启用: alpha={aug_config['mixup_alpha']}")
+
+        if aug_config.get('cutmix_alpha', 0) > 0:
+            self.cutmix = CutMixGPU(alpha=aug_config['cutmix_alpha'])
+            print(f"CutMix已启用: alpha={aug_config['cutmix_alpha']}")
+
+    def _apply_mixup_cutmix(self, data: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """应用MixUp或CutMix增强
+
+        Args:
+            data: 输入图像 [B, C, H, W]
+            target: 目标标签 [B]
+
+        Returns:
+            (mixed_data, target_a, target_b, lam)
+            其中 lam 是混合系数，用于计算: loss = lam*loss(y_a) + (1-lam)*loss(y_b)
+        """
+        if self.model.training and (self.mixup is not None or self.cutmix is not None):
+            # 随机选择MixUp或CutMix
+            if torch.rand(1).item() < 0.5 and self.mixup is not None:
+                return self.mixup(data, target)
+            elif self.cutmix is not None:
+                return self.cutmix(data, target)
+
+        # 如果没有启用，返回原始数据（lam=1.0表示只使用第一个标签）
+        return data, target, target, 1.0
 
 
     def _create_deepspeed_config(self) -> Dict:
@@ -270,10 +313,19 @@ class STORKTrainer:
         for batch_idx, (data, target) in enumerate(pbar):
             data, target = data.to(self.device), target.to(self.device)
 
+            # 应用MixUp/CutMix增强（在前向传播之前）
+            data, target_a, target_b, lam = self._apply_mixup_cutmix(data, target)
+
             if self.use_deepspeed:
                 # DeepSpeed训练步骤
                 outputs = self.model_engine(data)
-                loss = self.criterion(outputs, target)
+                # 计算混合标签的损失
+                if lam != 1.0:
+                    loss_a = self.criterion(outputs, target_a)
+                    loss_b = self.criterion(outputs, target_b)
+                    loss = lam * loss_a + (1 - lam) * loss_b
+                else:
+                    loss = self.criterion(outputs, target_a)
                 self.model_engine.backward(loss)
                 self.model_engine.step()
             else:
@@ -283,17 +335,29 @@ class STORKTrainer:
                 if self.use_amp:
                     with autocast():
                         outputs = self.model(data)
-                        loss = self.criterion(outputs, target)
+                        # 计算混合标签的损失
+                        if lam != 1.0:
+                            loss_a = self.criterion(outputs, target_a)
+                            loss_b = self.criterion(outputs, target_b)
+                            loss = lam * loss_a + (1 - lam) * loss_b
+                        else:
+                            loss = self.criterion(outputs, target_a)
                     self.scaler.scale(loss).backward()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
                     outputs = self.model(data)
-                    loss = self.criterion(outputs, target)
+                    # 计算混合标签的损失
+                    if lam != 1.0:
+                        loss_a = self.criterion(outputs, target_a)
+                        loss_b = self.criterion(outputs, target_b)
+                        loss = lam * loss_a + (1 - lam) * loss_b
+                    else:
+                        loss = self.criterion(outputs, target_a)
                     loss.backward()
                     self.optimizer.step()
 
-            # 统计
+            # 统计（使用原始标签计算准确率）
             total_loss += loss.item()
             _, predicted = outputs.max(1)
             total += target.size(0)
