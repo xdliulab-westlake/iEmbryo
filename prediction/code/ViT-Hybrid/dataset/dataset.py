@@ -994,32 +994,22 @@ def create_data_loaders(data_root, config):
         generator=torch.Generator().manual_seed(42)
     )
 
-    # 对训练集进行下采样平衡
+    # 不进行下采样平衡，保留原始数据分布以使用加权损失处理类别不平衡
     train_indices = train_dataset.indices
     train_labels = [full_dataset.labels[i] for i in train_indices]
 
-    poor_indices = [idx for idx, label in zip(train_indices, train_labels) if label == 0]
-    good_indices = [idx for idx, label in zip(train_indices, train_labels) if label == 1]
+    poor_count = sum(1 for label in train_labels if label == 0)
+    good_count = sum(1 for label in train_labels if label == 1)
 
-    min_count = min(len(poor_indices), len(good_indices))
+    print(f"\nTraining set: {poor_count} Poor + {good_count} Good (原始分布，保留所有样本)")
+    print(f"  注：将使用加权CrossEntropyLoss处理类别不平衡")
 
-    random.seed(42)
-    poor_sampled = random.sample(poor_indices, min_count) if len(poor_indices) > min_count else poor_indices
-    good_sampled = random.sample(good_indices, min_count) if len(good_indices) > min_count else good_indices
-
-    balanced_indices = poor_sampled + good_sampled
-    random.shuffle(balanced_indices)
-
-    print(f"Training set: {len(poor_indices)} Poor + {len(good_indices)} Good → "
-          f"{len(poor_sampled)} Poor + {len(good_sampled)} Good (balanced)")
-
-    train_dataset_balanced = Subset(full_dataset, balanced_indices)
-    train_dataset_balanced.dataset.transform = train_transform
+    train_dataset.dataset.transform = train_transform
     val_dataset.dataset.transform = val_transform
     test_dataset.dataset.transform = val_transform
 
     train_loader = DataLoader(
-        train_dataset_balanced,
+        train_dataset,
         batch_size=config.get('batch_size', 4),
         shuffle=True,
         num_workers=config.get('num_workers', 4),
@@ -1176,30 +1166,21 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config, ena
         random_state=42
     )
 
-    # 对训练集进行下采样平衡
+    # 不进行下采样平衡，保留原始数据分布以使用加权损失处理类别不平衡
     import random
     train_labels = labels[train_indices].numpy()
     train_indices_list = list(train_indices)
 
-    poor_indices = [idx for idx, label in zip(train_indices_list, train_labels) if label == 0]
-    good_indices = [idx for idx, label in zip(train_indices_list, train_labels) if label == 1]
+    poor_count = sum(1 for label in train_labels if label == 0)
+    good_count = sum(1 for label in train_labels if label == 1)
 
-    min_count = min(len(poor_indices), len(good_indices))
-
-    random.seed(42)
-    poor_sampled = random.sample(poor_indices, min_count) if len(poor_indices) > min_count else poor_indices
-    good_sampled = random.sample(good_indices, min_count) if len(good_indices) > min_count else good_indices
-
-    train_indices_balanced = poor_sampled + good_sampled
-    random.shuffle(train_indices_balanced)
-
-    print(f"Training set: {len(poor_indices)} Poor + {len(good_indices)} Good → "
-          f"{len(poor_sampled)} Poor + {len(good_sampled)} Good (balanced)")
+    print(f"Training set: {poor_count} Poor + {good_count} Good (原始分布，保留所有样本)")
+    print(f"  注：将使用加权CrossEntropyLoss处理类别不平衡")
 
     from torch.utils.data import Subset
 
-    # Create subsets using appropriate datasets (训练集使用平衡后的索引)
-    train_dataset = Subset(train_dataset_base, train_indices_balanced)
+    # Create subsets using appropriate datasets (训练集保留所有样本)
+    train_dataset = Subset(train_dataset_base, train_indices_list)
     val_dataset = Subset(val_test_dataset_base, val_indices)
     test_dataset = Subset(val_test_dataset_base, test_indices)
 

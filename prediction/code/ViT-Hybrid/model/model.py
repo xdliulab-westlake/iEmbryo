@@ -26,34 +26,86 @@ PRETRAINED_PATHS = {
 
 def _safe_load_state_dict(filepath):
     """
-    安全地加载模型权重，处理模块导入冲突
-    防止local models目录与torchvision.models的冲突
-    支持STORK_lzz_torch的自定义backbone模块
+    安全地加载模型权重，处理模块导入冲突和键名映射
 
-    STORK保存的可能是整个模型对象，需要提取state_dict
+    STORK模型结构:
+      - backbone.0.* -> VGG16 features.*
+      - backbone.3.* -> VGG16 classifier.* (前两个FC层)
+      - classifier.* -> STORK自定义分类器(忽略)
+
+    此函数将STORK格式转换为标准VGG16格式
     """
-    # 添加STORK_lzz_torch到import路径
+    # 检查是否存在预先映射好的文件
+    if filepath.endswith('.pth'):
+        mapped_filepath = filepath.replace('.pth', '_mapped.pth')
+        if os.path.exists(mapped_filepath):
+            print(f"[VGG16] 加载预映射文件: {mapped_filepath}")
+            try:
+                return torch.load(mapped_filepath, map_location='cpu', weights_only=False)
+            except:
+                print(f"[VGG16] 预映射文件加载失败，尝试从原始文件映射")
+
+    # 添加STORK路径以便导入models模块
     stork_path = '/liaozizhuo/scripts/STORK_lzz_torch'
-    if stork_path not in sys.path:
+    if os.path.exists(stork_path) and stork_path not in sys.path:
         sys.path.insert(0, stork_path)
+        print(f"[VGG16] 添加路径: {stork_path}")
 
     try:
-        # 尝试加载STORK模型（包括backbone依赖）
+        # 加载STORK模型
+        print(f"[VGG16] 加载STORK模型: {filepath}")
         loaded = torch.load(filepath, map_location='cpu', weights_only=False)
 
-        # 检查加载的是模型对象还是state_dict
+        # 提取state_dict
         if isinstance(loaded, dict):
-            # 是state_dict
             state_dict = loaded
         else:
-            # 是模型对象，提取state_dict
             state_dict = loaded.state_dict()
-            print(f"[VGG16] 从模型对象中提取state_dict")
+            print(f"[VGG16] 从模型对象提取state_dict")
 
-        return state_dict
+        # 键名映射
+        mapped_state_dict = {}
+        stats = {'backbone0': 0, 'backbone3': 0, 'other': 0}
+
+        for key, value in state_dict.items():
+            if key.startswith('backbone.0.'):
+                # VGG16 features层
+                new_key = key.replace('backbone.0.', 'features.')
+                mapped_state_dict[new_key] = value
+                stats['backbone0'] += 1
+            elif key.startswith('backbone.3.'):
+                # VGG16 classifier前两层 (FC 4096)
+                new_key = key.replace('backbone.3.', 'classifier.')
+                mapped_state_dict[new_key] = value
+                stats['backbone3'] += 1
+            elif key.startswith('classifier.'):
+                # STORK自定义分类器，跳过
+                pass
+            else:
+                # 其他参数保持原样
+                mapped_state_dict[key] = value
+                stats['other'] += 1
+
+        total_mapped = stats['backbone0'] + stats['backbone3']
+        if total_mapped > 0:
+            print(f"[VGG16] 成功映射 {total_mapped} 个参数:")
+            print(f"        features: {stats['backbone0']}, classifier: {stats['backbone3']}")
+
+            # 检查权重统计
+            if 'features.0.weight' in mapped_state_dict:
+                w = mapped_state_dict['features.0.weight']
+                print(f"        features.0 std={w.std().item():.4f}")
+
+            return mapped_state_dict
+        else:
+            print(f"[VGG16] 警告: 没有找到backbone参数，使用原始state_dict")
+            return state_dict
+
     except Exception as e:
-        print(f"Error loading weights from {filepath}: {e}")
-        print("Will initialize with random weights instead")
+        print(f"[VGG16] 加载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        print("[VGG16] 将使用随机初始化权重")
         return None
 
 
@@ -236,15 +288,19 @@ class ViTHybridModel(nn.Module):
         print("[Model] 使用注意力时间池化")
         self.temporal_pooling = TemporalAttentionPooling(d_model)
 
-        # 分类头：输入d_model维特征，输出二分类概率
+        # 分类头：输入d_model维特征，输出二分类logits（无激活函数）
+        # 使用CrossEntropyLoss时，不需要最后的Sigmoid或Softmax
         self.classifier = nn.Sequential(
             nn.Dropout(0.5),
             nn.Linear(d_model, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(512, 1),
-            nn.Sigmoid()
+            nn.Linear(512, 2)  # 2个输出：[Poor, Good]的logits
         )
+
+        # 初始化分类头最后一层
+        nn.init.xavier_uniform_(self.classifier[4].weight, gain=0.1)
+        nn.init.constant_(self.classifier[4].bias, 0.0)
 
     def forward(self, x, return_attention_weights=False):
         """

@@ -53,7 +53,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, print_cm=Fa
     Args:
         model: The model to train
         dataloader: Training data loader
-        criterion: Loss function
+        criterion: Loss function (CrossEntropyLoss with weights)
         optimizer: Optimizer
         device: Device to run on
         print_cm: Whether to print confusion matrix (default: False)
@@ -68,17 +68,22 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, print_cm=Fa
 
     for batch_idx, (inputs, labels) in enumerate(iterator):
         inputs = inputs.to(device)
-        labels = labels.to(device).unsqueeze(1)
+        labels = labels.to(device).long()  # Convert to int64 for CrossEntropyLoss
 
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+        logits = model(inputs)  # (batch, 2)
+        loss = criterion(logits, labels)
 
         loss.backward()
+        # 梯度裁剪：防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         total_loss += loss.item()
-        all_preds.extend(outputs.detach().cpu().numpy())
+
+        # Convert logits to probabilities for metrics calculation
+        probs = torch.softmax(logits, dim=1)[:, 1]  # Get probability of class 1 (Good)
+        all_preds.extend(probs.detach().cpu().numpy())
         all_labels.extend(labels.detach().cpu().numpy())
 
         # Update progress bar with loss
@@ -101,7 +106,7 @@ def validate(model, dataloader, criterion, device, print_cm=False):
     Args:
         model: The model to validate
         dataloader: Validation data loader
-        criterion: Loss function
+        criterion: Loss function (CrossEntropyLoss with weights)
         device: Device to run on
         print_cm: Whether to print confusion matrix (default: False)
     """
@@ -116,13 +121,16 @@ def validate(model, dataloader, criterion, device, print_cm=False):
     with torch.no_grad():
         for inputs, labels in iterator:
             inputs = inputs.to(device)
-            labels = labels.to(device).unsqueeze(1)
+            labels = labels.to(device).long()  # Convert to int64 for CrossEntropyLoss
 
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            logits = model(inputs)  # (batch, 2)
+            loss = criterion(logits, labels)
 
             total_loss += loss.item()
-            all_preds.extend(outputs.cpu().numpy())
+
+            # Convert logits to probabilities for metrics calculation
+            probs = torch.softmax(logits, dim=1)[:, 1]  # Get probability of class 1 (Good)
+            all_preds.extend(probs.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
             # Update progress bar
@@ -158,7 +166,27 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
     # Handle DataParallel wrapper
     model_for_params = model.module if hasattr(model, 'module') else model
 
-    criterion = nn.BCELoss()
+    # Calculate class weights from training data
+    if train_labels is not None:
+        # Count classes
+        train_labels_np = train_labels.cpu().numpy() if isinstance(train_labels, torch.Tensor) else train_labels
+        num_class_0 = (train_labels_np == 0).sum()
+        num_class_1 = (train_labels_np == 1).sum()
+        total = len(train_labels_np)
+
+        # Calculate weights: weight = total / (num_classes * num_samples_per_class)
+        weight_0 = total / (2 * num_class_0) if num_class_0 > 0 else 1.0
+        weight_1 = total / (2 * num_class_1) if num_class_1 > 0 else 1.0
+        class_weights = torch.tensor([weight_0, weight_1], dtype=torch.float32).to(device)
+
+        log_print(f"\nClass distribution in training set:")
+        log_print(f"  Class 0 (Poor): {num_class_0} samples, weight={weight_0:.4f}")
+        log_print(f"  Class 1 (Good): {num_class_1} samples, weight={weight_1:.4f}")
+    else:
+        class_weights = None
+        log_print("\nWarning: No training labels provided, using equal class weights")
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(
         model_for_params.parameters(),
         lr=config['learning_rate'],
@@ -240,7 +268,27 @@ def train_stage2(model, train_loader, val_loader, config, device, print_cm=True,
     model_for_params = model.module if hasattr(model, 'module') else model
     model_for_params.unfreeze_vgg16()
 
-    criterion = nn.BCELoss()
+    # Calculate class weights from training data
+    if train_labels is not None:
+        # Count classes
+        train_labels_np = train_labels.cpu().numpy() if isinstance(train_labels, torch.Tensor) else train_labels
+        num_class_0 = (train_labels_np == 0).sum()
+        num_class_1 = (train_labels_np == 1).sum()
+        total = len(train_labels_np)
+
+        # Calculate weights: weight = total / (num_classes * num_samples_per_class)
+        weight_0 = total / (2 * num_class_0) if num_class_0 > 0 else 1.0
+        weight_1 = total / (2 * num_class_1) if num_class_1 > 0 else 1.0
+        class_weights = torch.tensor([weight_0, weight_1], dtype=torch.float32).to(device)
+
+        log_print(f"\nClass distribution in training set:")
+        log_print(f"  Class 0 (Poor): {num_class_0} samples, weight={weight_0:.4f}")
+        log_print(f"  Class 1 (Good): {num_class_1} samples, weight={weight_1:.4f}")
+    else:
+        class_weights = None
+        log_print("\nWarning: No training labels provided, using equal class weights")
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(
         model_for_params.parameters(),
         lr=config['learning_rate'] * 0.1,
@@ -326,6 +374,14 @@ def main(args):
     if is_main_process():
         print_dataset_distribution(train_loader, val_loader, test_loader)
 
+    # Extract training labels for class weight calculation
+    log_print("\nExtracting training labels for class weight calculation...")
+    train_labels_list = []
+    for _, labels in train_loader:
+        train_labels_list.extend(labels.numpy())
+    train_labels = torch.tensor(train_labels_list, dtype=torch.float32)
+    log_print(f"Extracted {len(train_labels)} training labels")
+
     log_print("\nBuilding model...")
     model = create_model(model_config).to(device)
 
@@ -334,13 +390,13 @@ def main(args):
     log_print(f"Trainable parameters: {params['trainable']:,}")
 
     if args.two_stage:
-        model = train_stage1(model, train_loader, val_loader, training_config, device)
-        model = train_stage2(model, train_loader, val_loader, training_config, device)
+        model = train_stage1(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
+        model = train_stage2(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
     else:
         log_print("\n" + "="*60)
         log_print("Single Stage Training")
         log_print("="*60)
-        model = train_stage1(model, train_loader, val_loader, training_config, device)
+        model = train_stage1(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
 
     log_print("\nTraining completed")
 

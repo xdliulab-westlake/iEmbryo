@@ -24,9 +24,9 @@ class ModelConfig:
 
 class TrainingConfig:
     """训练配置"""
-    BATCH_SIZE = 4
+    BATCH_SIZE = 8  # 增大batch size提高稳定性（4→8）
     EPOCHS = 100
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 5e-5  # 降低学习率（1e-4→5e-5）
     WEIGHT_DECAY = 1e-5
 
     TRAIN_RATIO = 0.7
