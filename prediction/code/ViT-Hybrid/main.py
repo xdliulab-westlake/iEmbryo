@@ -245,8 +245,10 @@ def evaluate_model(model, test_loader, device):
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs = inputs.to(device)
-            outputs = model(inputs)
-            all_preds.extend(outputs.cpu().numpy())
+            logits = model(inputs)  # Returns (batch, 2) raw logits
+            # Convert logits to probabilities for class 1 (Good)
+            probs = torch.softmax(logits, dim=1)[:, 1]
+            all_preds.extend(probs.cpu().numpy())
             all_labels.extend(labels.numpy())
 
     all_preds = np.array(all_preds)

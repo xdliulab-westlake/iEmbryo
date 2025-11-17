@@ -13,6 +13,28 @@ import json
 from sklearn.metrics import roc_auc_score, precision_recall_fscore_support, confusion_matrix
 
 
+def _remove_module_prefix(state_dict):
+    """Remove 'module.' prefix from state_dict keys (for DataParallel models)"""
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            new_state_dict[key[7:]] = value  # Remove 'module.' prefix
+        else:
+            new_state_dict[key] = value
+    return new_state_dict
+
+
+def _add_module_prefix(state_dict):
+    """Add 'module.' prefix to state_dict keys (for DataParallel models)"""
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if not key.startswith('module.'):
+            new_state_dict['module.' + key] = value
+        else:
+            new_state_dict[key] = value
+    return new_state_dict
+
+
 class EarlyStopping:
     """早停机制"""
     def __init__(self, patience=10, mode='max', delta=0):
@@ -25,12 +47,20 @@ class EarlyStopping:
         self.best_model_state = None
 
     def __call__(self, score, model):
+        # Get the unwrapped model state_dict
+        if hasattr(model, 'module'):
+            # DataParallel wrapped model
+            state_dict = model.module.state_dict()
+        else:
+            # Regular model
+            state_dict = model.state_dict()
+
         if self.best_score is None:
             self.best_score = score
-            self.best_model_state = model.state_dict()
+            self.best_model_state = state_dict
         elif self._is_improved(score):
             self.best_score = score
-            self.best_model_state = model.state_dict()
+            self.best_model_state = state_dict
             self.counter = 0
         else:
             self.counter += 1
