@@ -298,9 +298,11 @@ class ViTHybridModel(nn.Module):
             nn.Linear(512, 2)  # 2个输出：[Poor, Good]的logits
         )
 
-        # 初始化分类头最后一层
-        nn.init.xavier_uniform_(self.classifier[4].weight, gain=0.1)
-        nn.init.constant_(self.classifier[4].bias, 0.0)
+        # 初始化分类头所有线性层（gain=1.0确保权重有足够的方差）
+        for idx, module in enumerate(self.classifier):
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, gain=1.0)
+                nn.init.constant_(module.bias, 0.0)
 
     def forward(self, x, return_attention_weights=False):
         """
