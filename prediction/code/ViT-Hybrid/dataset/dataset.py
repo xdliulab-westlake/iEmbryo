@@ -1014,11 +1014,6 @@ def create_data_loaders(data_root, config):
     train_indices = train_val_indices[train_indices_local]
     val_indices = train_val_indices[val_indices_local]
 
-    # 创建子数据集
-    train_dataset = Subset(full_dataset, train_indices)
-    val_dataset = Subset(full_dataset, val_indices)
-    test_dataset = Subset(full_dataset, test_indices)
-
     # 打印数据分布统计
     train_labels = all_labels[train_indices]
     val_labels = all_labels[val_indices]
@@ -1043,9 +1038,34 @@ def create_data_loaders(data_root, config):
     print(f"{'='*70}")
     print(f"使用加权CrossEntropyLoss处理类别不平衡")
 
-    train_dataset.dataset.transform = train_transform
-    val_dataset.dataset.transform = val_transform
-    test_dataset.dataset.transform = val_transform
+    # Create separate dataset instances for train/val/test with different transforms
+    # to avoid transform conflicts when using shared indices
+    train_full_dataset = EmbryoDataset(
+        data_root=data_root,
+        score_dict_path=config.get('score_dict_path'),
+        time_steps=config.get('time_steps', 33),
+        focal_planes=config.get('focal_planes', 11),
+        image_size=config.get('image_size', 224),
+        apply_petri_crop=config.get('apply_petri_crop', True),
+        apply_center_crop=config.get('apply_center_crop', True),
+        transform=train_transform
+    )
+
+    val_full_dataset = EmbryoDataset(
+        data_root=data_root,
+        score_dict_path=config.get('score_dict_path'),
+        time_steps=config.get('time_steps', 33),
+        focal_planes=config.get('focal_planes', 11),
+        image_size=config.get('image_size', 224),
+        apply_petri_crop=config.get('apply_petri_crop', True),
+        apply_center_crop=config.get('apply_center_crop', True),
+        transform=val_transform
+    )
+
+    # 创建子数据集
+    train_dataset = Subset(train_full_dataset, train_indices)
+    val_dataset = Subset(val_full_dataset, val_indices)
+    test_dataset = Subset(val_full_dataset, test_indices)
 
     train_loader = DataLoader(
         train_dataset,

@@ -139,6 +139,14 @@ def validate(model, dataloader, criterion, device, print_cm=False):
     avg_loss = total_loss / len(dataloader)
     all_preds_flat = np.array(all_preds).flatten()
     all_labels_flat = np.array(all_labels).flatten()
+
+    # Debug: Print probability statistics
+    if print_cm and is_main_process():
+        log_print(f"\n  Probability statistics (class 1 - Good):")
+        log_print(f"    Mean: {all_preds_flat.mean():.4f}, Std: {all_preds_flat.std():.4f}")
+        log_print(f"    Min: {all_preds_flat.min():.4f}, Max: {all_preds_flat.max():.4f}")
+        log_print(f"    > 0.5: {(all_preds_flat > 0.5).sum()} / {len(all_preds_flat)}")
+
     metrics = calculate_metrics(all_labels_flat, all_preds_flat)
 
     if print_cm and is_main_process():

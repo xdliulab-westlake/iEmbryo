@@ -47,13 +47,11 @@ class EarlyStopping:
         self.best_model_state = None
 
     def __call__(self, score, model):
-        # Get the unwrapped model state_dict
-        if hasattr(model, 'module'):
-            # DataParallel wrapped model
-            state_dict = model.module.state_dict()
-        else:
-            # Regular model
-            state_dict = model.state_dict()
+        import copy
+        # Get the unwrapped model (remove DataParallel wrapper if present)
+        base_model = model.module if hasattr(model, 'module') else model
+        # Deep copy the entire state_dict to avoid shared references
+        state_dict = copy.deepcopy(base_model.state_dict())
 
         if self.best_score is None:
             self.best_score = score
