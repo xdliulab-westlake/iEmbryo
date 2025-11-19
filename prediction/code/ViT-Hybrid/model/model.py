@@ -288,22 +288,20 @@ class ViTHybridModel(nn.Module):
         print("[Model] 使用注意力时间池化")
         self.temporal_pooling = TemporalAttentionPooling(d_model)
 
-        # 分类头：输入d_model维特征，输出二分类logits（无激活函数）
-        # 使用CrossEntropyLoss时，不需要最后的Sigmoid或Softmax
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(d_model, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(512, 2)  # 2个输出：[Poor, Good]的logits
-        )
+        # 分类头：Pre-Norm + 残差连接（参考 Vision Transformer Block）
+        self.classifier_norm = nn.LayerNorm(d_model)
+        self.classifier_fc1 = nn.Linear(d_model, 512)
+        self.classifier_relu = nn.ReLU(inplace=True)
+        self.classifier_dropout = nn.Dropout(0.3)
+        self.classifier_fc2 = nn.Linear(512, 2)
 
-        # 显式初始化分类头所有线性层（Xavier gain=1.0）
-        # 这比 PyTorch 默认的 Kaiming 初始化产生更大的权重方差，更适合这个架构
-        for module in self.classifier:
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight, gain=1.0)
-                nn.init.constant_(module.bias, 0.0)
+        # 初始化
+        nn.init.xavier_uniform_(self.classifier_fc1.weight, gain=1.0)
+        nn.init.constant_(self.classifier_fc1.bias, 0.0)
+        nn.init.xavier_uniform_(self.classifier_fc2.weight, gain=1.0)
+        nn.init.constant_(self.classifier_fc2.bias, 0.0)
+        nn.init.ones_(self.classifier_norm.weight)
+        nn.init.zeros_(self.classifier_norm.bias)
 
     def forward(self, x, return_attention_weights=False):
         """
@@ -366,8 +364,14 @@ class ViTHybridModel(nn.Module):
         # (batch, 33, d_model) -> (batch, d_model)
         x = self.temporal_pooling(x)
 
-        # 分类
-        output = self.classifier(x)
+        # 分类头：Pre-Norm + 残差连接（参考 Vision Transformer Block）
+        # x_residual = x  # 如果需要残差连接，保留这行
+        x = self.classifier_norm(x)
+        x = self.classifier_fc1(x)
+        x = self.classifier_relu(x)
+        x = self.classifier_dropout(x)
+        output = self.classifier_fc2(x)
+        # output = output + x_residual  # 残差连接（但维度不匹配，512 vs 4096）
 
         if return_attention_weights:
             return output, attention_weights

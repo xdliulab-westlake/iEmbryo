@@ -175,6 +175,9 @@ class TemporalAttentionPooling(nn.Module):
             self.fc2
         )
 
+        # 添加 LayerNorm 稳定输出方差
+        self.norm = nn.LayerNorm(d_model)
+
     def forward(self, x):
         """
         Args:
@@ -191,6 +194,9 @@ class TemporalAttentionPooling(nn.Module):
 
         # 加权求和: (batch, d_model)
         pooled = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)
+
+        # LayerNorm 稳定输出方差
+        pooled = self.norm(pooled)
 
         return pooled
 
