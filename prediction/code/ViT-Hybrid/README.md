@@ -72,41 +72,67 @@ project_root/
 
 ---
 
-## 二、系统架构
+## 二、系统架构 v2.3
 
 ### 核心设计理念
 
 胚胎在 96-112 小时发育期间：
 - **时间维度**：33 个时间点，每 0.5 小时采样一次
 - **空间维度**：每个时间点有 11 个焦平面，记录三维形态
-- **模型策略**：VGG16 提取空间特征 → 焦平面融合 → Transformer 建模时间序列 → **时间注意力池化**保留时间动态信息
+- **模型策略**：VGG16 → FocalFusion → Transformer(4层) → **TemporalAttention(8头Multi-Head Self-Attention)** → 分类头
 
-**关键创新**：
-- 不使用简单的全局平均池化（会丢失33个时间步的信息）
-- 采用**可学习的时间注意力机制**，自动学习每个发育时间点的重要性
-- 使模型能够捕捉胚胎发育的关键时间窗口
+**架构亮点**：
+- 🎯 **时空联合建模**：完整建模33个时间步间的复杂依赖关系 (O(33²))
+- 🧠 **Multi-Head Self-Attention**：8个独立注意力头学习不同的时间模式
+- ⚙️ **Vision Transformer最佳实践**：Pre-Norm + GELU + LayerNorm确保梯度稳定流动
+- 🎓 **梯度优化**：Xavier(gain=1.0)初始化 + 残差连接 + LayerNorm
 
 ### 模型流程
 
 ```
 输入：(batch, 33, 11, 224, 224, 3)
+      批次 × 时间点 × 焦平面 × 高 × 宽 × 通道
   │
-  ├→ VGG16 特征提取
-  │   └─ 所有 33×11 张图像共享权重 → 4096 维特征
+  ├─ VGG16 特征提取（ImageNet 预训练）
+  │  ├─ 重整形：(batch×33×11, 224, 224, 3)
+  │  ├─ 分批处理避免数值溢出（per-GPU: 64）
+  │  └─ 输出：(batch×33×11, 4096)
   │
-  ├→ 焦平面融合 (Focal Plane Fusion)
-  │   └─ 平均聚合 11 个焦平面 → (33, 4096)
+  ├─ 焦平面融合 (FocalPlaneFusion)
+  │  ├─ 恢复形状：(batch, 33, 11, 4096)
+  │  ├─ 逐时间点融合11个焦平面
+  │  └─ 输出：(batch, 33, 4096)
   │
-  ├→ Transformer 编码器
-  │   └─ 4 层，8 个注意力头，建模时间序列
+  ├─ 位置编码 (PositionalEncoding)
+  │  └─ 可学习嵌入 (33, 4096) 按加法组合
   │
-  ├→ 时间注意力池化 (Temporal Attention Pooling) ⭐ NEW
-  │   └─ 学习每个时间步的重要性权重，保留时间动态信息 → (4096)
+  ├─ Transformer 编码器（4层，Post-Norm）
+  │  ├─ MultiheadAttention: 8头，512维每头
+  │  ├─ FeedForward: 4096 → 2048 → 4096
+  │  ├─ LayerNorm × 2 + 残差连接
+  │  └─ 输出：(batch, 33, 4096)
   │
-  ├→ 分类头
-  │   └─ (4096) → (512) → ReLU → (2) → CrossEntropy
+  ├─ 时间注意力池化 ⭐ v2.3: Multi-Head Self-Attention
+  │  ├─ 1. Self-Attention (8头，512维)
+  │  ├─ 2. 残差连接 + LayerNorm
+  │  ├─ 3. 学习权重：FC(4096→2048)→GELU→FC(2048→1)→Softmax
+  │  │     输出：(batch, 33) 时间权重分布
+  │  ├─ 4. 加权求和 + LayerNorm
+  │  └─ 输出：(batch, 4096)
   │
-  └→ 输出：logits ∈ ℝ²（两个类别的原始分数）
+  ├─ 分类头（Pre-Norm + GELU，参考Vision Transformer）
+  │  ├─ LayerNorm(4096)           ← Pre-Norm稳定输入
+  │  ├─ Linear(4096, 512)         ← Xavier(gain=1.0)
+  │  ├─ GELU()                    ← 平滑梯度
+  │  ├─ Dropout(0.3)
+  │  └─ Linear(512, 2)            ← Xavier(gain=1.0)
+  │
+  ├─ 损失函数：CrossEntropyLoss(weight=[w_poor, w_good])
+  │  ├─ w_poor ≈ 0.60
+  │  └─ w_good ≈ 3.02  ← 5倍权重迫使学习Good特征
+  │
+  └─ 输出：logits ∈ ℝ² (batch, 2)
+           预测：softmax(logits) → (batch, 2) 概率分布
 ```
 
 ### 核心模块
@@ -128,28 +154,74 @@ project_root/
 - 无法区分不同时间步的重要性
 - 无法捕捉胚胎发育的时间轨迹
 
-**解决方案：**
+**进化历程：**
+
+```
+v2.0: 全局平均池化 (平均值)
+  └─ 问题：完全丧失时间信息
+
+v2.1: 简单FC注意力 (FC → ReLU → FC → Softmax)
+  ├─ 改进：学习时间步权重
+  └─ 限制：单层线性映射，无法建模时间步间关系
+
+v2.2 (当前): Multi-Head Self-Attention ⭐
+  ├─ 改进：8个注意力头学习不同的时间模式
+  ├─ 优势：充分建模33个时间步间的复杂依赖关系
+  └─ 输出：自适应的时间权重分布
+```
+
+**最新架构（Multi-Head Self-Attention）：**
 
 ```
 输入：(batch, 33, 4096)  [33 个时间步的特征]
   ↓
-注意力权重计算：
-  - FC1: 4096 → 2048
-  - ReLU
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Multi-Head Self-Attention (8个注意力头)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - 每个头独立学习一种时间模式
+  - 头维度 = 4096 / 8 = 512
+  - 完全建模所有时间步间的依赖关系
+  └─ 输出：(batch, 33, 4096)
+
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. 残差连接 + LayerNorm
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - 稳定特征方差
+  - 便于梯度流动
+  └─ 输出：(batch, 33, 4096)
+
+  ↓
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. 学习时间步权重（FC层）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  - FC1: 4096 → 2048 + GELU激活
   - FC2: 2048 → 1
-  - Softmax(dim=1) → (batch, 33)  [每个时间步的权重]
+  - Softmax(dim=1) → (batch, 33)
+  └─ 输出：各时间步的重要性分数
+
   ↓
-加权求和：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. 加权求和 + LayerNorm
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   output = Σ(x_t * weight_t)  for t in 1..33
-  ↓
-输出：(batch, 4096)  [融合了时间重要性的特征]
+  └─ 输出：(batch, 4096)  [融合了时间重要性的特征]
 ```
 
+**三个版本对比：**
+
+| 版本 | 机制 | 参数 | 复杂度 | 时间关系建模 |
+|-----|------|------|--------|-----------|
+| **v2.0** | 全局平均 | ~0 | O(33) | ✗ 无 |
+| **v2.1** | 简单FC注意力 | ~8M | O(33) | △ 弱（线性） |
+| **v2.2** | Multi-Head Self-Attn | ~32M | O(33²) | ✓ 强（非线性） |
+
 **优势：**
-1. **保留时间信息**：学习每个时间步的相对重要性
-2. **解释性强**：可视化注意力权重了解模型关注的发育阶段
-3. **动态适应**：不同胚胎可有不同的时间关注模式
-4. **参数高效**：仅添加 ~2M 额外参数
+1. **充分的时间建模**：Multi-Head Self-Attention 捕捉33个时间步间的复杂关系
+2. **多角度学习**：8个独立的注意力头，每个学习不同的时间模式
+3. **梯度稳定**：Pre-Norm + 残差连接，保证梯度流畅
+4. **解释性强**：可视化注意力权重了解模型关注的发育阶段
+5. **动态适应**：不同胚胎自适应不同的时间关注模式
 
 #### VGG16 微调策略
 
@@ -450,7 +522,7 @@ VGG16 (ImageNet 预训练)
   ↓
 可学习位置编码 (33, 4096)
   ↓
-4 × TransformerBlock：
+4 × TransformerBlock（Post-Norm）：
   ├─ MultiheadAttention
   │   ├─ embed_dim = 4096
   │   ├─ num_heads = 8
@@ -462,20 +534,73 @@ VGG16 (ImageNet 预训练)
   ↓
 输出：(batch, 33, 4096)  [时间序列建模完成]
   ↓
-时间注意力池化 ⭐ NEW：
-  - 计算每个时间步的注意力权重
-  - 加权求和 → (batch, 4096)
+时间注意力池化 ⭐ NEW（Multi-Head Self-Attention）：
+  1. Multi-Head Self-Attention (8个头)
+  2. 残差连接 + LayerNorm
+  3. 计算每个时间步的权重 (FC → GELU → Softmax)
+  4. 加权求和 + LayerNorm
+  └─ 输出：(batch, 4096)
   ↓
-分类头：Dropout(0.5) → Linear(4096, 512) → ReLU → Dropout(0.3) → Linear(512, 2)
+分类头（Pre-Norm + GELU）：
+  ├─ LayerNorm(4096)          ← Pre-Norm（参考Vision Transformer）
+  ├─ Linear(4096, 512)        ← Xavier(gain=1.0)初始化
+  ├─ GELU()                   ← 平滑激活函数
+  ├─ Dropout(0.3)
+  └─ Linear(512, 2)           ← Xavier(gain=1.0)初始化
   ↓
 输出：(batch, 2) → logits（不含激活函数）
   ↓
 损失函数：CrossEntropyLoss(weight=[w0, w1])
   - 内部自动应用 softmax
-  - w0 = total / (2 × num_poor)
-  - w1 = total / (2 × num_good)
+  - w0 = total / (2 × num_poor) ≈ 0.60
+  - w1 = total / (2 × num_good) ≈ 3.02
   ↓
 预测时：softmax(logits) → 概率分布
+```
+
+#### 分类头详细设计（v2.2改进）
+
+**为什么用Pre-Norm + GELU + LayerNorm？**
+
+参考Vision Transformer的最佳实践，改进了分类头的稳定性：
+
+```python
+# 原始设计（v2.1）
+classifier = nn.Sequential(
+    nn.Dropout(0.5),
+    nn.Linear(d_model, 512),
+    nn.ReLU(),            # ✗ 梯度陡峭
+    nn.Dropout(0.3),
+    nn.Linear(512, 2)
+)
+
+# 改进设计（v2.2）⭐
+classifier_norm = nn.LayerNorm(d_model)      # Pre-Norm 稳定输入
+classifier_fc1 = nn.Linear(d_model, 512)     # Xavier(gain=1.0)
+classifier_act = nn.GELU()                   # ✓ 平滑梯度
+classifier_dropout = nn.Dropout(0.3)
+classifier_fc2 = nn.Linear(512, 2)           # Xavier(gain=1.0)
+```
+
+**关键改进对比：**
+
+| 特性 | v2.1 | v2.2 | 优势 |
+|------|------|------|------|
+| **归一化** | 无 | Pre-Norm LayerNorm | 稳定特征方差 |
+| **激活函数** | ReLU | GELU | 平滑梯度，更易训练 |
+| **初始化** | gain=0.1 | gain=1.0 | 权重范围合理，梯度流畅 |
+| **Dropout** | 0.5 → 0.3 | 0.3 | 减少信息丧失 |
+
+**为什么Pre-Norm重要？**
+
+```
+分类头输入方差很小 (std ~ 0.0001-0.0005)
+  ↓
+Pre-Norm: LayerNorm(x) 将其缩放为 std ~ 1.0
+  ↓
+下游FC层得到合理范围的输入，梯度流畅
+  ↓
+结果：稳定的梯度流，更好的收敛性
 ```
 
 ---
@@ -693,59 +818,83 @@ ViT-Hybrid/
 
 ## 八、版本历史
 
-### v2.2 (2025-11) ⭐ 最新
-**关键改进：** 完全解决类别不平衡问题（Recall=0→70%+）
-- 🔥 **加权CrossEntropyLoss替代BCE**
-  - 解决原始BCE方案中验证集Recall=0的问题
-  - 自动计算类别权重：weight_good = total/(2×num_good) ≈ 3.02
-  - Good类样本梯度自动放大5倍，迫使模型学习识别Good特征
-  - 数值稳定性优于BCE（内部log-sum-exp实现）
-- 📊 **模型输出改为2个logits**
-  - 移除最后的Sigmoid层
-  - 输出：(batch, 2) 而非 (batch, 1)
-  - CrossEntropyLoss内部自动应用softmax
-  - 预测时用softmax获得概率分布
-- 🗑️ **移除下采样，保留原始不平衡数据**
-  - 训练集：2413 Poor + 479 Good（保持5:1比例）
-  - 不再丢失Poor类样本（原下采样丢失2890个样本）
-  - 模型见过完整的数据分布，更鲁棒
-- 📝 **标签处理改为int64格式**
-  - CrossEntropyLoss要求整数标签
-  - 移除unsqueeze，标签shape：(batch,) 而非 (batch, 1)
+### v2.3 (2025-11) ⭐ 当前版本
+**完整的Vision Transformer架构最佳实践**
 
-**预期效果改进：**
 ```
-指标          v2.1(BCE)    v2.2(Weighted CE)
-─────────────────────────────────────────
-Recall        0.0000       ~0.70-0.80
-Precision     0.0000       ~0.70-0.80
-F1-Score      0.0000       ~0.75
-AUC           0.5000       ~0.92-0.95
+进化路线：
+v2.0 (全局平均池化)
+  ↓ 改进：丢失时间信息
+v2.1 (简单FC注意力)
+  ↓ 改进：无法建模时间步关系
+v2.2 (加权CrossEntropyLoss)
+  ↓ 改进：需要更强大的时间建模
+v2.3 ⭐ Multi-Head Self-Attention (完整ViT架构)
 ```
 
-### v2.1 (2025-11)
-**关键改进：** 修复低AUC问题
-- ✨ **时间注意力池化**替代全局平均池化
-  - 解决 Issue #3：全局平均池化丢失时间信息的问题
-  - 学习每个时间步的重要性权重
-  - 保留胚胎发育的动态轨迹
-  - 提升模型在时间序列建模中的表现
-- 增强混淆矩阵和数据分布日志输出
-- 完整的诊断工具集
+**核心改进：**
 
-### v2.0 (2025-10)
-- 多焦平面融合架构
-- Transformer 时间序列建模
-- VGG16 预训练微调
-- 验证缓存机制（多焦距模式）
-- 四层可解释性分析工具
+| 组件 | v2.2 | v2.3 | 改进 |
+|------|------|------|------|
+| **时间池化** | 简单FC (O(33)) | Multi-Head Self-Attn (O(33²)) | 5倍计算复杂度，充分建模时间关系 |
+| **注意力头数** | - | 8个独立头 | 多角度时间模式学习 |
+| **分类头** | 无归一化 | Pre-Norm LayerNorm | std: 0.0001 → 1.0，梯度稳定 |
+| **激活函数** | ReLU | GELU | 平滑梯度流 |
+| **权重初始化** | gain=0.1 | gain=1.0 | 合理梯度范围 |
+| **损失函数** | 加权CrossEntropy | 加权CrossEntropy | Good类权重×3 |
+
+**性能指标：**
+```
+指标              预期改进
+─────────────────────────
+时间建模能力      显著提升（非线性关系）
+梯度稳定性        大幅优化（Pre-Norm+GELU）
+特征方差          稳定在std=1.0
+收敛速度          加快（更稳定的梯度）
+可解释性          强（8层Transformer注意力 + 33维时间权重）
+```
 
 ---
 
-**ViT-Hybrid v2.2：为胚胎质量评估而设计的生产级深度学习系统**
+### 快速对比：ViT-Hybrid v2.3 架构优势
 
-核心改进：
-1. **解决类别不平衡**（v2.1的Recall=0问题）- 加权CrossEntropyLoss
-2. **保留原始数据分布** - 不再下采样，提升模型鲁棒性
-3. **数值稳定的损失函数** - CrossEntropyLoss内部优化的log-sum-exp
-4. **时空联合建模** - 时间注意力池化 + Transformer序列建模
+**时间序列建模方式对比：**
+
+```
+v2.0: Mean Pooling              v2.1: FC Attention            v2.3: Multi-Head Self-Attention
+────────────────────────────────────────────────────────────────────────────────
+  33步 → mean               33步 → FC → FC → softmax      33步 → 8头Self-Attn → FC
+        ↓                                ↓                            ↓
+   单值特征                    权重分布                   充分的时间关系
+   (丧失时间)              (线性映射)              (非线性 O(33²) 建模)
+```
+
+**架构完整流程：**
+
+```
+输入 (B, 33, 11, 224, 224, 3)
+  ↓ VGG16 提取空间特征
+输出 (B, 33, 11, 4096)
+  ↓ 焦平面融合 (11→1)
+输出 (B, 33, 4096)
+  ↓ Transformer 编码器 (4层)
+输出 (B, 33, 4096)
+  ↓ ⭐ 时间注意力池化 (Multi-Head Self-Attention, 8头)
+    ├─ Self-Attention建模时间步关系
+    ├─ 残差连接 + LayerNorm稳定梯度
+    ├─ FC层学习权重：4096→2048→1
+    └─ 加权求和 (B, 4096)
+  ↓ 分类头 (Pre-Norm + GELU)
+    ├─ LayerNorm稳定输入 (std: 0.0001→1.0)
+    ├─ FC(4096→512) + GELU
+    └─ FC(512→2) → logits (B, 2)
+  ↓ 损失函数：CrossEntropyLoss(weight=[0.60, 3.02])
+     Good类权重3倍，强制学习少数类
+```
+
+**核心优势：**
+- ✅ **完整时间建模**：O(33²) 复杂度，非线性捕捉时间依赖
+- ✅ **梯度稳定流动**：Pre-Norm + GELU + LayerNorm
+- ✅ **特征方差稳定**：输入分类头std从0.0001提升到1.0
+- ✅ **可解释的决策**：8层Transformer注意力 + 33维时间权重
+- ✅ **类别不平衡处理**：加权CrossEntropyLoss (Good×3)
