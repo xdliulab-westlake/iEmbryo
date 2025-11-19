@@ -288,10 +288,10 @@ class ViTHybridModel(nn.Module):
         print("[Model] 使用注意力时间池化")
         self.temporal_pooling = TemporalAttentionPooling(d_model)
 
-        # 分类头：Pre-Norm + 残差连接（参考 Vision Transformer Block）
+        # 分类头：Pre-Norm + GELU激活（参考 Vision Transformer Block）
         self.classifier_norm = nn.LayerNorm(d_model)
         self.classifier_fc1 = nn.Linear(d_model, 512)
-        self.classifier_relu = nn.ReLU(inplace=True)
+        self.classifier_act = nn.GELU()  # 用GELU而不是ReLU，梯度更平滑
         self.classifier_dropout = nn.Dropout(0.3)
         self.classifier_fc2 = nn.Linear(512, 2)
 
@@ -364,11 +364,10 @@ class ViTHybridModel(nn.Module):
         # (batch, 33, d_model) -> (batch, d_model)
         x = self.temporal_pooling(x)
 
-        # 分类头：Pre-Norm + 残差连接（参考 Vision Transformer Block）
-        # x_residual = x  # 如果需要残差连接，保留这行
+        # 分类头：Pre-Norm + GELU激活（参考 Vision Transformer Block）
         x = self.classifier_norm(x)
         x = self.classifier_fc1(x)
-        x = self.classifier_relu(x)
+        x = self.classifier_act(x)
         x = self.classifier_dropout(x)
         output = self.classifier_fc2(x)
         # output = output + x_residual  # 残差连接（但维度不匹配，512 vs 4096）
