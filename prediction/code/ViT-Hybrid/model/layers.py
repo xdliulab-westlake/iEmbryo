@@ -140,14 +140,13 @@ class TransformerBlock(nn.Module):
 
 class TemporalAttentionPooling(nn.Module):
     """
-    Self-Attention 时间池化 - 学习时间步之间的依赖关系
+    时间池化 - 学习每个时间步的重要性权重
 
-    用 Multi-Head Self-Attention 替代简单的加权平均
-    让模型学习哪些时间步应该相互注意，最终输出一个加权的时间表示
+    用可学习的权重对时间序列进行加权平均，让模型自动学习
+    哪些时间步对最终的分类结果更重要
 
     Args:
         d_model: 输入特征维度
-        num_heads: 多头注意力头数（默认8）
 
     输入: (batch, seq_len, d_model)
     输出: (batch, d_model)
@@ -155,17 +154,8 @@ class TemporalAttentionPooling(nn.Module):
     def __init__(self, d_model, num_heads=8):
         super(TemporalAttentionPooling, self).__init__()
         self.d_model = d_model
-        self.num_heads = num_heads
 
-        # Multi-Head Self-Attention
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=num_heads,
-            batch_first=True,
-            dropout=0.1
-        )
-
-        # 时间序列上的注意力学习池化权重
+        # 学习每个时间步的重要性权重
         self.fc1 = nn.Linear(d_model, d_model // 2)
         self.fc2 = nn.Linear(d_model // 2, 1)
         self.gelu = nn.GELU()
@@ -177,23 +167,18 @@ class TemporalAttentionPooling(nn.Module):
         nn.init.constant_(self.fc2.bias, 0.0)
 
         # LayerNorm
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x, return_weights=False):
         """
         Args:
             x: (batch, seq_len, d_model) 时间序列特征
-            return_weights: 是否返回注意力权重
+            return_weights: 是否返回权重分布
 
         Returns:
             pooled: (batch, d_model) 池化后的特征
-            weights: (batch, seq_len) 时间步权重（仅当 return_weights=True 时返回）
+            weights: (batch, seq_len) 时间步权重分布（仅当 return_weights=True 时返回）
         """
-        # Self-Attention: 让时间步之间相互注意
-        attn_out, attn_weights = self.self_attn(x, x, x, need_weights=True)
-        x = self.norm1(x + attn_out)  # 残差连接 + LayerNorm
-
         # 学习每个时间步的重要性权重
         # (batch, seq_len, d_model) -> (batch, seq_len, 1) -> (batch, seq_len)
         temporal_weights = self.fc1(x)  # (batch, seq_len, d_model // 2)
@@ -204,7 +189,7 @@ class TemporalAttentionPooling(nn.Module):
 
         # 加权求和
         pooled = torch.sum(x * temporal_weights.unsqueeze(-1), dim=1)  # (batch, d_model)
-        pooled = self.norm2(pooled)
+        pooled = self.norm(pooled)
 
         if return_weights:
             return pooled, temporal_weights
