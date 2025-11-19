@@ -362,7 +362,11 @@ class ViTHybridModel(nn.Module):
 
         # 时间池化：使用注意力机制学习每个时间步的重要性
         # (batch, 33, d_model) -> (batch, d_model)
-        x = self.temporal_pooling(x)
+        if return_attention_weights:
+            x, temporal_weights = self.temporal_pooling(x, return_weights=True)
+            attention_weights.append(temporal_weights)
+        else:
+            x = self.temporal_pooling(x)
 
         # 分类头：Pre-Norm + GELU激活（参考 Vision Transformer Block）
         x = self.classifier_norm(x)
@@ -370,7 +374,6 @@ class ViTHybridModel(nn.Module):
         x = self.classifier_act(x)
         x = self.classifier_dropout(x)
         output = self.classifier_fc2(x)
-        # output = output + x_residual  # 残差连接（但维度不匹配，512 vs 4096）
 
         if return_attention_weights:
             return output, attention_weights

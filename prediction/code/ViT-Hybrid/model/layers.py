@@ -178,13 +178,15 @@ class TemporalAttentionPooling(nn.Module):
         # 添加 LayerNorm 稳定输出方差
         self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, x):
+    def forward(self, x, return_weights=False):
         """
         Args:
             x: (batch, seq_len, d_model) 时间序列特征
+            return_weights: 是否返回注意力权重
 
         Returns:
             pooled: (batch, d_model) 加权后的特征
+            weights: (batch, seq_len) 注意力权重（仅当 return_weights=True 时返回）
         """
         # 计算注意力权重
         # (batch, seq_len, 1) -> (batch, seq_len)
@@ -198,6 +200,8 @@ class TemporalAttentionPooling(nn.Module):
         # LayerNorm 稳定输出方差
         pooled = self.norm(pooled)
 
+        if return_weights:
+            return pooled, attn_weights
         return pooled
 
 
