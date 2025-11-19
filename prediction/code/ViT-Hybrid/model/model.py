@@ -298,8 +298,9 @@ class ViTHybridModel(nn.Module):
             nn.Linear(512, 2)  # 2个输出：[Poor, Good]的logits
         )
 
-        # 初始化分类头所有线性层（gain=1.0确保权重有足够的方差）
-        for idx, module in enumerate(self.classifier):
+        # 显式初始化分类头所有线性层（Xavier gain=1.0）
+        # 这比 PyTorch 默认的 Kaiming 初始化产生更大的权重方差，更适合这个架构
+        for module in self.classifier:
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight, gain=1.0)
                 nn.init.constant_(module.bias, 0.0)
