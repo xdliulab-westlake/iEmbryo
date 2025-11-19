@@ -140,43 +140,45 @@ class TransformerBlock(nn.Module):
 
 class TemporalAttentionPooling(nn.Module):
     """
-    时间注意力池化 - 学习每个时间步的重要性权重
+    Self-Attention 时间池化 - 学习时间步之间的依赖关系
 
-    目的：用可学习的注意力权重替代简单的平均/最大池化
-    保留时间序列中的重要特征
+    用 Multi-Head Self-Attention 替代简单的加权平均
+    让模型学习哪些时间步应该相互注意，最终输出一个加权的时间表示
 
     Args:
         d_model: 输入特征维度
-        num_heads: 多头注意力头数（可选，默认1）
+        num_heads: 多头注意力头数（默认8）
 
     输入: (batch, seq_len, d_model)
     输出: (batch, d_model)
     """
-    def __init__(self, d_model, num_heads=1):
+    def __init__(self, d_model, num_heads=8):
         super(TemporalAttentionPooling, self).__init__()
         self.d_model = d_model
+        self.num_heads = num_heads
 
-        # 学习注意力权重的方式: 简单的全连接层，使用Xavier初始化
-        self.fc1 = nn.Linear(d_model, d_model // 2)
-        self.fc2 = nn.Linear(d_model // 2, 1)
-        self.relu = nn.ReLU()
-
-        # Xavier初始化以确保梯度流稳定
-        nn.init.xavier_uniform_(self.fc1.weight)
-        nn.init.xavier_uniform_(self.fc2.weight)
-
-        # 偏差初始化为小值而不是0，避免初期输出过小
-        nn.init.constant_(self.fc1.bias, 0.1)
-        nn.init.constant_(self.fc2.bias, 0.0)
-
-        self.attention_fc = nn.Sequential(
-            self.fc1,
-            self.relu,
-            self.fc2
+        # Multi-Head Self-Attention
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            batch_first=True,
+            dropout=0.1
         )
 
-        # 添加 LayerNorm 稳定输出方差
-        self.norm = nn.LayerNorm(d_model)
+        # 时间序列上的注意力学习池化权重
+        self.fc1 = nn.Linear(d_model, d_model // 2)
+        self.fc2 = nn.Linear(d_model // 2, 1)
+        self.gelu = nn.GELU()
+
+        # 初始化
+        nn.init.xavier_uniform_(self.fc1.weight, gain=1.0)
+        nn.init.constant_(self.fc1.bias, 0.0)
+        nn.init.xavier_uniform_(self.fc2.weight, gain=1.0)
+        nn.init.constant_(self.fc2.bias, 0.0)
+
+        # LayerNorm
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x, return_weights=False):
         """
@@ -185,23 +187,27 @@ class TemporalAttentionPooling(nn.Module):
             return_weights: 是否返回注意力权重
 
         Returns:
-            pooled: (batch, d_model) 加权后的特征
-            weights: (batch, seq_len) 注意力权重（仅当 return_weights=True 时返回）
+            pooled: (batch, d_model) 池化后的特征
+            weights: (batch, seq_len) 时间步权重（仅当 return_weights=True 时返回）
         """
-        # 计算注意力权重
-        # (batch, seq_len, 1) -> (batch, seq_len)
-        attn_weights = self.attention_fc(x)  # (batch, seq_len, 1)
-        attn_weights = attn_weights.squeeze(-1)  # (batch, seq_len)
-        attn_weights = torch.softmax(attn_weights, dim=1)  # (batch, seq_len)
+        # Self-Attention: 让时间步之间相互注意
+        attn_out, attn_weights = self.self_attn(x, x, x, need_weights=True)
+        x = self.norm1(x + attn_out)  # 残差连接 + LayerNorm
 
-        # 加权求和: (batch, d_model)
-        pooled = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)
+        # 学习每个时间步的重要性权重
+        # (batch, seq_len, d_model) -> (batch, seq_len, 1) -> (batch, seq_len)
+        temporal_weights = self.fc1(x)  # (batch, seq_len, d_model // 2)
+        temporal_weights = self.gelu(temporal_weights)
+        temporal_weights = self.fc2(temporal_weights)  # (batch, seq_len, 1)
+        temporal_weights = temporal_weights.squeeze(-1)  # (batch, seq_len)
+        temporal_weights = torch.softmax(temporal_weights, dim=1)  # (batch, seq_len)
 
-        # LayerNorm 稳定输出方差
-        pooled = self.norm(pooled)
+        # 加权求和
+        pooled = torch.sum(x * temporal_weights.unsqueeze(-1), dim=1)  # (batch, d_model)
+        pooled = self.norm2(pooled)
 
         if return_weights:
-            return pooled, attn_weights
+            return pooled, temporal_weights
         return pooled
 
 
