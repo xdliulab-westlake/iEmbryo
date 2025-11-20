@@ -31,6 +31,19 @@ class TrainingConfig:
                           # 同时梯度裁剪(norm=1.0)防止爆炸
     WEIGHT_DECAY = 1e-5
 
+    # 损失函数配置
+    # 'cross_entropy': 简单的加权CrossEntropyLoss（默认）
+    # 'focal': Focal Loss，专门设计用于处理类不平衡（推荐用于5:1不平衡）
+    LOSS_FUNCTION = 'focal'  # 改为'focal'以使用Focal Loss处理类不平衡
+
+    # Focal Loss参数
+    FOCAL_ALPHA = 0.25   # 类权重：高alpha=更关注多数类(Poor)，低alpha=更关注少数类(Good)
+                         # 对于5:1不平衡，使用0.25意味着Good类权重=(1-0.25)=0.75（增加75%）
+    FOCAL_GAMMA = 2.0    # 聚焦参数：控制有多少focus放在hard examples上
+                         # gamma=0: 变成CrossEntropyLoss
+                         # gamma=2: 标准值（物体检测中证实有效）
+                         # gamma越高，对容易分类样本的惩罚越低
+
     TRAIN_RATIO = 0.7
     VAL_RATIO = 0.15
 
@@ -102,7 +115,10 @@ def get_training_config():
         'monitor_mode': TrainingConfig.MONITOR_MODE,
         'num_workers': TrainingConfig.NUM_WORKERS,
         'pin_memory': TrainingConfig.PIN_MEMORY,
-        'vgg_batch_size_per_gpu': TrainingConfig.VGG_BATCH_SIZE_PER_GPU
+        'vgg_batch_size_per_gpu': TrainingConfig.VGG_BATCH_SIZE_PER_GPU,
+        'loss_function': TrainingConfig.LOSS_FUNCTION,
+        'focal_alpha': TrainingConfig.FOCAL_ALPHA,
+        'focal_gamma': TrainingConfig.FOCAL_GAMMA
     }
 
 
