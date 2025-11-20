@@ -190,9 +190,13 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
         log_print(f"\nClass distribution in training set:")
         log_print(f"  Class 0 (Poor): {num_class_0} samples, weight={weight_0:.4f}")
         log_print(f"  Class 1 (Good): {num_class_1} samples, weight={weight_1:.4f}")
+        log_print(f"  ✅ Using weighted CrossEntropyLoss")
     else:
-        class_weights = None
-        log_print("\nWarning: No training labels provided, using equal class weights")
+        # Default weights: balance classes assuming typical imbalance
+        # Typical ratio: Poor:Good = 5:1
+        class_weights = torch.tensor([0.6, 3.0], dtype=torch.float32).to(device)
+        log_print("\n⚠️  Warning: No training labels provided, using default class weights [0.6, 3.0]")
+        log_print("     This assumes a 5:1 imbalance (Poor:Good = 5:1)")
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(
@@ -292,9 +296,13 @@ def train_stage2(model, train_loader, val_loader, config, device, print_cm=True,
         log_print(f"\nClass distribution in training set:")
         log_print(f"  Class 0 (Poor): {num_class_0} samples, weight={weight_0:.4f}")
         log_print(f"  Class 1 (Good): {num_class_1} samples, weight={weight_1:.4f}")
+        log_print(f"  ✅ Using weighted CrossEntropyLoss")
     else:
-        class_weights = None
-        log_print("\nWarning: No training labels provided, using equal class weights")
+        # Default weights: balance classes assuming typical imbalance
+        # Typical ratio: Poor:Good = 5:1
+        class_weights = torch.tensor([0.6, 3.0], dtype=torch.float32).to(device)
+        log_print("\n⚠️  Warning: No training labels provided, using default class weights [0.6, 3.0]")
+        log_print("     This assumes a 5:1 imbalance (Poor:Good = 5:1)")
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.AdamW(
