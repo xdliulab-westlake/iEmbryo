@@ -278,10 +278,15 @@ class ViTHybridModel(nn.Module):
         # 位置编码
         self.pos_encoding = PositionalEncoding(time_steps, d_model)
 
-        # Transformer编码器
+        # Transformer编码器 - 带随机深度(Stochastic Depth)的Pre-Norm架构
+        # 随机深度：在较深层使用更高的DropPath概率，提高泛化能力
+        drop_path_rates = [
+            i / max(1, num_transformer_layers - 1) * 0.1
+            for i in range(num_transformer_layers)
+        ]
         self.transformer_blocks = nn.ModuleList([
-            TransformerBlock(d_model, num_heads, dff, dropout_rate)
-            for _ in range(num_transformer_layers)
+            TransformerBlock(d_model, num_heads, dff, dropout_rate, drop_path_rate)
+            for drop_path_rate in drop_path_rates
         ])
 
         # 时间池化层（新增）- 使用注意力机制学习每个时间步的重要性

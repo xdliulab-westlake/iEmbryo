@@ -9,6 +9,35 @@ import torch.nn as nn
 import math
 
 
+class DropPath(nn.Module):
+    """
+    DropPath (随机深度) - 在训练时随机删除残差路径
+
+    这是 EfficientNet 和 Vision Transformer 中使用的正则化技术
+    可以显著提高模型的泛化能力
+
+    Args:
+        drop_prob: 删除概率 (0.0 表示不使用)
+    """
+    def __init__(self, drop_prob: float = 0.):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+        self.keep_prob = 1 - drop_prob
+
+    def forward(self, x):
+        if not self.training or self.drop_prob == 0.:
+            return x
+
+        # (B, ...) 中 B 是 batch size
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = torch.bernoulli(torch.ones(shape, device=x.device) * self.keep_prob)
+
+        if self.keep_prob > 0.0:
+            random_tensor.div_(self.keep_prob)
+
+        return x * random_tensor
+
+
 class FocalPlaneFusion(nn.Module):
     """
     多焦平面融合模块 - 融合不同焦距的图像特征
@@ -87,51 +116,75 @@ class PositionalEncoding(nn.Module):
 
 class TransformerBlock(nn.Module):
     """
-    Transformer编码器块
-    包含: 多头自注意力 + 前馈网络 + 残差连接 + Layer Normalization
+    Transformer编码器块 - Pre-Norm 架构 (Vision Transformer风格)
+
+    Pre-Norm 架构 vs Post-Norm 架构：
+    - Pre-Norm (推荐): Norm -> Attention -> Dropout -> Add
+               Norm -> FFN -> Dropout -> Add
+    - Post-Norm (传统): Attention -> Dropout -> Add -> Norm
+                FFN -> Dropout -> Add -> Norm
+
+    Pre-Norm 的优势：
+    1. 更好的梯度流 - 跳过连接不经过Norm，梯度直接通过
+    2. 更易于训练深层网络
+    3. 不需要预热就能使用更大的学习率
+    4. Vision Transformer、DeiT 等最新模型均采用此架构
+
+    包含: LayerNorm -> 多头自注意力 -> Dropout -> 残差连接
+         LayerNorm -> 前馈网络 -> Dropout -> 残差连接
+
+    Args:
+        d_model: 输入维度
+        num_heads: 注意力头数
+        dff: 前馈网络隐藏层维度
+        dropout_rate: Dropout概率 (default: 0.1)
+        drop_path_rate: DropPath概率 (default: 0.0)
     """
-    def __init__(self, d_model, num_heads, dff, dropout_rate=0.1):
+    def __init__(self, d_model, num_heads, dff, dropout_rate=0.1, drop_path_rate=0.0):
         super(TransformerBlock, self).__init__()
 
+        # 注意力部分
+        self.norm1 = nn.LayerNorm(d_model)
         self.attention = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=num_heads,
             dropout=dropout_rate,
             batch_first=True
         )
+        self.drop_path1 = DropPath(drop_path_rate)
 
+        # 前馈部分 - 使用GELU替代ReLU以获得更平滑的梯度
+        self.norm2 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
             nn.Linear(d_model, dff),
-            nn.ReLU(),
+            nn.GELU(),  # 更好的非线性激活
             nn.Dropout(dropout_rate),
-            nn.Linear(dff, d_model)
+            nn.Linear(dff, d_model),
+            nn.Dropout(dropout_rate)
         )
-
-        self.layernorm1 = nn.LayerNorm(d_model)
-        self.layernorm2 = nn.LayerNorm(d_model)
-
-        self.dropout1 = nn.Dropout(dropout_rate)
-        self.dropout2 = nn.Dropout(dropout_rate)
+        self.drop_path2 = DropPath(drop_path_rate)
 
     def forward(self, x, return_attention=False):
         """
         前向传播
 
         Args:
-            x: (batch, seq_len, d_model)
+            x: (batch, seq_len, d_model) - 输入特征
             return_attention: 是否返回注意力权重
 
         Returns:
             如果return_attention=False: x (batch, seq_len, d_model)
             如果return_attention=True: (x, attn_weights) 其中attn_weights (batch, num_heads, seq_len, seq_len)
         """
-        attn_output, attn_weights = self.attention(x, x, x)
-        attn_output = self.dropout1(attn_output)
-        x = self.layernorm1(x + attn_output)
+        # Pre-Norm: Norm -> Attention -> Dropout -> DropPath -> Add
+        normed = self.norm1(x)
+        attn_output, attn_weights = self.attention(normed, normed, normed)
+        x = x + self.drop_path1(attn_output)
 
-        ffn_output = self.ffn(x)
-        ffn_output = self.dropout2(ffn_output)
-        x = self.layernorm2(x + ffn_output)
+        # Pre-Norm: Norm -> FFN -> Dropout -> DropPath -> Add
+        normed = self.norm2(x)
+        ffn_output = self.ffn(normed)
+        x = x + self.drop_path2(ffn_output)
 
         if return_attention:
             return x, attn_weights
