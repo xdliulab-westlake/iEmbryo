@@ -26,7 +26,9 @@ class TrainingConfig:
     """训练配置"""
     BATCH_SIZE = 8  # 增大batch size提高稳定性（4→8）
     EPOCHS = 100
-    LEARNING_RATE = 5e-5  # 降低学习率（1e-4→5e-5）
+    LEARNING_RATE = 1e-4  # Pre-Norm允许更高的学习率（5e-5→1e-4）
+                          # Pre-Norm梯度流更好，不需要极低的LR
+                          # 同时梯度裁剪(norm=1.0)防止爆炸
     WEIGHT_DECAY = 1e-5
 
     TRAIN_RATIO = 0.7
