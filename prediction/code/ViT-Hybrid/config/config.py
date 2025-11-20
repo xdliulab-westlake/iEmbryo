@@ -34,9 +34,9 @@ class TrainingConfig:
     # 损失函数配置
     # 'cross_entropy': 简单的加权CrossEntropyLoss（默认）
     # 'focal': Focal Loss，专门设计用于处理类不平衡（推荐用于5:1不平衡）
-    LOSS_FUNCTION = 'focal'  # 改为'focal'以使用Focal Loss处理类不平衡
+    LOSS_FUNCTION = 'cross_entropy'  # 使用加权CrossEntropyLoss
 
-    # Focal Loss参数
+    # Focal Loss参数（如果使用'focal'损失函数）
     FOCAL_ALPHA = 0.25   # 类权重：高alpha=更关注多数类(Poor)，低alpha=更关注少数类(Good)
                          # 对于5:1不平衡，使用0.25意味着Good类权重=(1-0.25)=0.75（增加75%）
     FOCAL_GAMMA = 2.0    # 聚焦参数：控制有多少focus放在hard examples上
