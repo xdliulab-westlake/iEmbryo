@@ -16,7 +16,6 @@ import sys
 from tqdm import tqdm
 
 from model.model import create_model
-from model.focal_loss import FocalLoss
 from dataset.dataset import create_data_loaders
 from utils.utils import (
     EarlyStopping,
@@ -199,21 +198,9 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
         log_print("\n⚠️  Warning: No training labels provided, using default class weights [0.6, 3.0]")
         log_print("     This assumes a 5:1 imbalance (Poor:Good = 5:1)")
 
-    # 选择损失函数
-    loss_function_type = config.get('loss_function', 'cross_entropy')
-
-    if loss_function_type == 'focal':
-        log_print(f"\n✓ Using Focal Loss for class imbalance handling")
-        log_print(f"  Alpha (class weight): {config['focal_alpha']}")
-        log_print(f"  Gamma (focusing parameter): {config['focal_gamma']}")
-        criterion = FocalLoss(
-            alpha=config['focal_alpha'],
-            gamma=config['focal_gamma'],
-            reduction='mean'
-        )
-    else:
-        log_print(f"\n✓ Using Weighted CrossEntropyLoss")
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # 初始化损失函数
+    log_print(f"\n✓ Using Weighted CrossEntropyLoss")
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = optim.AdamW(
         model_for_params.parameters(),
@@ -320,21 +307,9 @@ def train_stage2(model, train_loader, val_loader, config, device, print_cm=True,
         log_print("\n⚠️  Warning: No training labels provided, using default class weights [0.6, 3.0]")
         log_print("     This assumes a 5:1 imbalance (Poor:Good = 5:1)")
 
-    # 选择损失函数
-    loss_function_type = config.get('loss_function', 'cross_entropy')
-
-    if loss_function_type == 'focal':
-        log_print(f"\n✓ Using Focal Loss for class imbalance handling")
-        log_print(f"  Alpha (class weight): {config['focal_alpha']}")
-        log_print(f"  Gamma (focusing parameter): {config['focal_gamma']}")
-        criterion = FocalLoss(
-            alpha=config['focal_alpha'],
-            gamma=config['focal_gamma'],
-            reduction='mean'
-        )
-    else:
-        log_print(f"\n✓ Using Weighted CrossEntropyLoss")
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # 初始化损失函数
+    log_print(f"\n✓ Using Weighted CrossEntropyLoss")
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = optim.AdamW(
         model_for_params.parameters(),
