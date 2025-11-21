@@ -959,6 +959,10 @@ def create_data_loaders(data_root, config):
     """
     创建数据加载器（使用分层分割保持train/val/test的类别分布一致）
 
+    支持平衡采样以处理类别不平衡：
+    - 如果 config['balanced_sampling'] = True，对训练集进行过采样使两个类别样本数相等
+    - 如果 config['balanced_sampling'] = False，使用原始分布（可配合加权损失函数）
+
     Args:
         data_root: 数据根目录
         config: 配置字典 (包含score_dict_path, 若为BiLSTM风格数据)
@@ -966,7 +970,7 @@ def create_data_loaders(data_root, config):
     Returns:
         train_loader, val_loader, test_loader
     """
-    from torch.utils.data import Subset
+    from torch.utils.data import Subset, WeightedRandomSampler
     import random
     from sklearn.model_selection import StratifiedShuffleSplit
     import numpy as np
@@ -1036,7 +1040,6 @@ def create_data_loaders(data_root, config):
     print(f"测试集: {test_poor:5d} Poor ({test_poor/(test_poor+test_good)*100:5.1f}%) + "
           f"{test_good:5d} Good ({test_good/(test_poor+test_good)*100:5.1f}%)")
     print(f"{'='*70}")
-    print(f"使用加权CrossEntropyLoss处理类别不平衡")
 
     # Create separate dataset instances for train/val/test with different transforms
     # to avoid transform conflicts when using shared indices
@@ -1067,13 +1070,49 @@ def create_data_loaders(data_root, config):
     val_dataset = Subset(val_full_dataset, val_indices)
     test_dataset = Subset(val_full_dataset, test_indices)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.get('batch_size', 4),
-        shuffle=True,
-        num_workers=config.get('num_workers', 4),
-        pin_memory=config.get('pin_memory', True)
-    )
+    # 平衡采样：对训练集使用加权随机采样以平衡类别
+    use_balanced_sampling = config.get('balanced_sampling', True)
+    if use_balanced_sampling:
+        # 计算训练集中的类别权重（反向权重，使得两个类别有相等的采样概率）
+        train_labels_subset = train_labels
+        num_samples_per_class = np.array([
+            (train_labels_subset == 0).sum(),
+            (train_labels_subset == 1).sum()
+        ])
+        total_samples = len(train_labels_subset)
+
+        # 为每个样本分配权重：少数类权重 = total / (2 * num_minority)
+        sample_weights = np.zeros(total_samples)
+        for idx in range(total_samples):
+            label = train_labels_subset[idx]
+            sample_weights[idx] = total_samples / (2 * num_samples_per_class[label])
+
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=total_samples,
+            replacement=True
+        )
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.get('batch_size', 4),
+            sampler=sampler,
+            num_workers=config.get('num_workers', 4),
+            pin_memory=config.get('pin_memory', True)
+        )
+
+        print(f"✓ 使用平衡采样 (weighted random sampling)")
+        print(f"  样本权重: Poor={num_samples_per_class[0]}→{1.0:.3f}, "
+              f"Good={num_samples_per_class[1]}→{(num_samples_per_class[0]/num_samples_per_class[1]):.3f}")
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.get('batch_size', 4),
+            shuffle=True,
+            num_workers=config.get('num_workers', 4),
+            pin_memory=config.get('pin_memory', True)
+        )
+        print(f"✓ 使用原始分布采样（不平衡）")
 
     val_loader = DataLoader(
         val_dataset,

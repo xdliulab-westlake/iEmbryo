@@ -60,6 +60,9 @@ class DataConfig:
     APPLY_PETRI_CROP = True
     APPLY_CENTER_CROP = True
 
+    # 平衡采样：True=使用加权随机采样平衡两个类别；False=保持原始分布
+    BALANCED_SAMPLING = True
+
 
 class PathConfig:
     """路径配置（使用绝对路径）"""
@@ -120,5 +123,6 @@ def get_data_config():
         'num_workers': TrainingConfig.NUM_WORKERS,
         'pin_memory': TrainingConfig.PIN_MEMORY,
         'apply_petri_crop': DataConfig.APPLY_PETRI_CROP,
-        'apply_center_crop': DataConfig.APPLY_CENTER_CROP
+        'apply_center_crop': DataConfig.APPLY_CENTER_CROP,
+        'balanced_sampling': DataConfig.BALANCED_SAMPLING
     }

@@ -174,33 +174,20 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
     # Handle DataParallel wrapper
     model_for_params = model.module if hasattr(model, 'module') else model
 
-    # Calculate class weights from training data
+    # Print data statistics
     if train_labels is not None:
-        # Count classes
         train_labels_np = train_labels.cpu().numpy() if isinstance(train_labels, torch.Tensor) else train_labels
         num_class_0 = (train_labels_np == 0).sum()
         num_class_1 = (train_labels_np == 1).sum()
         total = len(train_labels_np)
 
-        # Calculate weights: weight = total / (num_classes * num_samples_per_class)
-        weight_0 = total / (2 * num_class_0) if num_class_0 > 0 else 1.0
-        weight_1 = total / (2 * num_class_1) if num_class_1 > 0 else 1.0
-        class_weights = torch.tensor([weight_0, weight_1], dtype=torch.float32).to(device)
-
         log_print(f"\nClass distribution in training set:")
-        log_print(f"  Class 0 (Poor): {num_class_0} samples, weight={weight_0:.4f}")
-        log_print(f"  Class 1 (Good): {num_class_1} samples, weight={weight_1:.4f}")
-        log_print(f"  ✅ Using weighted CrossEntropyLoss")
-    else:
-        # Default weights: balance classes assuming typical imbalance
-        # Typical ratio: Poor:Good = 5:1
-        class_weights = torch.tensor([0.6, 3.0], dtype=torch.float32).to(device)
-        log_print("\n⚠️  Warning: No training labels provided, using default class weights [0.6, 3.0]")
-        log_print("     This assumes a 5:1 imbalance (Poor:Good = 5:1)")
+        log_print(f"  Class 0 (Poor): {num_class_0} samples ({num_class_0/total*100:.1f}%)")
+        log_print(f"  Class 1 (Good): {num_class_1} samples ({num_class_1/total*100:.1f}%)")
 
-    # 初始化损失函数
-    log_print(f"\n✓ Using Weighted CrossEntropyLoss")
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # 初始化损失函数：使用不加权的CrossEntropyLoss（依赖数据加载器的平衡采样）
+    log_print(f"\n✓ Using unweighted CrossEntropyLoss with balanced sampling")
+    criterion = nn.CrossEntropyLoss()
 
     optimizer = optim.AdamW(
         model_for_params.parameters(),
@@ -283,33 +270,20 @@ def train_stage2(model, train_loader, val_loader, config, device, print_cm=True,
     model_for_params = model.module if hasattr(model, 'module') else model
     model_for_params.unfreeze_vgg16()
 
-    # Calculate class weights from training data
+    # Print data statistics
     if train_labels is not None:
-        # Count classes
         train_labels_np = train_labels.cpu().numpy() if isinstance(train_labels, torch.Tensor) else train_labels
         num_class_0 = (train_labels_np == 0).sum()
         num_class_1 = (train_labels_np == 1).sum()
         total = len(train_labels_np)
 
-        # Calculate weights: weight = total / (num_classes * num_samples_per_class)
-        weight_0 = total / (2 * num_class_0) if num_class_0 > 0 else 1.0
-        weight_1 = total / (2 * num_class_1) if num_class_1 > 0 else 1.0
-        class_weights = torch.tensor([weight_0, weight_1], dtype=torch.float32).to(device)
-
         log_print(f"\nClass distribution in training set:")
-        log_print(f"  Class 0 (Poor): {num_class_0} samples, weight={weight_0:.4f}")
-        log_print(f"  Class 1 (Good): {num_class_1} samples, weight={weight_1:.4f}")
-        log_print(f"  ✅ Using weighted CrossEntropyLoss")
-    else:
-        # Default weights: balance classes assuming typical imbalance
-        # Typical ratio: Poor:Good = 5:1
-        class_weights = torch.tensor([0.6, 3.0], dtype=torch.float32).to(device)
-        log_print("\n⚠️  Warning: No training labels provided, using default class weights [0.6, 3.0]")
-        log_print("     This assumes a 5:1 imbalance (Poor:Good = 5:1)")
+        log_print(f"  Class 0 (Poor): {num_class_0} samples ({num_class_0/total*100:.1f}%)")
+        log_print(f"  Class 1 (Good): {num_class_1} samples ({num_class_1/total*100:.1f}%)")
 
-    # 初始化损失函数
-    log_print(f"\n✓ Using Weighted CrossEntropyLoss")
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # 初始化损失函数：使用不加权的CrossEntropyLoss（依赖数据加载器的平衡采样）
+    log_print(f"\n✓ Using unweighted CrossEntropyLoss with balanced sampling")
+    criterion = nn.CrossEntropyLoss()
 
     optimizer = optim.AdamW(
         model_for_params.parameters(),
