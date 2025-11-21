@@ -233,9 +233,9 @@ class CrossValidator:
         metrics = {
             'fold': fold,
             'accuracy': accuracy_score(all_labels, all_preds),
-            'precision': precision_score(all_labels, all_preds, average='weighted'),
-            'recall': recall_score(all_labels, all_preds, average='weighted'),
-            'f1': f1_score(all_labels, all_preds, average='weighted'),
+            'precision': precision_score(all_labels, all_preds, average='macro'),
+            'recall': recall_score(all_labels, all_preds, average='macro'),
+            'f1': f1_score(all_labels, all_preds, average='macro'),
             'predictions': all_preds.tolist(),
             'true_labels': all_labels.tolist(),
             'probabilities': all_probs.tolist()
