@@ -938,18 +938,64 @@ class MultiFocalEmbryoDataset(Dataset):
 
 
 def get_transforms(augment=False):
-    """获取数据变换"""
+    """
+    获取数据变换
+
+    训练增强策略 (v2.0 增强版本)：
+    - RandomHorizontalFlip: 水平翻转（适合胚胎图像，无特定方向性）
+    - RandomVerticalFlip: 垂直翻转（新增，胚胎图像可以垂直翻转）
+    - RandomRotation: 随机旋转±20度（新增，捕捉不同角度的胚胎特征）
+    - RandomAffine: 随机仿射变换（包含平移和倾斜）
+    - ColorJitter: 色彩抖动（亮度±20%，对比度±20%，从10%提升到20%）
+    - RandomPerspective: 随机透视变换（新增，增加鲁棒性）
+    - GaussianBlur: 高斯模糊（新增，平滑化处理）
+    """
     if augment:
         transform = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+            # 几何变换
+            transforms.RandomHorizontalFlip(p=0.5),        # 水平翻转
+            transforms.RandomVerticalFlip(p=0.5),          # 垂直翻转（新增）
+            transforms.RandomRotation(degrees=20),         # 随机旋转±20度（新增）
+            transforms.RandomAffine(
+                degrees=0,
+                translate=(0.1, 0.1),                       # 随机平移±10%（新增）
+                scale=(0.9, 1.1)                            # 随机缩放±10%（新增）
+            ),
+
+            # 色彩和纹理增强
+            transforms.ColorJitter(
+                brightness=0.2,                             # 亮度±20%（从10%提升）
+                contrast=0.2,                               # 对比度±20%（从10%提升）
+                saturation=0.1,                             # 饱和度±10%（新增）
+                hue=0.05                                    # 色调变化（新增）
+            ),
+
+            # 空间变换
+            transforms.RandomPerspective(
+                distortion_scale=0.2,                       # 透视畸变程度（新增）
+                p=0.3
+            ),
+
+            # 模糊处理
+            transforms.GaussianBlur(
+                kernel_size=3,                              # 高斯模糊核大小（新增）
+                sigma=(0.1, 2.0)
+            ),
+
+            # 标准处理
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
         ])
     else:
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
         ])
 
     return transform
@@ -1264,23 +1310,55 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config, ena
         random_state=42
     )
 
-    # 不进行下采样平衡，保留原始数据分布以使用加权损失处理类别不平衡
+    # 使用平衡采样（WeightedRandomSampler）实现1:1采样比例
     import random
+    import numpy as np
+    from torch.utils.data import Subset, WeightedRandomSampler
+
     train_labels = labels[train_indices].numpy()
     train_indices_list = list(train_indices)
 
     poor_count = sum(1 for label in train_labels if label == 0)
     good_count = sum(1 for label in train_labels if label == 1)
 
-    print(f"Training set: {poor_count} Poor + {good_count} Good (原始分布，保留所有样本)")
-    print(f"  注：将使用加权CrossEntropyLoss处理类别不平衡")
+    print(f"Training set: {poor_count} Poor + {good_count} Good (原始分布)")
 
-    from torch.utils.data import Subset
-
-    # Create subsets using appropriate datasets (训练集保留所有样本)
+    # 创建子数据集
     train_dataset = Subset(train_dataset_base, train_indices_list)
     val_dataset = Subset(val_test_dataset_base, val_indices)
     test_dataset = Subset(val_test_dataset_base, test_indices)
+
+    # 创建WeightedRandomSampler实现1:1平衡采样
+    use_balanced_sampling = config.get('balanced_sampling', True)
+
+    if use_balanced_sampling:
+        # 计算每个样本的权重：让Poor和Good被采样到的概率相等
+        num_samples_per_class = np.array([poor_count, good_count])
+        total_samples = len(train_labels)
+
+        # 权重计算：weight = total / (2 * class_count)
+        # 这样Poor和Good各占50%的采样概率
+        sample_weights = np.zeros(total_samples)
+        for idx in range(total_samples):
+            label = int(train_labels[idx])
+            sample_weights[idx] = total_samples / (2.0 * num_samples_per_class[label])
+
+        # 创建sampler
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=total_samples,
+            replacement=True  # 允许重复采样
+        )
+
+        print(f"✓ 使用平衡采样 (WeightedRandomSampler)")
+        print(f"  Poor样本权重: {sample_weights[train_labels == 0][0]:.3f}")
+        print(f"  Good样本权重: {sample_weights[train_labels == 1][0]:.3f}")
+        print(f"  预期每个epoch中Poor:Good ≈ 1:1")
+        shuffle = False  # 使用sampler时不能shuffle
+    else:
+        sampler = None
+        shuffle = True
+        print(f"✓ 使用原始分布（不平衡）")
 
     # Create custom collate function with embryo_to_label
     from functools import partial
@@ -1294,7 +1372,8 @@ def create_multi_focal_data_loaders(multi_focal_df, embryo_to_label, config, ena
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.get('batch_size', 4),
-        shuffle=True,
+        sampler=sampler if use_balanced_sampling else None,
+        shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
         collate_fn=collate_fn

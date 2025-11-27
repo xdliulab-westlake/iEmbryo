@@ -212,15 +212,17 @@ def train_model(model, train_loader, val_loader, training_config, device, args, 
         if is_main_process:
             print("Executing two-stage training...")
             print("\nStage 1: Training Transformer (VGG16 frozen)")
-        model = train_stage1(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
+        model = train_stage1(model, train_loader, val_loader, training_config, device,
+                           train_labels=train_labels, freeze_vgg16=True)
 
         if is_main_process:
             print("\nStage 2: Fine-tuning with VGG16 unfrozen")
         model = train_stage2(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
     else:
         if is_main_process:
-            print("Executing single-stage training...")
-        model = train_stage1(model, train_loader, val_loader, training_config, device, train_labels=train_labels)
+            print("Executing end-to-end training (VGG16 with differential learning rates)...")
+        model = train_stage1(model, train_loader, val_loader, training_config, device,
+                           train_labels=train_labels, freeze_vgg16=False)
 
     return model
 

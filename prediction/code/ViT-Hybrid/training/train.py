@@ -155,8 +155,8 @@ def validate(model, dataloader, criterion, device, print_cm=False):
     return avg_loss, metrics
 
 
-def train_stage1(model, train_loader, val_loader, config, device, print_cm=True, train_labels=None):
-    """Stage 1: Train Transformer (VGG16 frozen)
+def train_stage1(model, train_loader, val_loader, config, device, print_cm=True, train_labels=None, freeze_vgg16=True):
+    """Stage 1: Train Transformer (VGG16 frozen or with differential lr)
 
     Args:
         model: The model to train
@@ -166,13 +166,19 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
         device: Device to run on
         print_cm: Whether to print confusion matrices (default: True)
         train_labels: Optional tensor of training labels for class weight calculation
+        freeze_vgg16: If True, freeze VGG16; if False, use differential learning rates (default: True)
     """
-    log_print("\n" + "="*60)
-    log_print("Stage 1: Training Transformer (VGG16 frozen)")
-    log_print("="*60)
-
     # Handle DataParallel wrapper
     model_for_params = model.module if hasattr(model, 'module') else model
+
+    if freeze_vgg16:
+        log_print("\n" + "="*60)
+        log_print("Stage 1: Training Transformer (VGG16 frozen)")
+        log_print("="*60)
+    else:
+        log_print("\n" + "="*60)
+        log_print("End-to-End Training (VGG16 with differential learning rates)")
+        log_print("="*60)
 
     # Print data statistics
     if train_labels is not None:
@@ -189,11 +195,51 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
     log_print(f"\n✓ Using unweighted CrossEntropyLoss with balanced sampling")
     criterion = nn.CrossEntropyLoss()
 
-    optimizer = optim.AdamW(
-        model_for_params.parameters(),
-        lr=config['learning_rate'],
-        weight_decay=config['weight_decay']
-    )
+    # 根据freeze_vgg16决定优化器配置
+    if freeze_vgg16:
+        # 传统方式：VGG16冻结，所有参数使用相同学习率
+        # VGG16在初始化时已经被冻结（requires_grad=False）
+        optimizer = optim.AdamW(
+            model_for_params.parameters(),
+            lr=config['learning_rate'],
+            weight_decay=config['weight_decay']
+        )
+        log_print(f"  Learning rate: {config['learning_rate']}")
+        log_print(f"  VGG16: Frozen (requires_grad=False)")
+    else:
+        # 端到端训练：先解冻VGG16所有参数，然后使用差异化学习率
+        log_print(f"  Unfreezing VGG16 for end-to-end training...")
+
+        # 解冻VGG16的所有参数
+        for param in model_for_params.vgg16_extractor.parameters():
+            param.requires_grad = True
+
+        # VGG16底层用极小lr，顶层用小lr，Transformer用中lr，分类器用大lr
+        vgg_features = model_for_params.vgg16_extractor.features
+        vgg_layers = list(vgg_features.children())
+        total_vgg_layers = len(vgg_layers)
+        split_point = int(total_vgg_layers * 0.67)  # 前67%用极小lr
+
+        vgg_bottom_params = []
+        for layer in vgg_layers[:split_point]:
+            vgg_bottom_params.extend(layer.parameters())
+
+        vgg_top_params = []
+        for layer in vgg_layers[split_point:]:
+            vgg_top_params.extend(layer.parameters())
+
+        optimizer = optim.AdamW([
+            {'params': vgg_bottom_params, 'lr': 1e-6, 'weight_decay': 1e-5},     # VGG16底层
+            {'params': vgg_top_params, 'lr': 1e-5, 'weight_decay': 1e-5},        # VGG16顶层
+            {'params': model_for_params.transformer.parameters(), 'lr': 1e-4, 'weight_decay': 1e-5},  # Transformer
+            {'params': model_for_params.classifier.parameters(), 'lr': 5e-4, 'weight_decay': 1e-5}    # 分类器
+        ])
+
+        log_print(f"  Differential learning rates:")
+        log_print(f"    VGG16 bottom ({split_point} layers): lr=1e-6")
+        log_print(f"    VGG16 top ({total_vgg_layers-split_point} layers): lr=1e-5")
+        log_print(f"    Transformer: lr=1e-4")
+        log_print(f"    Classifier: lr=5e-4")
     scheduler = ReduceLROnPlateau(
         optimizer,
         mode='max',
@@ -208,7 +254,12 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
 
     history = {'train_loss': [], 'val_loss': [], 'val_auc': []}
 
-    for epoch in range(config['epochs'] // 2):
+    # 根据freeze_vgg16决定训练epochs数
+    # freeze_vgg16=True: 只训练一半epochs (stage1)
+    # freeze_vgg16=False: 训练全部epochs (end-to-end)
+    num_epochs = config['epochs'] // 2 if freeze_vgg16 else config['epochs']
+
+    for epoch in range(num_epochs):
         train_loss, train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, device, print_cm=print_cm
         )
@@ -223,7 +274,7 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
         history['val_loss'].append(val_loss)
         history['val_auc'].append(val_metrics['auc'])
 
-        log_print(f"\nEpoch [{epoch+1}/{config['epochs']//2}]")
+        log_print(f"\nEpoch [{epoch+1}/{num_epochs}]")
         log_print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
         log_print(f"  Val AUC: {val_metrics['auc']:.4f} | Val Acc: {val_metrics['accuracy']:.4f}")
         log_print(f"  Train Metrics: Precision={train_metrics['precision']:.4f} | Recall={train_metrics['recall']:.4f} | F1={train_metrics['f1_score']:.4f}")
@@ -236,16 +287,23 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
     model_to_save = model.module if hasattr(model, 'module') else model
     model_to_save.load_state_dict(early_stopping.best_model_state)
 
+    # 根据训练模式保存不同的模型文件名
+    save_path = Path(PathConfig.MODEL_SAVE_DIR) / ('end_to_end_best.pth' if not freeze_vgg16 else 'stage1_best.pth')
     save_checkpoint({
         'epoch': epoch,
         'model_state_dict': model_to_save.state_dict(),
         'optimizer_state_dict': optimizer.state_dict()
-    }, Path(PathConfig.MODEL_SAVE_DIR) / 'stage1_best.pth')
+    }, save_path)
 
-    save_history(history, Path(PathConfig.RESULT_DIR) / 'stage1_history.json')
+    # 根据训练模式保存不同的历史文件名
+    history_path = Path(PathConfig.RESULT_DIR) / ('end_to_end_history.json' if not freeze_vgg16 else 'stage1_history.json')
+    save_history(history, history_path)
 
     if is_main_process():
-        log_print(f"\nStage 1 completed. Best model saved to: {Path(PathConfig.MODEL_SAVE_DIR) / 'stage1_best.pth'}")
+        if freeze_vgg16:
+            log_print(f"\nStage 1 completed. Best model saved to: {save_path}")
+        else:
+            log_print(f"\nEnd-to-end training completed. Best model saved to: {save_path}")
 
     return model
 
