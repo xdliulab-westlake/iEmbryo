@@ -252,12 +252,29 @@ class BackboneModel(nn.Module):
         backbone = models.vgg16(pretrained=pretrained)
         features = backbone.features
         classifier_features = nn.Sequential(*list(backbone.classifier.children())[:4])
+
+        # 禁用所有ReLU的inplace操作以支持Grad-CAM
+        self._disable_inplace_relu(features)
+        self._disable_inplace_relu(classifier_features)
+
         return nn.Sequential(
             features,
             nn.AdaptiveAvgPool2d((7, 7)),
             nn.Flatten(),
             classifier_features
         )
+
+    def _disable_inplace_relu(self, module: nn.Module):
+        """
+        递归禁用模块中所有ReLU层的inplace操作
+        这对于Grad-CAM等需要保存中间梯度的技术至关重要
+        """
+        for child_name, child_module in module.named_children():
+            if isinstance(child_module, nn.ReLU):
+                child_module.inplace = False
+            else:
+                # 递归处理子模块
+                self._disable_inplace_relu(child_module)
 
     def _create_resnet(self, pretrained: bool) -> nn.Module:
         """创建ResNet系列模型"""

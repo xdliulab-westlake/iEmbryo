@@ -21,6 +21,7 @@ current_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(current_dir))
 
 from utils.logger import MetricsMonitor
+from visualization.training_plots import create_training_plotter
 
 try:
     import deepspeed
@@ -110,6 +111,11 @@ class STORKTrainer:
         self.mixup = None
         self.cutmix = None
         self._init_augmentations()
+
+        # 初始化绘图器
+        output_dir = config.get('paths', {}).get('output_dir', 'outputs')
+        model_name = config.get('model', {}).get('name', 'model')
+        self.plotter = create_training_plotter(output_dir=output_dir, model_name=model_name)
 
         print(f"训练器初始化完成: 设备={self.device}, 分布式={self.is_distributed}, DeepSpeed={self.use_deepspeed}, 混合精度={self.use_amp}")
 
@@ -571,6 +577,16 @@ class STORKTrainer:
                 print(f"\n🛑 早停触发! 在第 {self.current_epoch} 轮停止训练")
                 print(f"连续 {self.metrics_monitor.patience} 轮无改进")
                 break
+
+        # 绘制训练历史
+        print("\n生成训练曲线图...")
+        try:
+            self.plotter.plot_training_history(
+                train_history=self.train_history,
+                val_history=self.val_history
+            )
+        except Exception as e:
+            print(f"绘制训练曲线失败: {e}")
 
         return {
             'train_history': self.train_history,

@@ -197,49 +197,91 @@ def train_stage1(model, train_loader, val_loader, config, device, print_cm=True,
 
     # 根据freeze_vgg16决定优化器配置
     if freeze_vgg16:
-        # 传统方式：VGG16冻结，所有参数使用相同学习率
-        # VGG16在初始化时已经被冻结（requires_grad=False）
+        # Stage 1策略：冻结VGG16前1/3，解冻后2/3
+        log_print(f"  Applying partial freezing strategy to VGG16...")
+
+        # 收集VGG16所有有参数的层
+        vgg_features = model_for_params.vgg16_extractor.features
+        vgg_layers_with_params = [
+            (i, layer) for i, layer in enumerate(vgg_features.children())
+            if len(list(layer.parameters())) > 0
+        ]
+        total_param_layers = len(vgg_layers_with_params)
+        split_point = int(total_param_layers * 1/3)  # 前1/3冻结
+
+        # 冻结前1/3的有参数层
+        for idx, (i, layer) in enumerate(vgg_layers_with_params):
+            if idx < split_point:
+                for param in layer.parameters():
+                    param.requires_grad = False
+            else:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
+        # VGG16的classifier部分也解冻
+        for param in model_for_params.vgg16_extractor.classifier.parameters():
+            param.requires_grad = True
+
+        log_print(f"  VGG16 freezing strategy:")
+        log_print(f"    Total VGG16 param layers: {total_param_layers}")
+        log_print(f"    Frozen param layers: {split_point} (first 1/3)")
+        log_print(f"    Trainable param layers: {total_param_layers - split_point} (last 2/3)")
+        log_print(f"    VGG16 classifier: Trainable")
+
         optimizer = optim.AdamW(
             model_for_params.parameters(),
             lr=config['learning_rate'],
             weight_decay=config['weight_decay']
         )
         log_print(f"  Learning rate: {config['learning_rate']}")
-        log_print(f"  VGG16: Frozen (requires_grad=False)")
     else:
-        # 端到端训练：先解冻VGG16所有参数，然后使用差异化学习率
-        log_print(f"  Unfreezing VGG16 for end-to-end training...")
+        # 端到端训练：部分冻结VGG16（只解冻顶层），减少显存占用
+        log_print(f"  Partial unfreezing VGG16 for end-to-end training (top layers only)...")
 
-        # 解冻VGG16的所有参数
-        for param in model_for_params.vgg16_extractor.parameters():
-            param.requires_grad = True
-
-        # VGG16底层用极小lr，顶层用小lr，Transformer用中lr，分类器用大lr
+        # VGG16分层：前67%保持冻结，后33%解冻
         vgg_features = model_for_params.vgg16_extractor.features
         vgg_layers = list(vgg_features.children())
         total_vgg_layers = len(vgg_layers)
-        split_point = int(total_vgg_layers * 0.67)  # 前67%用极小lr
+        split_point = int(total_vgg_layers * 0.67)  # 前67%冻结
 
-        vgg_bottom_params = []
+        # 冻结VGG16底层（前67%）
         for layer in vgg_layers[:split_point]:
-            vgg_bottom_params.extend(layer.parameters())
+            for param in layer.parameters():
+                param.requires_grad = False
 
+        # 解冻VGG16顶层（后33%）
         vgg_top_params = []
         for layer in vgg_layers[split_point:]:
+            for param in layer.parameters():
+                param.requires_grad = True
             vgg_top_params.extend(layer.parameters())
 
+        # 收集Transformer参数
+        transformer_params = []
+        for block in model_for_params.transformer_blocks:
+            transformer_params.extend(block.parameters())
+        transformer_params.extend(model_for_params.temporal_pooling.parameters())
+
+        # 收集分类器参数
+        classifier_params = [
+            *model_for_params.classifier_norm.parameters(),
+            *model_for_params.classifier_fc1.parameters(),
+            *model_for_params.classifier_fc2.parameters()
+        ]
+
+        # 优化器：只包含可训练参数（VGG16顶层+Transformer+Classifier）
+        # 使用更大的学习率避免loss停滞
         optimizer = optim.AdamW([
-            {'params': vgg_bottom_params, 'lr': 1e-6, 'weight_decay': 1e-5},     # VGG16底层
-            {'params': vgg_top_params, 'lr': 1e-5, 'weight_decay': 1e-5},        # VGG16顶层
-            {'params': model_for_params.transformer.parameters(), 'lr': 1e-4, 'weight_decay': 1e-5},  # Transformer
-            {'params': model_for_params.classifier.parameters(), 'lr': 5e-4, 'weight_decay': 1e-5}    # 分类器
+            {'params': vgg_top_params, 'lr': 5e-5, 'weight_decay': 1e-5},        # VGG16顶层 (增大5倍)
+            {'params': transformer_params, 'lr': 3e-4, 'weight_decay': 1e-5},    # Transformer (增大3倍)
+            {'params': classifier_params, 'lr': 1e-3, 'weight_decay': 1e-5}      # 分类器 (增大2倍)
         ])
 
-        log_print(f"  Differential learning rates:")
-        log_print(f"    VGG16 bottom ({split_point} layers): lr=1e-6")
-        log_print(f"    VGG16 top ({total_vgg_layers-split_point} layers): lr=1e-5")
-        log_print(f"    Transformer: lr=1e-4")
-        log_print(f"    Classifier: lr=5e-4")
+        log_print(f"  Partial freezing strategy:")
+        log_print(f"    VGG16 bottom ({split_point} layers): FROZEN (requires_grad=False)")
+        log_print(f"    VGG16 top ({total_vgg_layers-split_point} layers): lr=5e-5")
+        log_print(f"    Transformer: lr=3e-4")
+        log_print(f"    Classifier: lr=1e-3")
     scheduler = ReduceLROnPlateau(
         optimizer,
         mode='max',
@@ -321,12 +363,17 @@ def train_stage2(model, train_loader, val_loader, config, device, print_cm=True,
         train_labels: Optional tensor of training labels for class weight calculation
     """
     log_print("\n" + "="*60)
-    log_print("Stage 2: Fine-tuning with VGG16 unfrozen")
+    log_print("Stage 2: Fine-tuning with VGG16 fully unfrozen")
     log_print("="*60)
 
     # Handle DataParallel wrapper
     model_for_params = model.module if hasattr(model, 'module') else model
-    model_for_params.unfreeze_vgg16()
+
+    # 完全解冻VGG16所有层（包括features和classifier）
+    for param in model_for_params.vgg16_extractor.parameters():
+        param.requires_grad = True
+
+    log_print("  VGG16: All layers unfrozen for fine-tuning")
 
     # Print data statistics
     if train_labels is not None:
