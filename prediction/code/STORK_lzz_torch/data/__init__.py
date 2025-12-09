@@ -14,12 +14,12 @@ from .stork_preprocessing import (
     preprocess_image_stork_universal
 )
 from .parallel_processing import (
-    STORKDataLoader, create_pytorch_datasets_from_paths
+    STORKDataLoader, create_pytorch_datasets_from_paths, EmbryoBalancedSampler
 )
 from .batch_cache import BatchCacheManager, BatchCachedDataset
 
 __all__ = [
-    'EmbryoDataset', 'STORKDataLoader',
+    'EmbryoDataset', 'STORKDataLoader', 'EmbryoBalancedSampler',
     'create_train_transforms', 'create_val_transforms', 'create_advanced_transforms',
     'create_gpu_transforms', 'create_simple_gpu_transforms', 'check_kornia_available',
     'GPUAugmentation', 'STORKGPUAugmentation',

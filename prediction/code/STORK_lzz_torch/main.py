@@ -31,7 +31,7 @@ from models import create_model
 from data import STORKDataLoader, create_train_transforms, create_val_transforms
 from training import STORKTrainer
 from optimization import create_optimization_setup
-from evaluation import evaluate_model, create_cross_validator, EmbryoMetricsCalculator
+from evaluation import evaluate_model, create_cross_validator
 from visualization import create_gradcam_visualizer
 from utils import create_model_manager, create_training_logger
 
@@ -92,60 +92,45 @@ class STORKApplication:
         self.data_loader = STORKDataLoader(self.config)
 
         # 加载数据集（使用STORK预处理）
-        self.train_dataset, self.test_dataset = self.data_loader.load_data()
+        # 现在返回三个独立的数据集：train, val, test
+        # 胚胎级别的完全分离已经在 _collect_image_paths() 中完成
+        self.train_dataset, self.val_dataset, self.test_dataset = self.data_loader.load_data()
 
-        # 使用胚胎级别的分割映射来创建验证集子集
-        # 这确保了同一胚胎的所有图像要么全部在训练集，要么全部在验证集
-        if hasattr(self.data_loader, 'image_split_mapping') and hasattr(self.data_loader, 'split_mapping'):
-            # 获取分割映射信息
-            image_split_mapping = self.data_loader.image_split_mapping
+        if self.is_main_process:
+            print(f"✓ 成功应用胚胎级别分割:")
+            print(f"  训练集: {len(self.train_dataset)} 张图像，来自 {len(self.data_loader.train_embryo_ids)} 个胚胎")
+            print(f"  验证集: {len(self.val_dataset)} 张图像，来自 {len(self.data_loader.val_embryo_ids)} 个胚胎")
+            print(f"  测试集: {len(self.test_dataset)} 张图像，来自 {len(self.data_loader.test_embryo_ids)} 个胚胎")
 
-            # 创建验证集的索引
-            val_indices = []
-            # 从缓存数据集中获取路径列表
-            if hasattr(self.train_dataset, 'cached_paths') and self.train_dataset.cached_paths:
-                for idx, img_path in enumerate(self.train_dataset.cached_paths):
-                    if img_path in image_split_mapping and image_split_mapping[img_path] == "val":
-                        val_indices.append(idx)
-            elif hasattr(self.train_dataset, 'image_paths'):
-                for idx, img_path in enumerate(self.train_dataset.image_paths):
-                    if img_path in image_split_mapping and image_split_mapping[img_path] == "val":
-                        val_indices.append(idx)
-
-            # 如果成功找到验证集索引，使用它们
-            if val_indices:
-                train_indices = [i for i in range(len(self.train_dataset)) if i not in val_indices]
-                train_subset = torch.utils.data.Subset(self.train_dataset, train_indices)
-                val_subset = torch.utils.data.Subset(self.train_dataset, val_indices)
-
-                if self.is_main_process:
-                    print(f"✓ 使用胚胎级别分割:")
-                    print(f"  训练集: {len(train_indices)} 张图像")
-                    print(f"  验证集: {len(val_indices)} 张图像")
-            else:
-                # 如果找不到映射信息，使用随机分割（后备方案）
-                if self.is_main_process:
-                    print("⚠ 警告: 未找到胚胎级别分割映射，使用随机分割")
-                val_ratio = 15.0 / 85.0
-                val_size = int(val_ratio * len(self.train_dataset))
-                train_size = len(self.train_dataset) - val_size
-                train_subset, val_subset = random_split(self.train_dataset, [train_size, val_size])
-        else:
-            # 后备方案：使用随机分割
-            if self.is_main_process:
-                print("⚠ 警告: 未找到胚胎级别分割信息，使用随机分割")
-            val_ratio = 15.0 / 85.0
-            val_size = int(val_ratio * len(self.train_dataset))
-            train_size = len(self.train_dataset) - val_size
-            train_subset, val_subset = random_split(self.train_dataset, [train_size, val_size])
+        # 直接使用来自 _collect_image_paths 的数据集
+        train_subset = self.train_dataset
+        val_subset = self.val_dataset
 
         # 创建数据加载器
         batch_size = self.config['training']['batch_size']
         num_workers = self.config.get('data', {}).get('num_workers', 4)
 
-        # 检查是否需要分布式采样器
+        # 检查是否需要分布式采样器或胚胎平衡采样器
         train_sampler = None
-        if self.optimization_setup['is_distributed'] and torch.distributed.is_initialized():
+
+        # 优先使用胚胎平衡采样器（如果数据集支持且有胚胎ID信息）
+        use_embryo_sampler = self.config.get('data', {}).get('embryo_balanced_sampling', False)
+        if use_embryo_sampler and not (self.optimization_setup['is_distributed'] and torch.distributed.is_initialized()):
+            try:
+                # 创建胚胎级别平衡采样器
+                train_sampler = self.data_loader.create_embryo_balanced_sampler(
+                    train_subset, batch_size=batch_size, shuffle=True
+                )
+                if self.is_main_process:
+                    print("✓ 使用胚胎级别平衡采样器进行训练")
+                    train_sampler.print_distribution()
+            except Exception as e:
+                if self.is_main_process:
+                    print(f"⚠ 无法创建胚胎平衡采样器: {e}")
+                    print("  降级为随机采样")
+
+        # 如果没有使用胚胎采样器，检查是否需要分布式采样器
+        if train_sampler is None and self.optimization_setup['is_distributed'] and torch.distributed.is_initialized():
             from torch.utils.data.distributed import DistributedSampler
             train_sampler = DistributedSampler(train_subset)
             if self.is_main_process:
@@ -328,6 +313,8 @@ class STORKApplication:
 
                     # 打印对比报告
                     if 'metrics_result' in embryo_metrics:
+                        # 延迟导入以避免循环导入
+                        from evaluation import EmbryoMetricsCalculator
                         calculator = EmbryoMetricsCalculator(num_classes=2)
                         calculator.print_comparison_report(embryo_metrics['metrics_result'])
 
@@ -385,7 +372,7 @@ class STORKApplication:
 
                     # 创建完整数据集用于交叉验证
                     from torch.utils.data import ConcatDataset
-                    full_dataset = ConcatDataset([self.train_dataset, self.test_dataset])
+                    full_dataset = ConcatDataset([self.train_dataset, self.val_dataset, self.test_dataset])
 
                     # 运行交叉验证
                     cv_results = cv_validator.run_cross_validation(

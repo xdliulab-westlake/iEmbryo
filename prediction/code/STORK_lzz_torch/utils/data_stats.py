@@ -168,6 +168,13 @@ def print_dataset_statistics(train_data: Union[Dataset, Subset],
     if isinstance(train_data, Subset):
         train_labels, train_paths = get_labels_and_paths_from_subset(train_data)
         val_labels, val_paths = get_labels_and_paths_from_subset(val_data)
+        print(f"\n[DEBUG] Subset提取:")
+        print(f"  train_indices: {len(train_data.indices)} -> train_labels: {len(train_labels)}, train_paths: {len(train_paths)}")
+        print(f"  val_indices: {len(val_data.indices)} -> val_labels: {len(val_labels)}, val_paths: {len(val_paths)}")
+        if len(train_paths) > 0:
+            print(f"  示例train_path: {train_paths[0]}")
+        if len(val_paths) > 0:
+            print(f"  示例val_path: {val_paths[0]}")
     else:
         train_labels, train_paths = get_labels_and_paths_from_dataset(train_data)
         val_labels, val_paths = get_labels_and_paths_from_dataset(val_data)
@@ -179,6 +186,37 @@ def print_dataset_statistics(train_data: Union[Dataset, Subset],
     val_embryos = set(extract_embryo_id(p) for p in val_paths)
     test_embryos = set(extract_embryo_id(p) for p in test_paths)
     all_embryos = train_embryos | val_embryos | test_embryos
+
+    # 调试：检查胚胎ID提取
+    print(f"\n[DEBUG] 胚胎ID提取:")
+    if len(train_paths) > 0:
+        sample_train_ids = [extract_embryo_id(train_paths[i]) for i in range(min(5, len(train_paths)))]
+        print(f"  train_paths[0]: {train_paths[0]}")
+        print(f"  提取的胚胎ID: {sample_train_ids[0]}")
+    if len(val_paths) > 0:
+        sample_val_ids = [extract_embryo_id(val_paths[i]) for i in range(min(5, len(val_paths)))]
+        print(f"  val_paths[0]: {val_paths[0]}")
+        print(f"  提取的胚胎ID: {sample_val_ids[0]}")
+
+    print(f"\n[DEBUG] 胚胎分布问题诊断:")
+    print(f"  train_embryos: {len(train_embryos)}")
+    print(f"  val_embryos: {len(val_embryos)}")
+    print(f"  test_embryos: {len(test_embryos)}")
+    print(f"  all_embryos (train|val|test): {len(all_embryos)}")
+    print(f"  train∩val: {len(train_embryos & val_embryos)} (应该为0) ← 问题！")
+    print(f"  train∩test: {len(train_embryos & test_embryos)} (应该为0) ← 问题！")
+    print(f"  val∩test: {len(val_embryos & test_embryos)} (应该为0) ← 问题！")
+
+    # 找出重复的胚胎
+    train_val_overlap = train_embryos & val_embryos
+    if len(train_val_overlap) > 0 and len(train_val_overlap) <= 10:
+        print(f"  重叠的train∩val胚胎: {list(train_val_overlap)[:5]}")
+
+    # 检查是否所有路径都正确属于某个集合
+    print(f"\n[DEBUG] 路径-胚胎一致性检查:")
+    print(f"  train_paths中的胚胎数: {len(train_embryos)}")
+    print(f"  val_paths中的胚胎数: {len(val_embryos)}")
+    print(f"  test_paths中的胚胎数: {len(test_embryos)}")
 
     # 分析各数据集分布
     train_stats = analyze_class_distribution(train_labels)

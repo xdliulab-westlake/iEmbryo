@@ -22,7 +22,6 @@ sys.path.insert(0, str(current_dir))
 
 from utils.logger import MetricsMonitor
 from visualization.training_plots import create_training_plotter
-from evaluation.embryo_metrics import EmbryoMetricsCalculator
 
 try:
     import deepspeed
@@ -471,6 +470,8 @@ class STORKTrainer:
         # 计算胚胎级别指标
         if all_image_paths and all_y_true:
             try:
+                # 延迟导入以避免循环导入
+                from evaluation.embryo_metrics import EmbryoMetricsCalculator
                 calculator = EmbryoMetricsCalculator(num_classes=2)
                 metrics_result = calculator.calculate_metrics(
                     all_image_paths,
@@ -778,6 +779,8 @@ class STORKTrainer:
         # 如果需要计算胚胎级别指标
         if compute_embryo_metrics and all_image_paths and all_y_true:
             try:
+                # 延迟导入以避免循环导入
+                from evaluation.embryo_metrics import EmbryoMetricsCalculator
                 calculator = EmbryoMetricsCalculator(num_classes=2)
                 metrics_result = calculator.calculate_metrics(
                     all_image_paths,

@@ -9,10 +9,12 @@ import hashlib
 import time
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Iterator
 from pathlib import Path
+from collections import defaultdict
 import numpy as np
 import torch
+from torch.utils.data import Sampler, Dataset
 from sklearn.model_selection import train_test_split
 
 from .stork_preprocessing import preprocess_embryo_image
@@ -401,35 +403,36 @@ class STORKDataLoader:
         self.apply_petri_crop = data_config.get('apply_petri_crop', True)
         self.apply_center_crop = data_config.get('apply_center_crop', True)
 
-    def load_data(self) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset]:
+    def load_data(self) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset]:
         """
-        加载数据并返回PyTorch数据集（渐进式缓存版本）
+        加载数据并返回PyTorch数据集（三个独立的数据集）
 
         Returns:
-            训练数据集, 测试数据集
+            训练数据集, 验证数据集, 测试数据集
         """
         if is_main_process():
             print("开始收集图片路径信息...")
 
-        # 直接收集图片路径，不进行预处理
-        train_paths, train_labels, test_paths, test_labels = self._collect_image_paths()
+        # 收集图片路径，返回三个独立的数据集
+        train_paths, train_labels, val_paths, val_labels, test_paths, test_labels = self._collect_image_paths()
 
         # 获取缓存配置
         cache_dir = self.config.get('paths', {}).get('cache_dir', './batch_cache')
         chunk_size = self.config.get('data', {}).get('cache_chunk_size', 1000)
 
         # 创建批量缓存PyTorch数据集，传递完整配置参数
-        train_dataset, test_dataset = self._create_cached_datasets(
-            train_paths, train_labels, test_paths, test_labels,
+        train_dataset, val_dataset, test_dataset = self._create_cached_datasets(
+            train_paths, train_labels, val_paths, val_labels, test_paths, test_labels,
             cache_dir, chunk_size
         )
 
         if is_main_process():
             print(f"数据加载完成")
             print(f"   训练集: {len(train_dataset)} 样本")
+            print(f"   验证集: {len(val_dataset)} 样本")
             print(f"   测试集: {len(test_dataset)} 样本")
 
-        return train_dataset, test_dataset
+        return train_dataset, val_dataset, test_dataset
 
     def _collect_image_paths(self):
         """
@@ -592,11 +595,6 @@ class STORKDataLoader:
         # Step 6: 保存分割映射文件
         self._save_split_mapping(embryo_split_mapping, image_split_mapping)
 
-        # 返回 (train+val, test) 以兼容现有接口
-        # 同时保存详细的分割信息供 main.py 使用
-        train_val_paths = np.concatenate([train_paths, val_paths])
-        train_val_labels = np.concatenate([train_labels, val_labels])
-
         # 保存分割信息到对象属性，供后续使用
         self.split_mapping = embryo_split_mapping  # embryo_id -> split
         self.image_split_mapping = image_split_mapping  # image_path -> split
@@ -604,7 +602,17 @@ class STORKDataLoader:
         self.val_embryo_ids = set(val_embryo_ids)
         self.test_embryo_ids = set(test_embryo_ids)
 
-        return train_val_paths, train_val_labels, test_paths, test_labels
+        # 保存各分割的路径和标签供后续使用
+        self.train_paths = train_paths
+        self.train_labels = train_labels
+        self.val_paths = val_paths
+        self.val_labels = val_labels
+        self.test_paths = test_paths
+        self.test_labels = test_labels
+
+        # 返回三个独立的数据集 (train, val, test) - 确保胚胎级别的完全分离
+        # 每个胚胎仅在一个集合中出现，没有数据泄漏
+        return train_paths, train_labels, val_paths, val_labels, test_paths, test_labels
 
     def _save_split_mapping(self, embryo_split_mapping, image_split_mapping):
         """
@@ -633,9 +641,9 @@ class STORKDataLoader:
                     writer.writerow([path, split])
             print(f"已保存图像分割映射: {image_mapping_file}")
 
-    def _create_cached_datasets(self, train_paths, train_labels, test_paths, test_labels,
-                              cache_dir, chunk_size):
-        """创建缓存数据集，确保参数一致性"""
+    def _create_cached_datasets(self, train_paths, train_labels, val_paths, val_labels,
+                              test_paths, test_labels, cache_dir, chunk_size):
+        """创建缓存数据集，确保三个独立数据集的正确分离"""
         try:
             from .batch_cache import BatchCachedDataset
         except ImportError:
@@ -644,6 +652,7 @@ class STORKDataLoader:
         print(f"创建批量缓存数据集...")
         print(f"   图片尺寸: {self.img_size}×{self.img_size}")
         print(f"   训练集: {len(train_paths)} 样本")
+        print(f"   验证集: {len(val_paths)} 样本")
         print(f"   测试集: {len(test_paths)} 样本")
         print(f"   缓存块大小: {chunk_size} 张/文件")
 
@@ -654,6 +663,15 @@ class STORKDataLoader:
             train_paths, train_labels, self.img_size,
             is_training=True, cache_dir=cache_dir,
             chunk_size=chunk_size, split="train",
+            data_dir=self.data_dir, train_split=self.train_split,
+            random_state=random_state,
+            apply_petri_crop=self.apply_petri_crop,
+            apply_center_crop=self.apply_center_crop
+        )
+        val_dataset = BatchCachedDataset(
+            val_paths, val_labels, self.img_size,
+            is_training=False, cache_dir=cache_dir,
+            chunk_size=chunk_size, split="val",
             data_dir=self.data_dir, train_split=self.train_split,
             random_state=random_state,
             apply_petri_crop=self.apply_petri_crop,
@@ -671,6 +689,7 @@ class STORKDataLoader:
 
         print(f"批量缓存数据集创建完成")
         print(f"   训练集: {len(train_dataset)} 样本")
+        print(f"   验证集: {len(val_dataset)} 样本")
         print(f"   测试集: {len(test_dataset)} 样本")
         print(f"   缓存目录: {cache_dir}")
 
@@ -681,7 +700,158 @@ class STORKDataLoader:
         except Exception as e:
             print(f"   无法获取缓存统计: {e}")
 
-        return train_dataset, test_dataset
+        return train_dataset, val_dataset, test_dataset
+
+    def create_embryo_balanced_sampler(self, dataset: Dataset, batch_size: int = 32,
+                                       shuffle: bool = True) -> 'EmbryoBalancedSampler':
+        """
+        创建胚胎级别平衡采样器，用于训练时均衡不同胚胎的样本分布
+
+        Args:
+            dataset: PyTorch数据集
+            batch_size: 批次大小
+            shuffle: 是否打乱顺序
+
+        Returns:
+            EmbryoBalancedSampler实例
+        """
+        # 获取图像路径
+        if hasattr(dataset, 'cached_paths'):
+            image_paths = dataset.cached_paths
+        elif hasattr(dataset, 'image_paths'):
+            image_paths = dataset.image_paths
+        else:
+            raise ValueError("无法从dataset中获取图像路径")
+
+        return EmbryoBalancedSampler(
+            dataset=dataset,
+            image_paths=image_paths,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            random_state=self.config.get('data', {}).get('random_state', 42)
+        )
+
+
+class EmbryoBalancedSampler(Sampler):
+    """
+    胚胎级别平衡采样器
+    确保训练时不同胚胎的样本被均衡采样，避免某些胚胎过度代表
+    """
+
+    def __init__(self, dataset: Dataset, image_paths: List[str], batch_size: int = 32,
+                 shuffle: bool = True, random_state: int = 42):
+        """
+        初始化胚胎平衡采样器
+
+        Args:
+            dataset: PyTorch数据集
+            image_paths: 图像路径列表
+            batch_size: 批次大小
+            shuffle: 是否打乱顺序
+            random_state: 随机种子
+        """
+        self.dataset = dataset
+        self.image_paths = image_paths
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.random_state = random_state
+        self.num_samples = len(image_paths)
+
+        # 导入胚胎ID提取函数
+        try:
+            from ..utils.data_stats import extract_embryo_id
+        except ImportError:
+            from utils.data_stats import extract_embryo_id
+        self.extract_embryo_id = extract_embryo_id
+
+        # 按胚胎分组
+        self.embryo_groups = self._group_by_embryo()
+
+        # 生成采样索引
+        self.indices = self._generate_balanced_indices()
+
+    def _group_by_embryo(self) -> Dict[str, List[int]]:
+        """按胚胎ID对样本进行分组"""
+        embryo_groups = defaultdict(list)
+
+        for idx, path in enumerate(self.image_paths):
+            embryo_id = self.extract_embryo_id(path)
+            embryo_groups[embryo_id].append(idx)
+
+        return dict(embryo_groups)
+
+    def _generate_balanced_indices(self) -> List[int]:
+        """
+        生成平衡的采样索引
+
+        策略：从每个胚胎组中均等采样
+        """
+        rng = np.random.RandomState(self.random_state)
+        balanced_indices = []
+
+        # 计算每个胚胎的采样数量
+        num_embryos = len(self.embryo_groups)
+        target_samples_per_embryo = self.num_samples // num_embryos
+
+        # 从每个胚胎组中采样
+        for embryo_id, indices in sorted(self.embryo_groups.items()):
+            num_available = len(indices)
+
+            if num_available >= target_samples_per_embryo:
+                # 足够样本，直接采样
+                if self.shuffle:
+                    sampled = rng.choice(indices, size=target_samples_per_embryo, replace=False)
+                else:
+                    sampled = indices[:target_samples_per_embryo]
+            else:
+                # 样本不足，进行过采样
+                if self.shuffle:
+                    sampled = rng.choice(indices, size=target_samples_per_embryo, replace=True)
+                else:
+                    sampled = np.tile(indices, (target_samples_per_embryo // num_available + 1))[:target_samples_per_embryo]
+
+            balanced_indices.extend(sampled)
+
+        # 打乱顺序
+        if self.shuffle:
+            rng.shuffle(balanced_indices)
+
+        return balanced_indices
+
+    def __iter__(self) -> Iterator[int]:
+        """返回采样索引的迭代器"""
+        return iter(self.indices)
+
+    def __len__(self) -> int:
+        """返回采样的总样本数"""
+        return len(self.indices)
+
+    def get_embryo_distribution(self) -> Dict[str, Tuple[int, float]]:
+        """获取采样后的胚胎分布统计"""
+        distribution = defaultdict(int)
+
+        for idx in self.indices:
+            path = self.image_paths[idx]
+            embryo_id = self.extract_embryo_id(path)
+            distribution[embryo_id] += 1
+
+        total = len(self.indices)
+        result = {
+            embryo_id: (count, count / total * 100)
+            for embryo_id, count in distribution.items()
+        }
+
+        return dict(sorted(result.items()))
+
+    def print_distribution(self) -> None:
+        """打印胚胎分布统计"""
+        distribution = self.get_embryo_distribution()
+
+        if is_main_process():
+            print(f"\n【胚胎级别采样分布】")
+            print(f"  总样本数: {len(self.indices)}")
+            print(f"  总胚胎数: {len(distribution)}")
+            print(f"  平均每胚胎: {len(self.indices) / len(distribution):.1f} 张")
 
 
 def create_stork_data_loader(config: Dict[str, Any]) -> STORKDataLoader:
