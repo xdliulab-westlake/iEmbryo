@@ -9,6 +9,7 @@ import sys
 import traceback
 import warnings
 from pathlib import Path
+import numpy as np
 
 # 添加项目根目录到路径
 sys.path.append(str(Path(__file__).parent))
@@ -30,7 +31,7 @@ from models import create_model
 from data import STORKDataLoader, create_train_transforms, create_val_transforms
 from training import STORKTrainer
 from optimization import create_optimization_setup
-from evaluation import evaluate_model, create_cross_validator
+from evaluation import evaluate_model, create_cross_validator, EmbryoMetricsCalculator
 from visualization import create_gradcam_visualizer
 from utils import create_model_manager, create_training_logger
 
@@ -83,9 +84,9 @@ class STORKApplication:
             Path(path_value).mkdir(parents=True, exist_ok=True)
 
     def setup_data(self):
-        """设置数据加载器"""
+        """设置数据加载器（按胚胎级别分割）"""
         if self.is_main_process:
-            print("\n设置STORK数据加载器...")
+            print("\n设置STORK数据加载器（按胚胎级别分割）...")
 
         # 创建STORK数据加载器
         self.data_loader = STORKDataLoader(self.config)
@@ -93,14 +94,50 @@ class STORKApplication:
         # 加载数据集（使用STORK预处理）
         self.train_dataset, self.test_dataset = self.data_loader.load_data()
 
-        # 创建PyTorch数据加载器
+        # 使用胚胎级别的分割映射来创建验证集子集
+        # 这确保了同一胚胎的所有图像要么全部在训练集，要么全部在验证集
+        if hasattr(self.data_loader, 'image_split_mapping') and hasattr(self.data_loader, 'split_mapping'):
+            # 获取分割映射信息
+            image_split_mapping = self.data_loader.image_split_mapping
 
-        # 从训练集中分离验证集 (训练集70%, 验证集15%, 总共85%)
-        # 85% * (70/85) ≈ 70%, 85% * (15/85) ≈ 15%
-        val_ratio = 15.0 / 85.0  # 验证集占训练+验证集的比例
-        val_size = int(val_ratio * len(self.train_dataset))
-        train_size = len(self.train_dataset) - val_size
-        train_subset, val_subset = random_split(self.train_dataset, [train_size, val_size])
+            # 创建验证集的索引
+            val_indices = []
+            # 从缓存数据集中获取路径列表
+            if hasattr(self.train_dataset, 'cached_paths') and self.train_dataset.cached_paths:
+                for idx, img_path in enumerate(self.train_dataset.cached_paths):
+                    if img_path in image_split_mapping and image_split_mapping[img_path] == "val":
+                        val_indices.append(idx)
+            elif hasattr(self.train_dataset, 'image_paths'):
+                for idx, img_path in enumerate(self.train_dataset.image_paths):
+                    if img_path in image_split_mapping and image_split_mapping[img_path] == "val":
+                        val_indices.append(idx)
+
+            # 如果成功找到验证集索引，使用它们
+            if val_indices:
+                train_indices = [i for i in range(len(self.train_dataset)) if i not in val_indices]
+                train_subset = torch.utils.data.Subset(self.train_dataset, train_indices)
+                val_subset = torch.utils.data.Subset(self.train_dataset, val_indices)
+
+                if self.is_main_process:
+                    print(f"✓ 使用胚胎级别分割:")
+                    print(f"  训练集: {len(train_indices)} 张图像")
+                    print(f"  验证集: {len(val_indices)} 张图像")
+            else:
+                # 如果找不到映射信息，使用随机分割（后备方案）
+                if self.is_main_process:
+                    print("⚠ 警告: 未找到胚胎级别分割映射，使用随机分割")
+                val_ratio = 15.0 / 85.0
+                val_size = int(val_ratio * len(self.train_dataset))
+                train_size = len(self.train_dataset) - val_size
+                train_subset, val_subset = random_split(self.train_dataset, [train_size, val_size])
+        else:
+            # 后备方案：使用随机分割
+            if self.is_main_process:
+                print("⚠ 警告: 未找到胚胎级别分割信息，使用随机分割")
+            val_ratio = 15.0 / 85.0
+            val_size = int(val_ratio * len(self.train_dataset))
+            train_size = len(self.train_dataset) - val_size
+            train_subset, val_subset = random_split(self.train_dataset, [train_size, val_size])
 
         # 创建数据加载器
         batch_size = self.config['training']['batch_size']
@@ -217,8 +254,10 @@ class STORKApplication:
         return history
 
     def evaluate(self):
-        """执行评估"""
-        print("\n开始全面评估...")
+        """执行评估（包括胚胎级别投票评估）"""
+        print("\n" + "="*80)
+        print("开始全面评估...")
+        print("="*80)
 
         # 加载最佳模型
         model_loaded = False
@@ -229,13 +268,13 @@ class STORKApplication:
                 model_to_load = self.model.module
 
             model_data = self.model_manager.load_best_model(model_to_load, 'val_accuracy', self.device)
-            print("已加载最佳模型")
+            print("✓ 已加载最佳模型")
             print(f"   验证准确率: {model_data['best_metric']['value']:.4f}")
             print(f"   训练轮数: {model_data.get('metrics', {}).get('epoch', 'Unknown')}")
             model_loaded = True
         except Exception as e:
-            print(f"无法加载最佳模型: {e}")
-            print("使用当前训练模型进行评估")
+            print(f"⚠ 无法加载最佳模型: {e}")
+            print("  使用当前训练模型进行评估")
 
         # 如果成功加载了最佳模型，导出生产模型
         if model_loaded:
@@ -255,11 +294,11 @@ class STORKApplication:
                     export_format='torchscript'
                 )
 
-                print("模型导出完成")
+                print("✓ 模型导出完成")
             except Exception as e:
-                print(f"模型导出失败: {e}")
+                print(f"⚠ 模型导出失败: {e}")
 
-        # 在测试集上进行详细评估
+        # 在测试集上进行标准评估
         output_dir = self.config['paths']['output_dir']
         model_name = self.config['model']['name']
 
@@ -272,11 +311,34 @@ class STORKApplication:
             class_names=['Non-viable', 'Viable']
         )
 
-        print(f"测试集评估完成:")
-        print(f"   准确率: {metrics.get('accuracy', 0):.4f}")
-        print(f"   精确率: {metrics.get('precision_weighted', 0):.4f}")
-        print(f"   召回率: {metrics.get('recall_weighted', 0):.4f}")
-        print(f"   F1分数: {metrics.get('f1_weighted', 0):.4f}")
+        print(f"\n【标准图像级别评估结果】")
+        print(f"   准确率:   {metrics.get('accuracy', 0):.4f}")
+        print(f"   精确率:   {metrics.get('precision_weighted', 0):.4f}")
+        print(f"   召回率:   {metrics.get('recall_weighted', 0):.4f}")
+        print(f"   F1分数:   {metrics.get('f1_weighted', 0):.4f}")
+
+        # 胚胎级别评估（使用trainer的内置方法）
+        try:
+            print(f"\n【胚胎级别评估 (投票机制)】")
+            if self.trainer:
+                test_results = self.trainer.evaluate_on_test_set(self.test_loader, compute_embryo_metrics=True)
+                if 'embryo_metrics' in test_results:
+                    embryo_metrics = test_results['embryo_metrics']
+                    metrics['embryo_metrics'] = embryo_metrics
+
+                    # 打印对比报告
+                    if 'metrics_result' in embryo_metrics:
+                        calculator = EmbryoMetricsCalculator(num_classes=2)
+                        calculator.print_comparison_report(embryo_metrics['metrics_result'])
+
+                        # 保存到文件
+                        output_dir = Path(self.config['paths']['output_dir']) / 'embryo_evaluation'
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        calculator.save_metrics_report(embryo_metrics['metrics_result'], output_dir / 'embryo_metrics.json')
+        except Exception as e:
+            print(f"⚠ 胚胎级别评估失败: {e}")
+            import traceback
+            traceback.print_exc()
 
         # 生成Grad-CAM可视化（如果启用）
         if self.config.get('evaluation', {}).get('generate_gradcam', False):
@@ -287,10 +349,11 @@ class STORKApplication:
                     self.test_loader,
                     num_samples=self.config.get('evaluation', {}).get('gradcam_samples', 10)
                 )
-                print("Grad-CAM可视化完成")
+                print("✓ Grad-CAM可视化完成")
             except Exception as e:
-                print(f"Grad-CAM可视化失败: {e}")
+                print(f"⚠ Grad-CAM可视化失败: {e}")
 
+        print("="*80 + "\n")
         return metrics
 
     def run(self):

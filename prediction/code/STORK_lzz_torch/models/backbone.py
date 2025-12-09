@@ -279,6 +279,10 @@ class BackboneModel(nn.Module):
     def _create_resnet(self, pretrained: bool) -> nn.Module:
         """创建ResNet系列模型"""
         backbone = getattr(models, self.model_config['torchvision_name'])(pretrained=pretrained)
+
+        # 禁用所有ReLU的inplace操作以支持Grad-CAM
+        self._disable_inplace_relu(backbone)
+
         # 保留到avgpool层，确保输出是正确的特征维度
         features = nn.Sequential(*list(backbone.children())[:-1])
         return nn.Sequential(

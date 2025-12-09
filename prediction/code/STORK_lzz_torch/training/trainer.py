@@ -22,6 +22,7 @@ sys.path.insert(0, str(current_dir))
 
 from utils.logger import MetricsMonitor
 from visualization.training_plots import create_training_plotter
+from evaluation.embryo_metrics import EmbryoMetricsCalculator
 
 try:
     import deepspeed
@@ -381,8 +382,17 @@ class STORKTrainer:
 
         return epoch_loss, epoch_acc
 
-    def validate(self) -> Tuple[float, float]:
-        """验证模型"""
+    def validate(self, compute_embryo_metrics: bool = False) -> Union[Tuple[float, float], Dict[str, Any]]:
+        """
+        验证模型
+
+        Args:
+            compute_embryo_metrics: 是否计算胚胎级别的指标（包括投票机制）
+
+        Returns:
+            如果compute_embryo_metrics=False: 返回 (val_loss, val_acc)
+            如果compute_embryo_metrics=True: 返回包含图像级和胚胎级指标的字典
+        """
         if self.val_loader is None:
             return 0.0, 0.0
 
@@ -397,27 +407,95 @@ class STORKTrainer:
         correct = 0
         total = 0
 
+        # 用于胚胎级别评估的数据收集
+        if compute_embryo_metrics:
+            all_y_true = []
+            all_y_pred = []
+            all_y_proba = []
+            all_image_paths = []
+
         with torch.no_grad():
-            for data, target in tqdm(self.val_loader, desc="Validation"):
-                data, target = data.to(self.device), target.to(self.device)
+            for batch_idx, batch_data in enumerate(tqdm(self.val_loader, desc="Validation")):
+                # 兼容不同的数据加载器格式
+                if isinstance(batch_data, (tuple, list)) and len(batch_data) >= 2:
+                    data, target = batch_data[0], batch_data[1]
+                else:
+                    data, target = batch_data, None
+
+                data = data.to(self.device)
+                if target is not None:
+                    target = target.to(self.device)
 
                 if self.use_amp:
                     with autocast():
                         outputs = model(data)
-                        loss = self.criterion(outputs, target)
+                        if target is not None:
+                            loss = self.criterion(outputs, target)
                 else:
                     outputs = model(data)
-                    loss = self.criterion(outputs, target)
+                    if target is not None:
+                        loss = self.criterion(outputs, target)
 
-                total_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += target.size(0)
-                correct += predicted.eq(target).sum().item()
+                if target is not None:
+                    total_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    total += target.size(0)
+                    correct += predicted.eq(target).sum().item()
 
-        val_loss = total_loss / len(self.val_loader)
-        val_acc = 100. * correct / total
+                    if compute_embryo_metrics:
+                        proba = torch.softmax(outputs, dim=1)
+                        all_y_true.extend(target.cpu().numpy())
+                        all_y_pred.extend(predicted.cpu().numpy())
+                        all_y_proba.extend(proba.cpu().numpy())
 
-        return val_loss, val_acc
+                        # 尝试从数据集中获取图像路径
+                        try:
+                            if hasattr(self.val_loader.dataset, 'cached_paths'):
+                                batch_start = batch_idx * self.val_loader.batch_size
+                                batch_end = min(batch_start + len(target), len(self.val_loader.dataset.cached_paths))
+                                all_image_paths.extend(self.val_loader.dataset.cached_paths[batch_start:batch_end])
+                            elif hasattr(self.val_loader.dataset, 'image_paths'):
+                                batch_start = batch_idx * self.val_loader.batch_size
+                                batch_end = min(batch_start + len(target), len(self.val_loader.dataset.image_paths))
+                                all_image_paths.extend(self.val_loader.dataset.image_paths[batch_start:batch_end])
+                        except:
+                            pass
+
+        val_loss = total_loss / len(self.val_loader) if total > 0 else 0.0
+        val_acc = 100. * correct / total if total > 0 else 0.0
+
+        # 如果不需要胚胎级别指标，返回原来的格式
+        if not compute_embryo_metrics or total == 0:
+            return val_loss, val_acc
+
+        # 计算胚胎级别指标
+        if all_image_paths and all_y_true:
+            try:
+                calculator = EmbryoMetricsCalculator(num_classes=2)
+                metrics_result = calculator.calculate_metrics(
+                    all_image_paths,
+                    np.array(all_y_true),
+                    np.array(all_y_pred),
+                    np.array(all_y_proba) if all_y_proba else None,
+                    voting_method='majority'
+                )
+
+                return {
+                    'val_loss': val_loss,
+                    'val_acc': val_acc,
+                    'image_acc': metrics_result['image_level']['accuracy'] * 100,
+                    'embryo_acc': metrics_result['embryo_level']['accuracy'] * 100,
+                    'embryo_improvement': (metrics_result['embryo_level']['accuracy'] -
+                                          metrics_result['image_level']['accuracy']) * 100,
+                    'metrics_result': metrics_result
+                }
+            except Exception as e:
+                # 如果计算失败，返回基础指标
+                print(f"警告: 无法计算胚胎级别指标: {e}")
+                return val_loss, val_acc
+        else:
+            # 无法获取路径信息，返回基础指标
+            return val_loss, val_acc
 
     def train(self, num_epochs: int) -> Dict[str, list]:
         """完整训练过程"""
@@ -625,6 +703,94 @@ class STORKTrainer:
         self.val_history = checkpoint.get('val_history', {'loss': [], 'acc': []})
 
         print(f"检查点加载完成: {filename}")
+
+    def evaluate_on_test_set(self, test_loader: DataLoader, compute_embryo_metrics: bool = True) -> Dict[str, Any]:
+        """
+        在测试集上进行完整评估（包括胚胎级别投票）
+
+        Args:
+            test_loader: 测试数据加载器
+            compute_embryo_metrics: 是否计算胚胎级别指标
+
+        Returns:
+            评估结果字典
+        """
+        if self.use_deepspeed:
+            self.model_engine.eval()
+            model = self.model_engine.module
+        else:
+            self.model.eval()
+            model = self.model
+
+        all_y_true = []
+        all_y_pred = []
+        all_y_proba = []
+        all_image_paths = []
+
+        with torch.no_grad():
+            for batch_idx, batch_data in enumerate(tqdm(test_loader, desc="Testing")):
+                # 兼容不同的数据加载器格式
+                if isinstance(batch_data, (tuple, list)) and len(batch_data) >= 2:
+                    images, labels = batch_data[0], batch_data[1]
+                else:
+                    images, labels = batch_data, None
+
+                images = images.to(self.device)
+                if labels is not None:
+                    labels = labels.to(self.device)
+
+                if self.use_amp:
+                    with autocast():
+                        outputs = model(images)
+                else:
+                    outputs = model(images)
+
+                if labels is not None:
+                    proba = torch.softmax(outputs, dim=1)
+                    preds = torch.argmax(outputs, dim=1)
+
+                    all_y_true.extend(labels.cpu().numpy())
+                    all_y_pred.extend(preds.cpu().numpy())
+                    all_y_proba.extend(proba.cpu().numpy())
+
+                    # 尝试获取图像路径
+                    if compute_embryo_metrics:
+                        try:
+                            if hasattr(test_loader.dataset, 'cached_paths'):
+                                batch_start = batch_idx * test_loader.batch_size
+                                batch_end = min(batch_start + len(labels), len(test_loader.dataset.cached_paths))
+                                all_image_paths.extend(test_loader.dataset.cached_paths[batch_start:batch_end])
+                            elif hasattr(test_loader.dataset, 'image_paths'):
+                                batch_start = batch_idx * test_loader.batch_size
+                                batch_end = min(batch_start + len(labels), len(test_loader.dataset.image_paths))
+                                all_image_paths.extend(test_loader.dataset.image_paths[batch_start:batch_end])
+                        except:
+                            pass
+
+        # 整理结果
+        results = {
+            'y_true': np.array(all_y_true),
+            'y_pred': np.array(all_y_pred),
+            'y_proba': np.array(all_y_proba) if all_y_proba else None,
+            'image_paths': all_image_paths
+        }
+
+        # 如果需要计算胚胎级别指标
+        if compute_embryo_metrics and all_image_paths and all_y_true:
+            try:
+                calculator = EmbryoMetricsCalculator(num_classes=2)
+                metrics_result = calculator.calculate_metrics(
+                    all_image_paths,
+                    results['y_true'],
+                    results['y_pred'],
+                    results['y_proba'],
+                    voting_method='majority'
+                )
+                results['embryo_metrics'] = metrics_result
+            except Exception as e:
+                print(f"⚠ 胚胎级别评估失败: {e}")
+
+        return results
 
 
 class FocalLoss(nn.Module):

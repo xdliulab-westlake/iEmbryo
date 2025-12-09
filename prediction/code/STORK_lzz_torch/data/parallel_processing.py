@@ -432,16 +432,28 @@ class STORKDataLoader:
         return train_dataset, test_dataset
 
     def _collect_image_paths(self):
-        """收集图片路径和标签，不加载实际图片数据"""
+        """
+        收集图片路径和标签，不加载实际图片数据
+        按胚胎级别进行分割（70% train / 15% val / 15% test），确保同一胚胎的所有图像在同一个数据集中
+        返回 (train+val, test) 两个集合，同时生成分割映射文件
+        """
         from pathlib import Path
         from sklearn.model_selection import train_test_split
         import numpy as np
+        from collections import defaultdict
+        import json
+
+        # 导入胚胎ID提取函数
+        try:
+            from ..utils.data_stats import extract_embryo_id
+        except ImportError:
+            from utils.data_stats import extract_embryo_id
 
         image_paths = []
         labels = []
 
         if is_main_process():
-            print("=== 收集图片路径信息 ===")
+            print("=== 收集图片路径信息 (按胚胎级别分割: 70/15/15) ===")
 
         # 收集所有图像路径和标签
         data_path = Path(self.data_dir)
@@ -470,28 +482,156 @@ class STORKDataLoader:
             print(f"找到 {len(image_paths)} 张图像")
             print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
 
-        # 数据分割: 训练集85%, 测试集15% (训练集后续会分出验证集)
-        test_size = 0.15
-        if is_main_process():
-            print(f"采用训练+验证集85%/测试集15%数据分割策略...")
+        # ===== 按胚胎级别进行分割 =====
+        # Step 1: 按胚胎ID对图像进行分组
+        embryo_groups = defaultdict(list)  # {embryo_id: [(path, label), ...]}
 
-        train_paths, test_paths, train_labels, test_labels = train_test_split(
-            image_paths, labels, test_size=test_size,
-            random_state=42, stratify=labels
+        for path, label in zip(image_paths, labels):
+            embryo_id = extract_embryo_id(path)
+            embryo_groups[embryo_id].append((path, label))
+
+        if is_main_process():
+            print(f"\n按胚胎分组:")
+            print(f"  总胚胎数: {len(embryo_groups)}")
+            print(f"  平均每个胚胎 {len(image_paths) / len(embryo_groups):.1f} 张图像")
+
+        # Step 2: 为每个胚胎确定标签 (取多数投票)
+        embryo_ids = []
+        embryo_labels = []
+
+        for embryo_id, items in embryo_groups.items():
+            paths, item_labels = zip(*items)
+            # 使用多数投票确定胚胎的标签
+            embryo_label = int(np.round(np.mean(item_labels)))
+            embryo_ids.append(embryo_id)
+            embryo_labels.append(embryo_label)
+
+        embryo_ids = np.array(embryo_ids)
+        embryo_labels = np.array(embryo_labels)
+
+        if is_main_process():
+            print(f"胚胎级别标签分布:")
+            print(f"  Class 0: {sum(embryo_labels == 0)} 个胚胎")
+            print(f"  Class 1: {sum(embryo_labels == 1)} 个胚胎")
+
+        # Step 3: 三级分割 (70% train / 15% val / 15% test)
+        if is_main_process():
+            print(f"\n进行胚胎级别三级分割 (70% train / 15% val / 15% test)...")
+
+        # 先分出 test (15%)
+        train_val_embryo_ids, test_embryo_ids, train_val_embryo_labels, test_embryo_labels = train_test_split(
+            embryo_ids, embryo_labels, test_size=0.15,
+            random_state=42, stratify=embryo_labels
         )
 
+        # 再从 train_val 中分出 val (15% / 85% ≈ 17.65%)
+        val_ratio = 15.0 / 85.0  # val 占 train+val 的比例
+        train_embryo_ids, val_embryo_ids, train_embryo_labels, val_embryo_labels = train_test_split(
+            train_val_embryo_ids, train_val_embryo_labels, test_size=val_ratio,
+            random_state=42, stratify=train_val_embryo_labels
+        )
+
+        # Step 4: 创建胚胎ID到分割标签的映射
+        embryo_split_mapping = {}  # {embryo_id: "train"/"val"/"test"}
+
+        for embryo_id in train_embryo_ids:
+            embryo_split_mapping[embryo_id] = "train"
+        for embryo_id in val_embryo_ids:
+            embryo_split_mapping[embryo_id] = "val"
+        for embryo_id in test_embryo_ids:
+            embryo_split_mapping[embryo_id] = "test"
+
+        # Step 5: 根据映射分配所有图像
+        train_paths_list = []
+        val_paths_list = []
+        test_paths_list = []
+        train_labels_list = []
+        val_labels_list = []
+        test_labels_list = []
+
+        image_split_mapping = {}  # {image_path: "train"/"val"/"test"} 用于生成CSV
+
+        for path, label in zip(image_paths, labels):
+            embryo_id = extract_embryo_id(path)
+            split = embryo_split_mapping[embryo_id]
+            image_split_mapping[path] = split
+
+            if split == "train":
+                train_paths_list.append(path)
+                train_labels_list.append(label)
+            elif split == "val":
+                val_paths_list.append(path)
+                val_labels_list.append(label)
+            else:  # test
+                test_paths_list.append(path)
+                test_labels_list.append(label)
+
+        # 转换为numpy数组
+        train_paths = np.array(train_paths_list)
+        val_paths = np.array(val_paths_list)
+        test_paths = np.array(test_paths_list)
+        train_labels = np.array(train_labels_list)
+        val_labels = np.array(val_labels_list)
+        test_labels = np.array(test_labels_list)
+
         if is_main_process():
-            print(f"数据分割完成:")
-            print(f"  训练集: {len(train_paths)} ({len(train_paths)/len(image_paths)*100:.1f}%)")
-            print(f"  测试集: {len(test_paths)} ({len(test_paths)/len(image_paths)*100:.1f}%)")
+            print(f"\n胚胎级别分割结果:")
+            print(f"  训练集: {len(train_paths)} 张图像，来自 {len(train_embryo_ids)} 个胚胎 ({len(train_paths)/len(image_paths)*100:.1f}%)")
+            print(f"    Class 0: {sum(train_labels == 0)} 张，Class 1: {sum(train_labels == 1)} 张")
+            print(f"  验证集: {len(val_paths)} 张图像，来自 {len(val_embryo_ids)} 个胚胎 ({len(val_paths)/len(image_paths)*100:.1f}%)")
+            print(f"    Class 0: {sum(val_labels == 0)} 张，Class 1: {sum(val_labels == 1)} 张")
+            print(f"  测试集: {len(test_paths)} 张图像，来自 {len(test_embryo_ids)} 个胚胎 ({len(test_paths)/len(image_paths)*100:.1f}%)")
+            print(f"    Class 0: {sum(test_labels == 0)} 张，Class 1: {sum(test_labels == 1)} 张")
 
             # 验证分层：确保类别分布被保持
             verify_class_distribution(
-                [labels, train_labels, test_labels],
-                ["Original", "Train+Val", "Test"]
+                [labels, train_labels, val_labels, test_labels],
+                ["Original", "Train", "Val", "Test"]
             )
 
-        return train_paths, train_labels, test_paths, test_labels
+        # Step 6: 保存分割映射文件
+        self._save_split_mapping(embryo_split_mapping, image_split_mapping)
+
+        # 返回 (train+val, test) 以兼容现有接口
+        # 同时保存详细的分割信息供 main.py 使用
+        train_val_paths = np.concatenate([train_paths, val_paths])
+        train_val_labels = np.concatenate([train_labels, val_labels])
+
+        # 保存分割信息到对象属性，供后续使用
+        self.split_mapping = embryo_split_mapping  # embryo_id -> split
+        self.image_split_mapping = image_split_mapping  # image_path -> split
+        self.train_embryo_ids = set(train_embryo_ids)
+        self.val_embryo_ids = set(val_embryo_ids)
+        self.test_embryo_ids = set(test_embryo_ids)
+
+        return train_val_paths, train_val_labels, test_paths, test_labels
+
+    def _save_split_mapping(self, embryo_split_mapping, image_split_mapping):
+        """
+        保存分割映射文件
+        """
+        from pathlib import Path
+        import json
+        import csv
+
+        split_dir = Path(self.config.get('paths', {}).get('output_dir', './output')) / 'split_info'
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        if is_main_process():
+            # 保存胚胎级别映射 (JSON)
+            embryo_mapping_file = split_dir / 'embryo_split_mapping.json'
+            with open(embryo_mapping_file, 'w') as f:
+                json.dump(embryo_split_mapping, f, indent=2, ensure_ascii=False)
+            print(f"\n已保存胚胎分割映射: {embryo_mapping_file}")
+
+            # 保存图像级别映射 (CSV)
+            image_mapping_file = split_dir / 'image_split_mapping.csv'
+            with open(image_mapping_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['image_path', 'split'])
+                for path, split in sorted(image_split_mapping.items()):
+                    writer.writerow([path, split])
+            print(f"已保存图像分割映射: {image_mapping_file}")
 
     def _create_cached_datasets(self, train_paths, train_labels, test_paths, test_labels,
                               cache_dir, chunk_size):
