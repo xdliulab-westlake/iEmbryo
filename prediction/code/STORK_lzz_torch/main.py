@@ -110,27 +110,10 @@ class STORKApplication:
         batch_size = self.config['training']['batch_size']
         num_workers = self.config.get('data', {}).get('num_workers', 4)
 
-        # 检查是否需要分布式采样器或胚胎平衡采样器
+        # 检查是否需要分布式采样器
         train_sampler = None
 
-        # 优先使用胚胎平衡采样器（如果数据集支持且有胚胎ID信息）
-        use_embryo_sampler = self.config.get('data', {}).get('embryo_balanced_sampling', False)
-        if use_embryo_sampler and not (self.optimization_setup['is_distributed'] and torch.distributed.is_initialized()):
-            try:
-                # 创建胚胎级别平衡采样器
-                train_sampler = self.data_loader.create_embryo_balanced_sampler(
-                    train_subset, batch_size=batch_size, shuffle=True
-                )
-                if self.is_main_process:
-                    print("✓ 使用胚胎级别平衡采样器进行训练")
-                    train_sampler.print_distribution()
-            except Exception as e:
-                if self.is_main_process:
-                    print(f"⚠ 无法创建胚胎平衡采样器: {e}")
-                    print("  降级为随机采样")
-
-        # 如果没有使用胚胎采样器，检查是否需要分布式采样器
-        if train_sampler is None and self.optimization_setup['is_distributed'] and torch.distributed.is_initialized():
+        if self.optimization_setup['is_distributed'] and torch.distributed.is_initialized():
             from torch.utils.data.distributed import DistributedSampler
             train_sampler = DistributedSampler(train_subset)
             if self.is_main_process:

@@ -602,6 +602,13 @@ class STORKDataLoader:
         self.val_embryo_ids = set(val_embryo_ids)
         self.test_embryo_ids = set(test_embryo_ids)
 
+        # 检查是否需要在训练集上进行类别平衡（欠采样）
+        balance_train = self.config.get('data', {}).get('balance_train_classes', False)
+        if balance_train:
+            train_paths, train_labels = self._balance_classes_by_undersampling(
+                train_paths, train_labels, train_embryo_ids
+            )
+
         # 保存各分割的路径和标签供后续使用
         self.train_paths = train_paths
         self.train_labels = train_labels
@@ -613,6 +620,96 @@ class STORKDataLoader:
         # 返回三个独立的数据集 (train, val, test) - 确保胚胎级别的完全分离
         # 每个胚胎仅在一个集合中出现，没有数据泄漏
         return train_paths, train_labels, val_paths, val_labels, test_paths, test_labels
+
+    def _balance_classes_by_undersampling(self, paths, labels, embryo_ids):
+        """
+        通过欠采样平衡训练集类别
+        在胚胎级别进行平衡：减少多数类胚胎数量，使两类胚胎数量相等
+
+        Args:
+            paths: 图像路径数组
+            labels: 标签数组
+            embryo_ids: 胚胎ID集合
+
+        Returns:
+            平衡后的(paths, labels)
+        """
+        from collections import defaultdict
+
+        # 导入胚胎ID提取函数
+        try:
+            from ..utils.data_stats import extract_embryo_id
+        except ImportError:
+            from utils.data_stats import extract_embryo_id
+
+        if is_main_process():
+            print(f"\n应用胚胎级别的类别平衡（欠采样）...")
+
+        # 按胚胎和类别分组
+        embryo_samples = defaultdict(list)  # {embryo_id: [(idx, path, label)]}
+
+        for idx, (path, label) in enumerate(zip(paths, labels)):
+            embryo_id = extract_embryo_id(path)
+            embryo_samples[embryo_id].append((idx, path, label))
+
+        # 按类别组织胚胎
+        class_embryo_groups = {0: {}, 1: {}}
+
+        for embryo_id, samples in embryo_samples.items():
+            _, sample_paths, sample_labels = zip(*samples)
+            # 使用多数投票确定胚胎类别
+            embryo_class = 1 if np.mean(sample_labels) >= 0.5 else 0
+            class_embryo_groups[embryo_class][embryo_id] = samples
+
+        num_class_0 = len(class_embryo_groups[0])
+        num_class_1 = len(class_embryo_groups[1])
+
+        if is_main_process():
+            print(f"  原始胚胎分布:")
+            print(f"    Class 0: {num_class_0} 个胚胎")
+            print(f"    Class 1: {num_class_1} 个胚胎")
+
+        # 确定目标胚胎数量（使用较小类的数量）
+        target_num_embryos = min(num_class_0, num_class_1)
+
+        if is_main_process():
+            print(f"  目标胚胎数量（每类）: {target_num_embryos}")
+
+        # 对每个类别采样目标数量的胚胎
+        rng = np.random.RandomState(self.config.get('data', {}).get('random_state', 42))
+        balanced_samples = []
+
+        for class_label in [0, 1]:
+            embryo_ids_list = list(class_embryo_groups[class_label].keys())
+
+            # 随机选择目标数量的胚胎
+            selected_embryo_ids = rng.choice(
+                embryo_ids_list,
+                size=target_num_embryos,
+                replace=False
+            )
+
+            # 收集选中胚胎的所有样本
+            for embryo_id in selected_embryo_ids:
+                samples = class_embryo_groups[class_label][embryo_id]
+                balanced_samples.extend(samples)
+
+        # 打乱顺序
+        rng.shuffle(balanced_samples)
+
+        # 提取路径和标签
+        _, balanced_paths, balanced_labels = zip(*balanced_samples)
+        balanced_paths = np.array(balanced_paths)
+        balanced_labels = np.array(balanced_labels)
+
+        if is_main_process():
+            print(f"\n  平衡后结果:")
+            print(f"    总图像数: {len(balanced_paths)} (原始: {len(paths)})")
+            print(f"    Class 0: {sum(balanced_labels == 0)} 张 ({sum(balanced_labels == 0)/len(balanced_labels)*100:.1f}%)")
+            print(f"    Class 1: {sum(balanced_labels == 1)} 张 ({sum(balanced_labels == 1)/len(balanced_labels)*100:.1f}%)")
+            print(f"    胚胎数量: {target_num_embryos * 2} (每类 {target_num_embryos} 个)")
+
+        return balanced_paths, balanced_labels
 
     def _save_split_mapping(self, embryo_split_mapping, image_split_mapping):
         """
@@ -702,156 +799,6 @@ class STORKDataLoader:
 
         return train_dataset, val_dataset, test_dataset
 
-    def create_embryo_balanced_sampler(self, dataset: Dataset, batch_size: int = 32,
-                                       shuffle: bool = True) -> 'EmbryoBalancedSampler':
-        """
-        创建胚胎级别平衡采样器，用于训练时均衡不同胚胎的样本分布
-
-        Args:
-            dataset: PyTorch数据集
-            batch_size: 批次大小
-            shuffle: 是否打乱顺序
-
-        Returns:
-            EmbryoBalancedSampler实例
-        """
-        # 获取图像路径
-        if hasattr(dataset, 'cached_paths'):
-            image_paths = dataset.cached_paths
-        elif hasattr(dataset, 'image_paths'):
-            image_paths = dataset.image_paths
-        else:
-            raise ValueError("无法从dataset中获取图像路径")
-
-        return EmbryoBalancedSampler(
-            dataset=dataset,
-            image_paths=image_paths,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            random_state=self.config.get('data', {}).get('random_state', 42)
-        )
-
-
-class EmbryoBalancedSampler(Sampler):
-    """
-    胚胎级别平衡采样器
-    确保训练时不同胚胎的样本被均衡采样，避免某些胚胎过度代表
-    """
-
-    def __init__(self, dataset: Dataset, image_paths: List[str], batch_size: int = 32,
-                 shuffle: bool = True, random_state: int = 42):
-        """
-        初始化胚胎平衡采样器
-
-        Args:
-            dataset: PyTorch数据集
-            image_paths: 图像路径列表
-            batch_size: 批次大小
-            shuffle: 是否打乱顺序
-            random_state: 随机种子
-        """
-        self.dataset = dataset
-        self.image_paths = image_paths
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.random_state = random_state
-        self.num_samples = len(image_paths)
-
-        # 导入胚胎ID提取函数
-        try:
-            from ..utils.data_stats import extract_embryo_id
-        except ImportError:
-            from utils.data_stats import extract_embryo_id
-        self.extract_embryo_id = extract_embryo_id
-
-        # 按胚胎分组
-        self.embryo_groups = self._group_by_embryo()
-
-        # 生成采样索引
-        self.indices = self._generate_balanced_indices()
-
-    def _group_by_embryo(self) -> Dict[str, List[int]]:
-        """按胚胎ID对样本进行分组"""
-        embryo_groups = defaultdict(list)
-
-        for idx, path in enumerate(self.image_paths):
-            embryo_id = self.extract_embryo_id(path)
-            embryo_groups[embryo_id].append(idx)
-
-        return dict(embryo_groups)
-
-    def _generate_balanced_indices(self) -> List[int]:
-        """
-        生成平衡的采样索引
-
-        策略：从每个胚胎组中均等采样
-        """
-        rng = np.random.RandomState(self.random_state)
-        balanced_indices = []
-
-        # 计算每个胚胎的采样数量
-        num_embryos = len(self.embryo_groups)
-        target_samples_per_embryo = self.num_samples // num_embryos
-
-        # 从每个胚胎组中采样
-        for embryo_id, indices in sorted(self.embryo_groups.items()):
-            num_available = len(indices)
-
-            if num_available >= target_samples_per_embryo:
-                # 足够样本，直接采样
-                if self.shuffle:
-                    sampled = rng.choice(indices, size=target_samples_per_embryo, replace=False)
-                else:
-                    sampled = indices[:target_samples_per_embryo]
-            else:
-                # 样本不足，进行过采样
-                if self.shuffle:
-                    sampled = rng.choice(indices, size=target_samples_per_embryo, replace=True)
-                else:
-                    sampled = np.tile(indices, (target_samples_per_embryo // num_available + 1))[:target_samples_per_embryo]
-
-            balanced_indices.extend(sampled)
-
-        # 打乱顺序
-        if self.shuffle:
-            rng.shuffle(balanced_indices)
-
-        return balanced_indices
-
-    def __iter__(self) -> Iterator[int]:
-        """返回采样索引的迭代器"""
-        return iter(self.indices)
-
-    def __len__(self) -> int:
-        """返回采样的总样本数"""
-        return len(self.indices)
-
-    def get_embryo_distribution(self) -> Dict[str, Tuple[int, float]]:
-        """获取采样后的胚胎分布统计"""
-        distribution = defaultdict(int)
-
-        for idx in self.indices:
-            path = self.image_paths[idx]
-            embryo_id = self.extract_embryo_id(path)
-            distribution[embryo_id] += 1
-
-        total = len(self.indices)
-        result = {
-            embryo_id: (count, count / total * 100)
-            for embryo_id, count in distribution.items()
-        }
-
-        return dict(sorted(result.items()))
-
-    def print_distribution(self) -> None:
-        """打印胚胎分布统计"""
-        distribution = self.get_embryo_distribution()
-
-        if is_main_process():
-            print(f"\n【胚胎级别采样分布】")
-            print(f"  总样本数: {len(self.indices)}")
-            print(f"  总胚胎数: {len(distribution)}")
-            print(f"  平均每胚胎: {len(self.indices) / len(distribution):.1f} 张")
 
 
 def create_stork_data_loader(config: Dict[str, Any]) -> STORKDataLoader:
