@@ -256,20 +256,17 @@ class BackboneModel(nn.Module):
         raise ValueError(f"不支持的模型: {self.model_name}")
 
     def _create_vgg16(self, pretrained: bool) -> nn.Module:
-        """创建VGG16模型"""
+        """创建VGG16模型（仅返回特征，不包含分类层）"""
         backbone = models.vgg16(pretrained=pretrained)
         features = backbone.features
-        classifier_features = nn.Sequential(*list(backbone.classifier.children())[:4])
 
         # 禁用所有ReLU的inplace操作以支持Grad-CAM
         self._disable_inplace_relu(features)
-        self._disable_inplace_relu(classifier_features)
 
         return nn.Sequential(
             features,
             nn.AdaptiveAvgPool2d((7, 7)),
-            nn.Flatten(),
-            classifier_features
+            nn.Flatten()
         )
 
     def _disable_inplace_relu(self, module: nn.Module):
