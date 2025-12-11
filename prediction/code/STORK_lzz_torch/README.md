@@ -121,8 +121,14 @@ pip install -r requirements.txt
 |--------|------|------|
 | **水平翻转** | Horizontal Flip | p=0.5 |
 | **竖直翻转** | Vertical Flip | p=0.5 |
-| **颜色抖动** | ColorJitter | brightness=0.2, contrast=0.2 |
-| **随机旋转** | Random Rotation | 角度范围: ±15° |
+| **随机旋转** | Random Rotation | 角度范围: ±20° |
+| **亮度调整** | Brightness | 0.6-1.4倍 |
+| **对比度调整** | Contrast | 0.7-1.3倍 |
+| **饱和度调整** | Saturation | 0.7-1.3倍 |
+| **色调调整** | Hue | ±0.1 |
+| **随机擦除** | Random Erasing | p=0.1, scale=(0.02, 0.1) |
+| **MixUp增强** | MixUp | alpha=0.2 |
+| **CutMix增强** | CutMix | alpha=1.0 |
 
 ---
 
@@ -154,6 +160,7 @@ model:
   name: "vgg16"                          # 可选: vgg16, resnet50, resnet152, efficientnetb0, densenet121等
   pretrained: true                       # 使用预训练权重
   fine_tune: true                        # 启用微调
+  include_top: true                      # 是否包含顶部全连接层（True=分类，False=特征提取）
 
 training:
   epochs: 100                            # 训练轮数（建议100-2000）
@@ -169,6 +176,20 @@ training:
   optimizer: "adamw"                     # adamw, sgd
   scheduler: "cosine"                    # cosine, linear, step
 
+# 数据增强配置
+augmentation:
+  enabled: true                          # 启用数据增强
+  rotation_range: 20                     # 旋转范围: ±20°
+  horizontal_flip: true                  # 水平翻转
+  vertical_flip: true                    # 垂直翻转
+  brightness_range: [0.6, 1.4]           # 亮度范围: 0.6-1.4倍
+  contrast_range: [0.7, 1.3]             # 对比度范围: 0.7-1.3倍
+  saturation_range: [0.7, 1.3]           # 饱和度范围: 0.7-1.3倍
+  hue_range: [-0.1, 0.1]                 # 色调范围
+  random_erasing: true                   # 随机擦除
+  mixup_alpha: 0.2                       # MixUp增强系数
+  cutmix_alpha: 1.0                      # CutMix增强系数
+
 paths:
   output_dir: "./outputs"                # 输出目录
   cache_dir: "./batch_cache"             # 缓存目录
@@ -180,10 +201,11 @@ paths:
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `img_size` | 224 | VGG/ResNet标准输入尺寸 |
-| `train_split` | 0.7 | 训练集占比 |
 | `batch_size` | 32 | 批次大小（V100: 16-32, A100: 32-64） |
 | `learning_rate` | 1e-4 | 初始学习率 |
-| `loss` | focal | BCE 或 focal loss |
+| `loss` | focal | focal loss 或 cross_entropy |
+| `brightness_range` | [0.6, 1.4] | 亮度调整范围 |
+| `rotation_range` | 20 | 旋转角度范围（度） |
 
 ---
 

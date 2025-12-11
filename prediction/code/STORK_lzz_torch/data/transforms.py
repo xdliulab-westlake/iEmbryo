@@ -56,17 +56,20 @@ def create_train_transforms(config: Dict) -> Callable:
     if aug_config.get('vertical_flip', False):
         transform_list.append(transforms.RandomVerticalFlip(p=0.5))
 
-    # 颜色抖动
-    if aug_config.get('brightness_range'):
-        brightness_range = aug_config['brightness_range']
-        transform_list.append(
-            transforms.ColorJitter(
-                brightness=(brightness_range[0], brightness_range[1]),
-                contrast=(0.9, 1.1),
-                saturation=(0.9, 1.1),
-                hue=(-0.1, 0.1)
-            )
+    # 颜色抖动（亮度、对比度、饱和度、色调）
+    brightness_range = aug_config.get('brightness_range', [0.9, 1.1])
+    contrast_range = aug_config.get('contrast_range', [0.9, 1.1])
+    saturation_range = aug_config.get('saturation_range', [0.9, 1.1])
+    hue_range = aug_config.get('hue_range', [-0.1, 0.1])
+
+    transform_list.append(
+        transforms.ColorJitter(
+            brightness=(brightness_range[0], brightness_range[1]),
+            contrast=(contrast_range[0], contrast_range[1]),
+            saturation=(saturation_range[0], saturation_range[1]),
+            hue=(hue_range[0], hue_range[1])
         )
+    )
 
     # 随机擦除
     if aug_config.get('random_erasing', False):

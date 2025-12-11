@@ -101,6 +101,7 @@ class BackboneModel(nn.Module):
                  num_classes: int = 2,
                  fine_tune: bool = True,
                  fine_tune_layers: int = None,
+                 include_top: bool = True,
                  config: Dict = None):
         """
         初始化预训练模型
@@ -112,6 +113,7 @@ class BackboneModel(nn.Module):
             num_classes: 分类类别数
             fine_tune: 是否启用微调
             fine_tune_layers: 微调层数（可选）
+            include_top: 是否包含顶部全连接层（True=分类，False=特征提取）
             config: 配置字典（用于GPU数据增强）
         """
         super().__init__()
@@ -124,6 +126,7 @@ class BackboneModel(nn.Module):
         self.num_classes = num_classes
         self.fine_tune = fine_tune
         self.pretrained_path = pretrained_path
+        self.include_top = include_top
         self.config = config or {}
 
         # 初始化GPU数据增强
@@ -133,8 +136,13 @@ class BackboneModel(nn.Module):
         self.backbone = self._create_backbone(pretrained, pretrained_path)
         self.feature_dim = self.model_config['feature_dim']
 
-        # 创建分类头
-        self.classifier = self._create_classifier()
+        # 创建分类头（可选）
+        if include_top:
+            self.classifier = self._create_classifier()
+            print(f"✅ 已加载完整模型（include_top=True）- 包含全连接分类层")
+        else:
+            self.classifier = None
+            print(f"✅ 已加载特征提取模型（include_top=False）- 仅返回特征向量")
 
         # 设置微调策略
         if fine_tune:
@@ -318,10 +326,10 @@ class BackboneModel(nn.Module):
             # VGG16保持原有设计（效果良好）
             return nn.Sequential(
                 nn.Dropout(0.5),
-                nn.Linear(self.feature_dim, 512),
+                nn.Linear(self.feature_dim, 1024),
                 nn.ReLU(inplace=True),
-                nn.Dropout(0.3),
-                nn.Linear(512, self.num_classes)
+                nn.Dropout(0.5),
+                nn.Linear(1024, self.num_classes)
             )
         elif self.model_name in ['resnet152', 'resnet50']:
             # ResNet优化版本：增加正则化，防止logits极端化（使用LayerNorm避免batch_size=1问题）
@@ -457,13 +465,14 @@ class BackboneModel(nn.Module):
         print("骨干网络已冻结，仅训练分类头")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """前向传播 - 总是返回logits
+        """前向传播
 
         Args:
             x: 输入图像 [B, C, H, W]
 
         Returns:
-            logits [B, num_classes]
+            include_top=True: logits [B, num_classes]
+            include_top=False: features [B, feature_dim]
 
         Note:
             GPU数据增强(MixUp/CutMix)在训练循环中处理，
@@ -474,11 +483,17 @@ class BackboneModel(nn.Module):
         if self.gpu_aug is not None and self.training:
             x = self.gpu_aug(x)
 
-        # 特征提取和分类
-        # 总是返回logits张量
+        # 特征提取
         features = self.backbone(x)
-        output = self.classifier(features)
-        return output
+
+        # 返回分类或特征
+        if self.include_top:
+            # 返回分类logits
+            output = self.classifier(features)
+            return output
+        else:
+            # 返回特征向量
+            return features
 
     def get_feature_maps(self, x: torch.Tensor) -> torch.Tensor:
         """获取特征图（用于Grad-CAM等可视化）"""
@@ -520,6 +535,7 @@ def create_model(config: Dict) -> BackboneModel:
         num_classes=config.get('num_classes', 2),
         fine_tune=config.get('fine_tune', True),
         fine_tune_layers=config.get('fine_tune_layers', None),
+        include_top=config.get('include_top', True),
         config={'model': config}
     )
 
