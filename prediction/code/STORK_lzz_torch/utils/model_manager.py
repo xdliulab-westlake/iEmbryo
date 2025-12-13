@@ -142,20 +142,28 @@ class ModelManager:
             # 设置模型为评估模式
             model.eval()
 
-            # 在模型对象上附加元信息
-            model.training_metrics = metrics
-            model.best_metric = {
-                'name': metric_name,
-                'value': current_metric,
-                'mode': mode
-            }
-            model.training_config = config
-            model.save_timestamp = datetime.now().isoformat()
+            # 保存模型权重和配置（而不是整个模型对象，避免pickle问题）
+            # 处理DataParallel包装的模型
+            actual_model = model.module if hasattr(model, 'module') else model
 
-            torch.save(model, best_model_path)
+            checkpoint = {
+                'model_state_dict': actual_model.state_dict(),
+                'model_name': actual_model.model_name if hasattr(actual_model, 'model_name') else 'unknown',
+                'num_classes': actual_model.num_classes if hasattr(actual_model, 'num_classes') else 2,
+                'training_metrics': metrics,
+                'best_metric': {
+                    'name': metric_name,
+                    'value': current_metric,
+                    'mode': mode
+                },
+                'training_config': config,
+                'timestamp': datetime.now().isoformat()
+            }
+
+            torch.save(checkpoint, best_model_path)
             print(f"完整模型已保存: {best_model_path}")
             print(f"   {metric_name}: {current_metric:.4f}")
-            print(f"   包含: 模型结构 + 权重 + 训练信息")
+            print(f"   包含: 模型权重 + 配置 + 训练信息")
 
             # 保存独立的元数据文件（可选，用于快速查看信息）
             metadata = {

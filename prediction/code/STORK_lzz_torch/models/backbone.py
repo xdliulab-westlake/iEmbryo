@@ -1,30 +1,22 @@
 """
-预训练模型封装
-支持多种主流架构的统一接口
+简化版预训练模型加载
+直接使用原始预训练权重，仅修改分类头
 """
 
-import os
 import torch
 import torch.nn as nn
 import torchvision.models as models
 import timm
-from typing import Dict, Tuple
-try:
-    from ..data.gpu_transforms import create_gpu_transforms, check_kornia_available
-except ImportError:
-    # 处理相对导入问题
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    from data.gpu_transforms import create_gpu_transforms, check_kornia_available
+from typing import Dict
 
 
 class BackboneModel(nn.Module):
-    """预训练模型骨干网络封装"""
+    """简化版模型封装 - 直接使用原始预训练权重"""
 
-    # 预训练模型路径映射
+    # 本地预训练模型路径（优先使用）
     PRETRAINED_PATHS = {
         'vgg16': "/liaozizhuo/scripts/pretrain_models/vgg16-397923af.pth",
+        'vgg19': "/liaozizhuo/scripts/pretrain_models/vgg19-dcbb9e26.pth",
         'resnet50': "/liaozizhuo/scripts/pretrain_models/resnet50-11ad3fa6.pth",
         'resnet152': "/liaozizhuo/scripts/pretrain_models/resnet152-394f9c45.pth",
         'inceptionv3': "/liaozizhuo/scripts/pretrain_models/inception_v3_google-0cc3c7bd.pth",
@@ -34,506 +26,281 @@ class BackboneModel(nn.Module):
         'densenet201': "/liaozizhuo/scripts/pretrain_models/densenet201-c1103571.pth"
     }
 
-    # 模型配置字典
+    # 模型配置（包含最后一层的输入维度和属性名）
     MODEL_CONFIGS = {
         'vgg16': {
-            'torchvision_name': 'vgg16',
-            'timm_name': 'vgg16',
-            'feature_dim': 4096,
-            'fine_tune_layer': 'features.24',
-            'description': 'VGG16: 经典深层网络，适合胚胎图像特征提取'
+            'loader': lambda pretrained=False: models.vgg16(pretrained=pretrained),
+            'classifier_attr': 'classifier',
+            'last_layer_in_features': 4096,
+            'description': 'VGG16: 经典深层网络'
         },
         'resnet50': {
-            'torchvision_name': 'resnet50',
-            'timm_name': 'resnet50',
-            'feature_dim': 2048,
-            'fine_tune_layer': 'layer3',
-            'description': 'ResNet50: 残差网络，解决深层网络梯度消失问题'
+            'loader': lambda pretrained=False: models.resnet50(pretrained=pretrained),
+            'classifier_attr': 'fc',
+            'last_layer_in_features': 2048,
+            'description': 'ResNet50: 残差网络'
         },
         'resnet152': {
-            'torchvision_name': 'resnet152',
-            'timm_name': 'resnet152',
-            'feature_dim': 2048,
-            'fine_tune_layer': 'layer3',
-            'description': 'ResNet152: 更深的残差网络，更强的表征能力'
+            'loader': lambda pretrained=False: models.resnet152(pretrained=pretrained),
+            'classifier_attr': 'fc',
+            'last_layer_in_features': 2048,
+            'description': 'ResNet152: 更深的残差网络'
         },
         'inceptionv3': {
-            'torchvision_name': 'inception_v3',
-            'timm_name': 'inception_v3',
-            'feature_dim': 2048,
-            'fine_tune_layer': 'Mixed_6a',
-            'description': 'InceptionV3: 多尺度特征提取，适合复杂图像模式'
+            'loader': lambda pretrained=False: models.inception_v3(pretrained=pretrained, aux_logits=False),
+            'classifier_attr': 'fc',
+            'last_layer_in_features': 2048,
+            'description': 'InceptionV3: 多尺度特征提取'
         },
         'efficientnetb0': {
-            'torchvision_name': None,
-            'timm_name': 'efficientnet_b0',
-            'feature_dim': 1280,
-            'fine_tune_layer': 'blocks.5',
-            'description': 'EfficientNetB0: 高效网络，平衡准确率和计算效率'
+            'loader': lambda pretrained=False: timm.create_model('efficientnet_b0', pretrained=pretrained),
+            'classifier_attr': 'classifier',
+            'last_layer_in_features': 1280,
+            'description': 'EfficientNetB0: 高效网络'
         },
         'densenet121': {
-            'torchvision_name': 'densenet121',
-            'timm_name': 'densenet121',
-            'feature_dim': 1024,
-            'fine_tune_layer': 'features.denseblock3',
-            'description': 'DenseNet121: 密集连接网络，特征重用，参数效率高'
+            'loader': lambda pretrained=False: models.densenet121(pretrained=pretrained),
+            'classifier_attr': 'classifier',
+            'last_layer_in_features': 1024,
+            'description': 'DenseNet121: 密集连接网络'
         },
         'densenet169': {
-            'torchvision_name': 'densenet169',
-            'timm_name': 'densenet169',
-            'feature_dim': 1664,
-            'fine_tune_layer': 'features.denseblock3',
-            'description': 'DenseNet169: 更深的密集连接网络，更强的特征提取能力'
+            'loader': lambda pretrained=False: models.densenet169(pretrained=pretrained),
+            'classifier_attr': 'classifier',
+            'last_layer_in_features': 1664,
+            'description': 'DenseNet169: 更深的密集连接网络'
         },
         'densenet201': {
-            'torchvision_name': 'densenet201',
-            'timm_name': 'densenet201',
-            'feature_dim': 1920,
-            'fine_tune_layer': 'features.denseblock3',
-            'description': 'DenseNet201: 最深的密集连接网络，最强的表征能力'
+            'loader': lambda pretrained=False: models.densenet201(pretrained=pretrained),
+            'classifier_attr': 'classifier',
+            'last_layer_in_features': 1920,
+            'description': 'DenseNet201: 最深的密集连接网络'
+        },
+        'vgg19': {
+            'loader': lambda pretrained=False: models.vgg19(pretrained=pretrained),
+            'classifier_attr': 'classifier',
+            'last_layer_in_features': 4096,
+            'description': 'VGG19: VGG系列最深版本'
+        },
+        'convnext_tiny': {
+            'loader': lambda pretrained=False: timm.create_model('convnext_tiny', pretrained=pretrained),
+            'classifier_attr': 'head.fc',
+            'last_layer_in_features': 768,
+            'description': 'ConvNeXt-Tiny: 现代纯卷积网络(小)'
         }
     }
 
     def __init__(self,
                  model_name: str = 'vgg16',
-                 pretrained: bool = True,
-                 pretrained_path: str = None,
                  num_classes: int = 2,
+                 pretrained: bool = True,
                  fine_tune: bool = True,
-                 fine_tune_layers: int = None,
-                 include_top: bool = True,
-                 config: Dict = None):
+                 fine_tune_layers: int = None):
         """
-        初始化预训练模型
+        初始化预训练模型，仅修改分类头
 
         Args:
-            model_name: 模型名称
-            pretrained: 是否使用预训练权重
-            pretrained_path: 本地预训练模型路径
-            num_classes: 分类类别数
-            fine_tune: 是否启用微调
-            fine_tune_layers: 微调层数（可选）
-            include_top: 是否包含顶部全连接层（True=分类，False=特征提取）
-            config: 配置字典（用于GPU数据增强）
+            model_name: 模型名称（vgg16, resnet50, resnet152等）
+            num_classes: 分类类别数（默认2：好/坏胚胎）
+            pretrained: 是否使用预训练权重（默认True）
+            fine_tune: 是否启用微调（默认True）
+            fine_tune_layers: 微调层数（None=自动选择，冻结前1/3层，微调后2/3层）
         """
         super().__init__()
+        import os
 
         if model_name not in self.MODEL_CONFIGS:
             raise ValueError(f"不支持的模型: {model_name}. 支持的模型: {list(self.MODEL_CONFIGS.keys())}")
 
         self.model_name = model_name
-        self.model_config = self.MODEL_CONFIGS[model_name]
         self.num_classes = num_classes
+        self.config = self.MODEL_CONFIGS[model_name]
         self.fine_tune = fine_tune
-        self.pretrained_path = pretrained_path
-        self.include_top = include_top
-        self.config = config or {}
 
-        # 初始化GPU数据增强
-        self.gpu_aug = self._setup_gpu_augmentation()
+        # 加载预训练模型
+        print(f"加载预训练模型: {model_name}")
 
-        # 创建骨干网络
-        self.backbone = self._create_backbone(pretrained, pretrained_path)
-        self.feature_dim = self.model_config['feature_dim']
-
-        # 创建分类头（可选）
-        if include_top:
-            self.classifier = self._create_classifier()
-            print(f"✅ 已加载完整模型（include_top=True）- 包含全连接分类层")
+        # 优先使用本地预训练权重
+        if model_name in self.PRETRAINED_PATHS:
+            local_path = self.PRETRAINED_PATHS[model_name]
+            if os.path.exists(local_path):
+                print(f"  使用本地预训练权重: {local_path}")
+                # 创建未预训练的模型，然后加载本地权重
+                self.model = self.config['loader'](pretrained=False)
+                state_dict = torch.load(local_path, map_location='cpu')
+                self.model.load_state_dict(state_dict, strict=False)
+            else:
+                print(f"  本地预训练权重不存在: {local_path}")
+                # 本地不存在，检查是否需要从网络下载
+                if pretrained:
+                    print(f"  从网络下载预训练权重...")
+                    self.model = self.config['loader'](pretrained=True)
+                else:
+                    self.model = self.config['loader'](pretrained=False)
         else:
-            self.classifier = None
-            print(f"✅ 已加载特征提取模型（include_top=False）- 仅返回特征向量")
+            # 不在本地路径列表中，根据pretrained标志决定
+            self.model = self.config['loader'](pretrained=pretrained)
+
+        # 修改分类头
+        classifier_attr = self.config['classifier_attr']
+        in_features = self.config['last_layer_in_features']
+
+        # VGG系列（VGG16/19）的classifier是Sequential，需要替换整个部分
+        if model_name in ['vgg16', 'vgg19']:
+            self.model.classifier = nn.Sequential(
+                nn.Linear(25088, 4096),
+                nn.ReLU(True),
+                nn.Dropout(),
+                nn.Linear(4096, 2048),
+                nn.ReLU(True),
+                nn.Dropout(),
+                nn.Linear(2048, num_classes)
+            )
+        # ConvNeXt特殊处理（分类层名称是head.fc）
+        elif model_name.startswith('convnext'):
+            # ConvNeXt的head.fc是一个Linear层，可以直接替换
+            setattr(self.model.head, 'fc', nn.Linear(in_features, num_classes))
+        else:
+            # 其他模型直接替换最后一层
+            setattr(self.model, classifier_attr, nn.Linear(in_features, num_classes))
+
+        print(f"✅ 已加载 {model_name} 预训练模型")
+        print(f"   输出类别数: {num_classes}")
 
         # 设置微调策略
         if fine_tune:
             self._setup_fine_tuning(fine_tune_layers)
         else:
-            self._freeze_backbone()
+            # 冻结所有参数，仅训练分类头
+            self._freeze_all_but_classifier()
 
-    def _setup_gpu_augmentation(self):
-        """设置GPU数据增强"""
-        if not self.config or not check_kornia_available():
-            if self.config:
-                print("Kornia未安装，无法使用GPU数据增强")
-            return None
-
-        try:
-            gpu_aug = create_gpu_transforms(self.config)
-            print("GPU数据增强模块已启用")
-            return gpu_aug
-        except Exception as e:
-            print(f"GPU数据增强初始化失败: {e}")
-            print("回退到CPU数据增强")
-            return None
-
-    def _create_backbone(self, pretrained: bool, pretrained_path: str = None) -> nn.Module:
-        """创建骨干网络，优先使用本地预训练模型"""
-        # 优先使用指定的本地预训练路径
-        if pretrained_path and os.path.exists(pretrained_path):
-            print(f"使用指定的本地预训练模型: {pretrained_path}")
-            return self._create_local_model(pretrained_path)
-
-        # 其次使用默认的本地预训练路径
-        if pretrained and self.model_name in self.PRETRAINED_PATHS:
-            local_path = self.PRETRAINED_PATHS[self.model_name]
-            if os.path.exists(local_path):
-                print(f"使用本地预训练模型: {local_path}")
-                return self._create_local_model(local_path)
-            else:
-                print(f"本地预训练模型不存在: {local_path}")
-
-        # 最后回退到在线下载
-        print(f"使用在线预训练模型: {self.model_name}")
-        return self._create_online_model(pretrained)
-
-    def _create_local_model(self, pretrained_path: str) -> nn.Module:
-        """从本地路径加载预训练模型"""
-        try:
-            # 创建模型架构（不加载预训练权重）
-            backbone = self._create_torchvision_model(pretrained=False)
-
-            # 加载本地预训练权重
-            state_dict = torch.load(pretrained_path, map_location='cpu')
-
-            # 处理可能的键名不匹配问题
-            if hasattr(backbone, 'load_state_dict'):
-                try:
-                    backbone.load_state_dict(state_dict, strict=False)
-                    print(f"✅ 成功加载本地预训练权重")
-                except Exception as e:
-                    print(f"⚠️ 部分权重加载失败: {e}")
-
-            return backbone
-
-        except Exception as e:
-            print(f"❌ 本地预训练模型加载失败: {e}")
-            print("回退到在线模型")
-            return self._create_online_model(True)
-
-    def _create_online_model(self, pretrained: bool) -> nn.Module:
-        """创建在线模型（统一timm和torchvision逻辑）"""
-        # 优先使用timm
-        if self.model_config['timm_name']:
-            try:
-                backbone = timm.create_model(
-                    self.model_config['timm_name'],
-                    pretrained=pretrained,
-                    num_classes=0,
-                    global_pool=''
-                )
-                print(f"使用timm加载模型: {self.model_config['timm_name']}")
-
-                # 确保TIMM模型输出是平坦的特征向量
-                return nn.Sequential(
-                    backbone,
-                    nn.AdaptiveAvgPool2d((1, 1)),  # 全局平均池化
-                    nn.Flatten()  # 展平成1D特征向量
-                )
-            except Exception as e:
-                print(f"timm加载失败: {e}，回退到torchvision")
-
-        # 回退到torchvision
-        return self._create_torchvision_model(pretrained)
-
-    def _create_torchvision_model(self, pretrained: bool) -> nn.Module:
-        """使用torchvision创建模型"""
-        model_creators = {
-            'vgg16': self._create_vgg16,
-            'inceptionv3': self._create_inception_v3
-        }
-
-        # ResNet系列
-        if self.model_name.startswith('resnet'):
-            return self._create_resnet(pretrained)
-
-        # DenseNet系列
-        if self.model_name.startswith('densenet'):
-            return self._create_densenet(pretrained)
-
-        if self.model_name in model_creators:
-            return model_creators[self.model_name](pretrained)
-
-        raise ValueError(f"不支持的模型: {self.model_name}")
-
-    def _create_vgg16(self, pretrained: bool) -> nn.Module:
-        """创建VGG16模型（仅返回特征，不包含分类层）"""
-        backbone = models.vgg16(pretrained=pretrained)
-        features = backbone.features
-
-        # 禁用所有ReLU的inplace操作以支持Grad-CAM
-        self._disable_inplace_relu(features)
-
-        return nn.Sequential(
-            features,
-            nn.AdaptiveAvgPool2d((7, 7)),
-            nn.Flatten()
-        )
-
-    def _disable_inplace_relu(self, module: nn.Module):
-        """
-        递归禁用模块中所有ReLU层的inplace操作
-        这对于Grad-CAM等需要保存中间梯度的技术至关重要
-        """
-        for child_name, child_module in module.named_children():
-            if isinstance(child_module, nn.ReLU):
-                child_module.inplace = False
-            else:
-                # 递归处理子模块
-                self._disable_inplace_relu(child_module)
-
-    def _create_resnet(self, pretrained: bool) -> nn.Module:
-        """创建ResNet系列模型"""
-        backbone = getattr(models, self.model_config['torchvision_name'])(pretrained=pretrained)
-
-        # 禁用所有ReLU的inplace操作以支持Grad-CAM
-        self._disable_inplace_relu(backbone)
-
-        # 保留到avgpool层，确保输出是正确的特征维度
-        features = nn.Sequential(*list(backbone.children())[:-1])
-        return nn.Sequential(
-            features,
-            nn.Flatten()  # 确保输出是平坦的特征向量
-        )
-
-    def _create_inception_v3(self, pretrained: bool) -> nn.Module:
-        """创建InceptionV3模型"""
-        backbone = models.inception_v3(pretrained=pretrained, aux_logits=False)
-        # 保留到avgpool层，确保输出是正确的特征维度
-        features = nn.Sequential(*list(backbone.children())[:-1])
-        return nn.Sequential(
-            features,
-            nn.Flatten()  # 确保输出是平坦的特征向量
-        )
-
-    def _create_densenet(self, pretrained: bool) -> nn.Module:
-        """创建DenseNet系列模型"""
-        backbone = getattr(models, self.model_config['torchvision_name'])(pretrained=pretrained)
-        # DenseNet的features已经包含了所有卷积层，只需添加池化和展平
-        return nn.Sequential(
-            backbone.features,
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten()
-        )
-
-    def _create_classifier(self) -> nn.Module:
-        """创建分类头 - 优化版本，防止logits极端化"""
-        # 所有模型在backbone中已经处理了pooling和flatten
-        if self.model_name == 'vgg16':
-            # VGG16保持原有设计（效果良好）
-            return nn.Sequential(
-                nn.Dropout(0.5),
-                nn.Linear(self.feature_dim, 1024),
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.5),
-                nn.Linear(1024, self.num_classes)
-            )
-        elif self.model_name in ['resnet152', 'resnet50']:
-            # ResNet优化版本：增加正则化，防止logits极端化（使用LayerNorm避免batch_size=1问题）
-            return nn.Sequential(
-                nn.LayerNorm(self.feature_dim),    # 使用LayerNorm代替BatchNorm
-                nn.Dropout(0.5),                   # 增加dropout
-                nn.Linear(self.feature_dim, 512),  # 增加中间层维度
-                nn.ReLU(inplace=True),
-                nn.LayerNorm(512),                 # 中间层LayerNorm
-                nn.Dropout(0.4),                   # 增加dropout
-                nn.Linear(512, 128),               # 添加额外的降维层
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.3),
-                nn.Linear(128, self.num_classes)   # 最终分类层
-            )
-        elif self.model_name == 'inceptionv3':
-            # InceptionV3优化版本：增加正则化
-            return nn.Sequential(
-                nn.LayerNorm(self.feature_dim),
-                nn.Dropout(0.5),                   # 增加dropout
-                nn.Linear(self.feature_dim, 512),
-                nn.ReLU(inplace=True),
-                nn.LayerNorm(512),
-                nn.Dropout(0.4),                   # 增加dropout
-                nn.Linear(512, 128),               # 添加额外层
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.3),
-                nn.Linear(128, self.num_classes)
-            )
-        elif self.model_name.startswith('densenet'):
-            # DenseNet优化版本：密集连接已提供强正则化，使用适度dropout
-            return nn.Sequential(
-                nn.LayerNorm(self.feature_dim),
-                nn.Dropout(0.4),                   # 适度dropout
-                nn.Linear(self.feature_dim, 512),
-                nn.ReLU(inplace=True),
-                nn.LayerNorm(512),
-                nn.Dropout(0.3),
-                nn.Linear(512, 128),
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.2),
-                nn.Linear(128, self.num_classes)
-            )
-        else:
-            # 默认分类头 - 增强版本（使用LayerNorm）
-            return nn.Sequential(
-                nn.LayerNorm(self.feature_dim),
-                nn.Dropout(0.5),
-                nn.Linear(self.feature_dim, 512),
-                nn.ReLU(inplace=True),
-                nn.LayerNorm(512),
-                nn.Dropout(0.4),
-                nn.Linear(512, 128),
-                nn.ReLU(inplace=True),
-                nn.Dropout(0.3),
-                nn.Linear(128, self.num_classes)
-            )
-
-    def _setup_fine_tuning(self, fine_tune_layers: int = None):
-        """设置微调策略"""
-        # 先冻结所有参数
-        for param in self.backbone.parameters():
-            param.requires_grad = False
-
-        # 应用微调策略
-        if fine_tune_layers is not None:
-            self._unfreeze_top_layers(fine_tune_layers)
-        else:
-            self._apply_optimal_fine_tuning()
-
-        print(f"微调模式: 解冻部分层用于训练")
-
-    def _apply_optimal_fine_tuning(self):
-        """应用最优微调策略：统一冻结前33%的层"""
-        trainable_layers = self._collect_trainable_layers()
-        total_layers = len(trainable_layers)
-
-        # 统一冻结策略：所有模型都冻结前33%
-        freeze_ratio = 1/3  # 冻结前33%
-        optimal_fine_tune_at = int(total_layers * freeze_ratio)
-
-        print(f"启用最优微调策略: 固定前1/3层")
-        print(f"{self.model_name.upper()} 层数分析:")
-        print(f"   总层数: {total_layers}")
-        print(f"   固定层数: {optimal_fine_tune_at} (前 {optimal_fine_tune_at/total_layers:.1%})")
-        print(f"   微调层数: {total_layers - optimal_fine_tune_at} (后 {(total_layers - optimal_fine_tune_at)/total_layers:.1%})")
-
-        # 冻结前1/3的层
-        for i, (layer_name, layer) in enumerate(trainable_layers[:optimal_fine_tune_at]):
-            for param in layer.parameters():
-                param.requires_grad = False
-
-        # 解冻后2/3的层
-        for i, (layer_name, layer) in enumerate(trainable_layers[optimal_fine_tune_at:]):
-            for param in layer.parameters():
-                param.requires_grad = True
-
-        frozen_count = optimal_fine_tune_at
-        trainable_count = total_layers - optimal_fine_tune_at
-
-        print(f"微调配置完成: {trainable_count}/{total_layers} 层可训练")
-        print(f"   冻结层: {frozen_count} 层 (前1/3)")
-        print(f"   训练层: {trainable_count} 层 (后2/3)")
-
-    def _collect_trainable_layers(self):
-        """收集所有可训练的层"""
-        trainable_layers = []
-
-        def collect_layers(module, prefix=""):
-            for name, child in module.named_children():
-                current_name = f"{prefix}.{name}" if prefix else name
-                if len(list(child.parameters(recurse=False))) > 0:
-                    trainable_layers.append((current_name, child))
-                else:
-                    collect_layers(child, current_name)
-
-        collect_layers(self.backbone)
-        return trainable_layers
-
-    def _unfreeze_top_layers(self, num_layers: int):
-        """解冻顶部指定数量的层"""
-        modules = list(self.backbone.modules())
-        total_modules = len(modules)
-
-        for i in range(max(0, total_modules - num_layers), total_modules):
-            for param in modules[i].parameters():
-                param.requires_grad = True
-
-    def _freeze_backbone(self):
-        """冻结骨干网络"""
-        for param in self.backbone.parameters():
-            param.requires_grad = False
-        print("骨干网络已冻结，仅训练分类头")
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """前向传播
-
-        Args:
-            x: 输入图像 [B, C, H, W]
-
-        Returns:
-            include_top=True: logits [B, num_classes]
-            include_top=False: features [B, feature_dim]
-
-        Note:
-            GPU数据增强(MixUp/CutMix)在训练循环中处理，
-            不在forward方法中进行，以保持接口一致性。
-            参考: training/trainer.py:train_epoch()
-        """
-        # GPU数据增强（仅像素级增强，不包括MixUp/CutMix）
-        if self.gpu_aug is not None and self.training:
-            x = self.gpu_aug(x)
-
-        # 特征提取
-        features = self.backbone(x)
-
-        # 返回分类或特征
-        if self.include_top:
-            # 返回分类logits
-            output = self.classifier(features)
-            return output
-        else:
-            # 返回特征向量
-            return features
-
-    def get_feature_maps(self, x: torch.Tensor) -> torch.Tensor:
-        """获取特征图（用于Grad-CAM等可视化）"""
-        return self.backbone(x)
-
-    def get_trainable_parameters(self) -> Tuple[int, int]:
-        """获取可训练参数统计"""
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        return trainable_params, total_params
+    def forward(self, x):
+        """前向传播"""
+        return self.model(x)
 
     def print_model_info(self):
         """打印模型信息"""
-        trainable, total = self.get_trainable_parameters()
-        print(f"\n模型信息:")
-        print(f"   名称: {self.model_name}")
-        print(f"   描述: {self.model_config['description']}")
-        print(f"   特征维度: {self.feature_dim}")
-        print(f"   分类数: {self.num_classes}")
-        print(f"   总参数: {total:,}")
-        print(f"   可训练参数: {trainable:,} ({100*trainable/total:.1f}%)")
-        print(f"   微调模式: {'启用' if self.fine_tune else '禁用'}")
+        # 计算参数数量
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+        print(f"✅ 已加载 {self.model_name} 预训练模型")
+        print(f"   输出类别数: {self.num_classes}")
+        print(f"   总参数数: {total_params:,}")
+        print(f"   可训练参数: {trainable_params:,}")
+        print(f"   冻结参数: {total_params - trainable_params:,}")
+
+    def __getstate__(self):
+        """自定义pickle支持，排除不可序列化的lambda函数"""
+        state = self.__dict__.copy()
+        # 完全删除config引用（它包含lambda函数）
+        state.pop('config', None)
+        # 保存必要的配置信息
+        state['_model_config'] = {
+            'model_name': self.model_name,
+            'num_classes': self.num_classes,
+            'fine_tune': self.fine_tune,
+            'classifier_attr': self.config['classifier_attr'],
+            'last_layer_in_features': self.config['last_layer_in_features'],
+        }
+        return state
+
+    def __setstate__(self, state):
+        """自定义unpickle支持，恢复模型配置"""
+        model_config = state.pop('_model_config', {})
+        self.__dict__.update(state)
+        # 恢复config引用（指向类级别的MODEL_CONFIGS）
+        if model_config:
+            self.config = self.MODEL_CONFIGS.get(
+                model_config.get('model_name'),
+                self.MODEL_CONFIGS['vgg16']
+            )
+        else:
+            # 如果没有保存的config，使用默认的
+            self.config = self.MODEL_CONFIGS.get('vgg16')
+
+    def _setup_fine_tuning(self, fine_tune_layers: int = None):
+        """
+        设置微调策略
+
+        Args:
+            fine_tune_layers: 指定微调的层数
+                            None: 自动选择，冻结前1/3层，微调后2/3层
+                            >0: 指定微调后面几层
+        """
+        # 获取所有参数
+        all_params = list(self.model.parameters())
+        total_layers = len(all_params)
+
+        if fine_tune_layers is None:
+            # 自动策略：冻结前1/3，微调后2/3
+            freeze_layers = total_layers // 3
+            trainable_layers = total_layers - freeze_layers
+        else:
+            # 指定策略
+            freeze_layers = total_layers - fine_tune_layers
+            trainable_layers = fine_tune_layers
+
+        # 冻结前面的层
+        for param in all_params[:freeze_layers]:
+            param.requires_grad = False
+
+        # 解冻后面的层
+        for param in all_params[freeze_layers:]:
+            param.requires_grad = True
+
+        print(f"微调配置:")
+        print(f"  总层数: {total_layers}")
+        print(f"  冻结层: {freeze_layers} (前 {freeze_layers/total_layers*100:.1f}%)")
+        print(f"  训练层: {trainable_layers} (后 {trainable_layers/total_layers*100:.1f}%)")
+
+    def _freeze_all_but_classifier(self):
+        """冻结所有参数，仅保留分类头可训练"""
+        # 冻结所有参数
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        # 解冻分类头参数
+        classifier_attr = self.config['classifier_attr']
+
+        # 处理嵌套属性（如 head.fc）
+        if '.' in classifier_attr:
+            attr_parts = classifier_attr.split('.')
+            classifier = self.model
+            for part in attr_parts:
+                classifier = getattr(classifier, part)
+        else:
+            classifier = getattr(self.model, classifier_attr)
+
+        for param in classifier.parameters():
+            param.requires_grad = True
+
+        print(f"微调配置:")
+        print(f"  冻结所有 backbone 参数")
+        print(f"  仅训练分类头 ({classifier_attr})")
 
 
 def create_model(config: Dict) -> BackboneModel:
     """
-    根据配置创建模型的便捷函数
+    从配置字典创建模型
 
     Args:
-        config: 模型配置字典
+        config: 配置字典，包含：
+            - name: 模型名称
+            - num_classes: 类别数
+            - pretrained: 是否使用预训练权重
+            - fine_tune: 是否启用微调
+            - fine_tune_layers: 微调的层数
 
     Returns:
-        BackboneModel实例
+        BackboneModel 实例
     """
     return BackboneModel(
         model_name=config.get('name', 'vgg16'),
-        pretrained=config.get('pretrained', True),
-        pretrained_path=config.get('pretrained_path', None),
         num_classes=config.get('num_classes', 2),
+        pretrained=config.get('pretrained', True),
         fine_tune=config.get('fine_tune', True),
-        fine_tune_layers=config.get('fine_tune_layers', None),
-        include_top=config.get('include_top', True),
-        config={'model': config}
+        fine_tune_layers=config.get('fine_tune_layers', None)
     )
 
 

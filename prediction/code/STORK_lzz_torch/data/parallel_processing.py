@@ -75,20 +75,19 @@ def optimized_preprocess_single_image(args: Tuple) -> np.ndarray:
     优化的单图像预处理函数（专为多进程设计）
 
     Args:
-        args: (path, img_size, is_training, apply_petri_crop, apply_center_crop)
+        args: (path, img_size, is_training, apply_petri_crop)
 
     Returns:
         预处理后的图像数组
     """
-    path, img_size, is_training, apply_petri_crop, apply_center_crop = args
+    path, img_size, is_training, apply_petri_crop = args
 
     try:
         # 使用STORK预处理管道
         img = preprocess_embryo_image(
             path,
             img_size=img_size,
-            apply_petri_crop=apply_petri_crop,
-            apply_center_crop=apply_center_crop
+            apply_petri_crop=apply_petri_crop
         )
 
         # 确保RGB格式
@@ -113,7 +112,6 @@ def batch_preprocess_images_parallel(paths: List[str],
                                    img_size: int,
                                    is_training: bool,
                                    apply_petri_crop: bool = True,
-                                   apply_center_crop: bool = True,
                                    num_workers: Optional[int] = None) -> np.ndarray:
     """
     并行处理图像批次
@@ -123,7 +121,6 @@ def batch_preprocess_images_parallel(paths: List[str],
         img_size: 目标图像尺寸
         is_training: 是否为训练模式
         apply_petri_crop: 是否应用培养皿检测
-        apply_center_crop: 是否应用中心裁剪
         num_workers: 工作进程数
 
     Returns:
@@ -136,7 +133,7 @@ def batch_preprocess_images_parallel(paths: List[str],
         print(f"使用 {num_workers} 个进程并行处理 {len(paths)} 张图像...")
 
     # 准备多进程参数
-    args_list = [(path, img_size, is_training, apply_petri_crop, apply_center_crop)
+    args_list = [(path, img_size, is_training, apply_petri_crop)
                  for path in paths]
 
     # 使用进程池处理CPU密集型任务
@@ -151,7 +148,6 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
                                      train_split: float = 0.7,
                                      use_cache: bool = True,
                                      apply_petri_crop: bool = True,
-                                     apply_center_crop: bool = True,
                                      num_workers: Optional[int] = None,
                                      random_state: int = 42) -> Tuple[np.ndarray, ...]:
     """
@@ -163,7 +159,6 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
         train_split: 训练集比例，默认0.7
         use_cache: 是否使用缓存，默认True
         apply_petri_crop: 是否应用培养皿检测
-        apply_center_crop: 是否应用中心裁剪
         num_workers: 并行处理进程数，默认为None（自动检测）
         random_state: 随机种子
 
@@ -176,7 +171,7 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     - 支持预处理数据缓存
     - 详细进度报告和性能统计
     - 论文级数据分割策略
-    - STORK预处理：复杂培养皿检测、中心方形裁剪等专业胚胎学图像处理
+    - STORK预处理：复杂培养皿检测等专业胚胎学图像处理
     """
     image_paths = []
     labels = []
@@ -249,7 +244,7 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     if use_cache:
         cache_key = cache_manager._generate_cache_key(
             data_dir, img_size, len(image_paths), apply_petri_crop,
-            apply_center_crop, split_strategy, num_workers
+            split_strategy, num_workers
         )
         cached_data = cache_manager.load_cache(cache_key)
 
@@ -267,7 +262,6 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     X_train = batch_preprocess_images_parallel(
         train_paths, img_size, is_training=True,
         apply_petri_crop=apply_petri_crop,
-        apply_center_crop=apply_center_crop,
         num_workers=num_workers
     )
     train_time = time.time() - start_time
@@ -280,7 +274,6 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
     X_test = batch_preprocess_images_parallel(
         test_paths, img_size, is_training=False,
         apply_petri_crop=apply_petri_crop,
-        apply_center_crop=apply_center_crop,
         num_workers=num_workers
     )
     test_time = time.time() - start_time
@@ -307,7 +300,6 @@ def load_data_with_stork_preprocessing_DEPRECATED(data_dir: str,
             'num_workers': num_workers,
             'processing_time': total_time,
             'apply_petri_crop': apply_petri_crop,
-            'apply_center_crop': apply_center_crop,
             'version': 'pytorch_stork_v1.0'
         }
 
@@ -401,7 +393,6 @@ class STORKDataLoader:
         self.use_cache = data_config.get('use_cache', True)
         self.num_workers = data_config.get('num_workers', None)
         self.apply_petri_crop = data_config.get('apply_petri_crop', True)
-        self.apply_center_crop = data_config.get('apply_center_crop', True)
 
     def load_data(self) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset]:
         """
@@ -762,8 +753,7 @@ class STORKDataLoader:
             chunk_size=chunk_size, split="train",
             data_dir=self.data_dir, train_split=self.train_split,
             random_state=random_state,
-            apply_petri_crop=self.apply_petri_crop,
-            apply_center_crop=self.apply_center_crop
+            apply_petri_crop=self.apply_petri_crop
         )
         val_dataset = BatchCachedDataset(
             val_paths, val_labels, self.img_size,
@@ -771,8 +761,7 @@ class STORKDataLoader:
             chunk_size=chunk_size, split="val",
             data_dir=self.data_dir, train_split=self.train_split,
             random_state=random_state,
-            apply_petri_crop=self.apply_petri_crop,
-            apply_center_crop=self.apply_center_crop
+            apply_petri_crop=self.apply_petri_crop
         )
         test_dataset = BatchCachedDataset(
             test_paths, test_labels, self.img_size,
@@ -780,8 +769,7 @@ class STORKDataLoader:
             chunk_size=chunk_size, split="test",
             data_dir=self.data_dir, train_split=self.train_split,
             random_state=random_state,
-            apply_petri_crop=self.apply_petri_crop,
-            apply_center_crop=self.apply_center_crop
+            apply_petri_crop=self.apply_petri_crop
         )
 
         print(f"批量缓存数据集创建完成")

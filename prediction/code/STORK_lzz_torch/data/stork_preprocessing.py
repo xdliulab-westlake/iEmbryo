@@ -18,23 +18,6 @@ from typing import Union, List, Tuple, Optional
 from pathlib import Path
 
 
-def crop_center_square(frame: np.ndarray) -> np.ndarray:
-    """
-    从图像中裁剪中心方形区域
-
-    Args:
-        frame: 输入图像
-
-    Returns:
-        中心方形裁剪后的图像
-    """
-    y, x = frame.shape[0:2]
-    min_dim = min(y, x)
-    start_x = (x // 2) - (min_dim // 2)
-    start_y = (y // 2) - (min_dim // 2)
-    return frame[start_y : start_y + min_dim, start_x : start_x + min_dim]
-
-
 def crop_petri_dish(frame: np.ndarray) -> np.ndarray:
     """
     使用优化的霍夫圆检测来检测和裁剪培养皿
@@ -157,8 +140,7 @@ def crop_petri_dish(frame: np.ndarray) -> np.ndarray:
 
 def preprocess_embryo_image(image: Union[np.ndarray, str],
                           img_size: int = 224,
-                          apply_petri_crop: bool = True,
-                          apply_center_crop: bool = True) -> np.ndarray:
+                          apply_petri_crop: bool = True) -> np.ndarray:
     """
     胚胎图像完整预处理管道
     这是STORK系统的核心预处理函数
@@ -167,7 +149,6 @@ def preprocess_embryo_image(image: Union[np.ndarray, str],
         image: 输入图像（numpy数组或路径）
         img_size: 目标图像尺寸
         apply_petri_crop: 是否应用培养皿检测和裁剪
-        apply_center_crop: 是否应用中心方形裁剪
 
     Returns:
         准备好的模型输入图像
@@ -183,10 +164,6 @@ def preprocess_embryo_image(image: Union[np.ndarray, str],
     if apply_petri_crop:
         image = crop_petri_dish(image)
 
-    # 如果启用，应用中心裁剪
-    if apply_center_crop:
-        image = crop_center_square(image)
-
     # 缩放到目标尺寸
     image = cv2.resize(image, (img_size, img_size))
 
@@ -201,8 +178,7 @@ def preprocess_embryo_image(image: Union[np.ndarray, str],
 
 def batch_process_images(image_paths: List[str],
                         img_size: int = 224,
-                        apply_petri_crop: bool = True,
-                        apply_center_crop: bool = True) -> np.ndarray:
+                        apply_petri_crop: bool = True) -> np.ndarray:
     """
     使用STORK管道批量处理图像
 
@@ -210,7 +186,6 @@ def batch_process_images(image_paths: List[str],
         image_paths: 图像文件路径列表
         img_size: 目标图像尺寸
         apply_petri_crop: 是否应用培养皿检测和裁剪
-        apply_center_crop: 是否应用中心方形裁剪
 
     Returns:
         处理后的图像numpy数组
@@ -220,7 +195,7 @@ def batch_process_images(image_paths: List[str],
     for path in image_paths:
         try:
             processed_img = preprocess_embryo_image(
-                path, img_size, apply_petri_crop, apply_center_crop
+                path, img_size, apply_petri_crop
             )
             processed_images.append(processed_img)
         except Exception as e:
@@ -235,8 +210,7 @@ def batch_process_images(image_paths: List[str],
 def preprocess_image_stork_universal(image_path: str,
                                     img_size: int = 224,
                                     is_training: bool = True,
-                                    apply_petri_crop: bool = True,
-                                    apply_center_crop: bool = True) -> np.ndarray:
+                                    apply_petri_crop: bool = True) -> np.ndarray:
     """
     通用STORK预处理函数，与批量缓存兼容
 
@@ -245,14 +219,13 @@ def preprocess_image_stork_universal(image_path: str,
         img_size: 目标图像尺寸
         is_training: 是否为训练模式（保留参数兼容性）
         apply_petri_crop: 是否应用培养皿裁剪
-        apply_center_crop: 是否应用中心裁剪
 
     Returns:
         预处理后的图像数组 [C, H, W] 格式，范围[0,1]
     """
     # 使用现有的预处理函数
     processed_img = preprocess_embryo_image(
-        image_path, img_size, apply_petri_crop, apply_center_crop
+        image_path, img_size, apply_petri_crop
     )
 
     # 转换格式：HWC -> CHW, 归一化到[0,1]
@@ -268,7 +241,6 @@ class STORKPreprocessor:
     def __init__(self,
                  img_size: int = 224,
                  apply_petri_crop: bool = True,
-                 apply_center_crop: bool = True,
                  normalize: bool = True,
                  mean: Tuple[float, float, float] = (0.485, 0.456, 0.406),
                  std: Tuple[float, float, float] = (0.229, 0.224, 0.225)):
@@ -278,14 +250,12 @@ class STORKPreprocessor:
         Args:
             img_size: 目标图像尺寸
             apply_petri_crop: 是否应用培养皿检测
-            apply_center_crop: 是否应用中心裁剪
             normalize: 是否应用ImageNet标准化
             mean: 标准化均值
             std: 标准化标准差
         """
         self.img_size = img_size
         self.apply_petri_crop = apply_petri_crop
-        self.apply_center_crop = apply_center_crop
         self.normalize = normalize
         self.mean = torch.tensor(mean).view(3, 1, 1)
         self.std = torch.tensor(std).view(3, 1, 1)
@@ -304,8 +274,7 @@ class STORKPreprocessor:
         processed = preprocess_embryo_image(
             image,
             self.img_size,
-            self.apply_petri_crop,
-            self.apply_center_crop
+            self.apply_petri_crop
         )
 
         # 转换为张量 [H, W, C] -> [C, H, W]
@@ -340,7 +309,6 @@ class STORKPreprocessor:
 STORK预处理器配置:
 ├── 图像尺寸: {self.img_size}x{self.img_size}
 ├── 培养皿检测: {'✓' if self.apply_petri_crop else '✗'}
-├── 中心裁剪: {'✓' if self.apply_center_crop else '✗'}
 ├── ImageNet标准化: {'✓' if self.normalize else '✗'}
 └── 标准化参数: mean={self.mean.squeeze().tolist()}, std={self.std.squeeze().tolist()}
         """
@@ -369,7 +337,6 @@ def create_stork_preprocessor(config: dict) -> STORKPreprocessor:
     return STORKPreprocessor(
         img_size=img_size,
         apply_petri_crop=data_config.get('apply_petri_crop', True),
-        apply_center_crop=data_config.get('apply_center_crop', True),
         normalize=data_config.get('normalize', True)
     )
 
@@ -406,8 +373,7 @@ def preprocess_image_stork_universal(image: np.ndarray,
     image = preprocess_embryo_image(
         image,
         img_size=img_size,
-        apply_petri_crop=True,  # 启用培养皿检测
-        apply_center_crop=True  # 启用中心裁剪
+        apply_petri_crop=True  # 启用培养皿检测
     )
 
     # 转换为PyTorch张量并标准化

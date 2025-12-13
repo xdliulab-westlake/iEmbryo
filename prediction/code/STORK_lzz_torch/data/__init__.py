@@ -10,7 +10,7 @@ from .gpu_transforms import (
 )
 from .stork_preprocessing import (
     STORKPreprocessor, create_stork_preprocessor,
-    preprocess_embryo_image, crop_petri_dish, crop_center_square,
+    preprocess_embryo_image, crop_petri_dish,
     preprocess_image_stork_universal
 )
 from .parallel_processing import (
@@ -24,7 +24,7 @@ __all__ = [
     'create_gpu_transforms', 'create_simple_gpu_transforms', 'check_kornia_available',
     'GPUAugmentation', 'STORKGPUAugmentation',
     'STORKPreprocessor', 'create_stork_preprocessor',
-    'preprocess_embryo_image', 'crop_petri_dish', 'crop_center_square',
+    'preprocess_embryo_image', 'crop_petri_dish',
     'preprocess_image_stork_universal',
     'create_pytorch_datasets_from_paths',
     'BatchCacheManager', 'BatchCachedDataset'

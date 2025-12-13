@@ -87,7 +87,7 @@ class BatchCacheManager:
             json.dump(self.index, f, indent=2, cls=NumpyEncoder)
 
     def _get_cache_key(self, data_dir: str, img_size: int,
-                      apply_petri_crop: bool, apply_center_crop: bool,
+                      apply_petri_crop: bool,
                       split: str = "train", train_split: float = 0.7,
                       random_state: int = 42) -> str:
         """
@@ -99,11 +99,10 @@ class BatchCacheManager:
             f"data_dir={data_dir}",
             f"img_size={img_size}",
             f"petri_crop={apply_petri_crop}",
-            f"center_crop={apply_center_crop}",
             f"split={split}",
             f"train_split={train_split}",
             f"random_state={random_state}",
-            f"version=v2.0"  # 版本号，升级缓存格式时可修改
+            f"version=v3.0"  # 版本号，升级缓存格式时可修改
         ]
 
         params_str = "|".join(params)
@@ -115,17 +114,17 @@ class BatchCacheManager:
         return f"{split}_chunk_{chunk_id:04d}.pt"
 
     def is_cached(self, data_dir: str, img_size: int,
-                  apply_petri_crop: bool = True, apply_center_crop: bool = True,
+                  apply_petri_crop: bool = True,
                   split: str = "train", train_split: float = 0.7,
                   random_state: int = 42) -> bool:
         """检查是否已缓存"""
         cache_key = self._get_cache_key(data_dir, img_size, apply_petri_crop,
-                                      apply_center_crop, split, train_split, random_state)
+                                      split, train_split, random_state)
         return cache_key in self.index
 
     def save_batch_cache(self, image_paths: List[str], labels: List[int],
                         data_dir: str, img_size: int,
-                        apply_petri_crop: bool = True, apply_center_crop: bool = True,
+                        apply_petri_crop: bool = True,
                         split: str = "train", is_training: bool = True,
                         train_split: float = 0.7, random_state: int = 42) -> str:
         """
@@ -136,7 +135,6 @@ class BatchCacheManager:
             labels: 标签列表
             img_size: 图片尺寸
             apply_petri_crop: 是否应用培养皿裁剪
-            apply_center_crop: 是否应用中心裁剪
             split: 数据分割类型 (train/test)
             is_training: 是否为训练集
 
@@ -144,7 +142,7 @@ class BatchCacheManager:
             缓存键
         """
         cache_key = self._get_cache_key(data_dir, img_size, apply_petri_crop,
-                                      apply_center_crop, split, train_split, random_state)
+                                      split, train_split, random_state)
 
         if cache_key in self.index:
             print(f"缓存已存在: {cache_key}")
@@ -174,7 +172,7 @@ class BatchCacheManager:
 
                     # 调用现有的预处理函数
                     processed_img = preprocess_embryo_image(
-                        path, img_size, apply_petri_crop, apply_center_crop
+                        path, img_size, apply_petri_crop
                     )
 
                     # 优化存储：保持uint8格式，节省50%存储空间
@@ -219,7 +217,6 @@ class BatchCacheManager:
             'labels': [int(label) for label in labels],  # 确保转换为Python int
             'img_size': int(img_size),
             'apply_petri_crop': bool(apply_petri_crop),
-            'apply_center_crop': bool(apply_center_crop),
             'split': split,
             'chunks': chunks_info,
             'total_images': len(image_paths),
@@ -346,7 +343,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
 
     def __init__(self, image_paths: List[str], labels: List[int], img_size: int = 224,
                  is_training: bool = True, apply_petri_crop: bool = True,
-                 apply_center_crop: bool = True, cache_dir: str = "./batch_cache",
+                 cache_dir: str = "./batch_cache",
                  chunk_size: int = 1000, split: str = "train",
                  use_memory_mapping: bool = False, data_dir: str = None,
                  train_split: float = 0.7, random_state: int = 42):
@@ -359,7 +356,6 @@ class BatchCachedDataset(torch.utils.data.Dataset):
             img_size: 图片尺寸
             is_training: 是否为训练集
             apply_petri_crop: 是否应用培养皿裁剪
-            apply_center_crop: 是否应用中心裁剪
             cache_dir: 缓存目录
             chunk_size: 每个缓存文件的图片数量
             split: 数据分割名称
@@ -370,7 +366,6 @@ class BatchCachedDataset(torch.utils.data.Dataset):
         self.img_size = img_size
         self.is_training = is_training
         self.apply_petri_crop = apply_petri_crop
-        self.apply_center_crop = apply_center_crop
         self.split = split
         self.use_memory_mapping = use_memory_mapping
         self.data_dir = data_dir
@@ -384,7 +379,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
 
         # 生成稳定的缓存键
         self.cache_key = self.cache_manager._get_cache_key(
-            data_dir, img_size, apply_petri_crop, apply_center_crop,
+            data_dir, img_size, apply_petri_crop,
             split, train_split, random_state
         )
 
@@ -397,7 +392,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
             return
 
         self.cached_data = None
-        if self.cache_manager.is_cached(data_dir, img_size, apply_petri_crop, apply_center_crop,
+        if self.cache_manager.is_cached(data_dir, img_size, apply_petri_crop,
                                       split, train_split, random_state):
             print(f"发现已有缓存: {self.cache_key}，加载中...")
             self.cached_data = self.cache_manager.load_cached_data(self.cache_key)
@@ -405,7 +400,7 @@ class BatchCachedDataset(torch.utils.data.Dataset):
             print(f"未发现缓存: {self.cache_key}，创建批量缓存...")
             self.cache_manager.save_batch_cache(
                 image_paths, labels, data_dir, img_size, apply_petri_crop,
-                apply_center_crop, split, is_training, train_split, random_state
+                split, is_training, train_split, random_state
             )
             self.cached_data = self.cache_manager.load_cached_data(self.cache_key)
 
