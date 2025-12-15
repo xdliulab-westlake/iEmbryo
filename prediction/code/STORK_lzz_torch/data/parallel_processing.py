@@ -428,8 +428,12 @@ class STORKDataLoader:
     def _collect_image_paths(self):
         """
         收集图片路径和标签，不加载实际图片数据
-        按胚胎级别进行分割（70% train / 15% val / 15% test），确保同一胚胎的所有图像在同一个数据集中
-        返回 (train+val, test) 两个集合，同时生成分割映射文件
+
+        新策略：图像级别平衡 + 胚胎级别分离
+        1. 每个集合中 Class 0 和 Class 1 的图像数量相等（50:50）
+        2. 总体图像比例为 70:15:15（训练:验证:测试）
+        3. 每个胚胎只出现在一个集合中（避免数据泄漏）
+        4. 通过下采样达到平衡
         """
         from pathlib import Path
         from sklearn.model_selection import train_test_split
@@ -447,7 +451,7 @@ class STORKDataLoader:
         labels = []
 
         if is_main_process():
-            print("=== 收集图片路径信息 (按胚胎级别分割: 70/15/15) ===")
+            print("=== 收集图片路径信息 (图像级别平衡 + 胚胎级别分离: 70/15/15) ===")
 
         # 收集所有图像路径和标签
         data_path = Path(self.data_dir)
@@ -474,10 +478,10 @@ class STORKDataLoader:
 
         if is_main_process():
             print(f"找到 {len(image_paths)} 张图像")
-            print(f"Class 0: {sum(labels == 0)} 张，Class 1: {sum(labels == 1)} 张")
+            print(f"Class 0: {sum(labels == 0)} 张 ({sum(labels == 0)/len(labels)*100:.1f}%)")
+            print(f"Class 1: {sum(labels == 1)} 张 ({sum(labels == 1)/len(labels)*100:.1f}%)")
 
-        # ===== 按胚胎级别进行分割 =====
-        # Step 1: 按胚胎ID对图像进行分组
+        # ===== Step 1: 按胚胎ID对图像进行分组 =====
         embryo_groups = defaultdict(list)  # {embryo_id: [(path, label), ...]}
 
         for path, label in zip(image_paths, labels):
@@ -485,80 +489,104 @@ class STORKDataLoader:
             embryo_groups[embryo_id].append((path, label))
 
         if is_main_process():
-            print(f"\n按胚胎分组:")
+            print(f"\n📊 胚胎统计:")
             print(f"  总胚胎数: {len(embryo_groups)}")
-            print(f"  平均每个胚胎 {len(image_paths) / len(embryo_groups):.1f} 张图像")
+            print(f"  平均每个胚胎: {len(image_paths) / len(embryo_groups):.1f} 张图像")
 
-        # Step 2: 为每个胚胎确定标签 (取多数投票)
-        embryo_ids = []
-        embryo_labels = []
+        # ===== Step 2: 按类别组织胚胎（记录每个胚胎的图像数量）=====
+        class_embryo_info = {0: [], 1: []}  # {class: [(embryo_id, num_images, [paths], [labels]), ...]}
 
         for embryo_id, items in embryo_groups.items():
             paths, item_labels = zip(*items)
             # 使用多数投票确定胚胎的标签
             embryo_label = int(np.round(np.mean(item_labels)))
-            embryo_ids.append(embryo_id)
-            embryo_labels.append(embryo_label)
+            num_images = len(items)
+            class_embryo_info[embryo_label].append((embryo_id, num_images, list(paths), list(item_labels)))
 
-        embryo_ids = np.array(embryo_ids)
-        embryo_labels = np.array(embryo_labels)
+        # 按图像数量排序（方便采样）
+        for class_label in [0, 1]:
+            class_embryo_info[class_label].sort(key=lambda x: x[1], reverse=True)
 
         if is_main_process():
-            print(f"胚胎级别标签分布:")
-            print(f"  Class 0: {sum(embryo_labels == 0)} 个胚胎")
-            print(f"  Class 1: {sum(embryo_labels == 1)} 个胚胎")
+            print(f"\n📈 胚胎级别类别分布:")
+            for class_label in [0, 1]:
+                embryo_list = class_embryo_info[class_label]
+                total_images = sum(info[1] for info in embryo_list)
+                print(f"  Class {class_label}: {len(embryo_list)} 个胚胎，{total_images} 张图像")
 
-        # Step 3: 三级分割 (70% train / 15% val / 15% test)
+        # ===== Step 3: 计算目标图像数量（平衡策略）=====
+        # 使用少数类的总图像数作为每个类别的目标数量
+        total_class_0_images = sum(info[1] for info in class_embryo_info[0])
+        total_class_1_images = sum(info[1] for info in class_embryo_info[1])
+
+        target_images_per_class = min(total_class_0_images, total_class_1_images)
+
+        # 分配到各个集合（70:15:15）
+        train_target_per_class = int(target_images_per_class * 0.70)
+        val_target_per_class = int(target_images_per_class * 0.15)
+        test_target_per_class = target_images_per_class - train_target_per_class - val_target_per_class
+
         if is_main_process():
-            print(f"\n进行胚胎级别三级分割 (70% train / 15% val / 15% test)...")
+            print(f"\n🎯 目标图像数量（下采样到少数类）:")
+            print(f"  每个类别总数: {target_images_per_class} 张")
+            print(f"  训练集（每类）: {train_target_per_class} 张")
+            print(f"  验证集（每类）: {val_target_per_class} 张")
+            print(f"  测试集（每类）: {test_target_per_class} 张")
+            print(f"  总图像数: {target_images_per_class * 2} 张")
 
-        # 先分出 test (15%)
-        train_val_embryo_ids, test_embryo_ids, train_val_embryo_labels, test_embryo_labels = train_test_split(
-            embryo_ids, embryo_labels, test_size=0.15,
-            random_state=42, stratify=embryo_labels
-        )
+        # ===== Step 4: 为每个类别选择胚胎，达到目标图像数量 =====
+        random_state = self.config.get('data', {}).get('random_state', 42)
+        rng = np.random.RandomState(random_state)
 
-        # 再从 train_val 中分出 val (15% / 85% ≈ 17.65%)
-        val_ratio = 15.0 / 85.0  # val 占 train+val 的比例
-        train_embryo_ids, val_embryo_ids, train_embryo_labels, val_embryo_labels = train_test_split(
-            train_val_embryo_ids, train_val_embryo_labels, test_size=val_ratio,
-            random_state=42, stratify=train_val_embryo_labels
-        )
+        selected_embryos = {0: {'train': [], 'val': [], 'test': []},
+                           1: {'train': [], 'val': [], 'test': []}}
 
-        # Step 4: 创建胚胎ID到分割标签的映射
-        embryo_split_mapping = {}  # {embryo_id: "train"/"val"/"test"}
+        for class_label in [0, 1]:
+            embryo_list = class_embryo_info[class_label].copy()
+            rng.shuffle(embryo_list)  # 随机打乱
 
-        for embryo_id in train_embryo_ids:
-            embryo_split_mapping[embryo_id] = "train"
-        for embryo_id in val_embryo_ids:
-            embryo_split_mapping[embryo_id] = "val"
-        for embryo_id in test_embryo_ids:
-            embryo_split_mapping[embryo_id] = "test"
+            # 依次分配到 train, val, test
+            current_counts = {'train': 0, 'val': 0, 'test': 0}
+            targets = {'train': train_target_per_class,
+                      'val': val_target_per_class,
+                      'test': test_target_per_class}
 
-        # Step 5: 根据映射分配所有图像
-        train_paths_list = []
-        val_paths_list = []
-        test_paths_list = []
-        train_labels_list = []
-        val_labels_list = []
-        test_labels_list = []
+            for embryo_id, num_images, paths, item_labels in embryo_list:
+                # 找到还需要图像的集合
+                for split in ['train', 'val', 'test']:
+                    if current_counts[split] < targets[split]:
+                        selected_embryos[class_label][split].append(
+                            (embryo_id, num_images, paths, item_labels)
+                        )
+                        current_counts[split] += num_images
+                        break
 
-        image_split_mapping = {}  # {image_path: "train"/"val"/"test"} 用于生成CSV
+                # 如果所有集合都已满，停止
+                if all(current_counts[s] >= targets[s] for s in ['train', 'val', 'test']):
+                    break
 
-        for path, label in zip(image_paths, labels):
-            embryo_id = extract_embryo_id(path)
-            split = embryo_split_mapping[embryo_id]
-            image_split_mapping[path] = split
+        # ===== Step 5: 组装最终的数据集 =====
+        train_paths_list, train_labels_list = [], []
+        val_paths_list, val_labels_list = [], []
+        test_paths_list, test_labels_list = [], []
 
-            if split == "train":
-                train_paths_list.append(path)
-                train_labels_list.append(label)
-            elif split == "val":
-                val_paths_list.append(path)
-                val_labels_list.append(label)
-            else:  # test
-                test_paths_list.append(path)
-                test_labels_list.append(label)
+        embryo_split_mapping = {}
+        image_split_mapping = {}
+
+        for class_label in [0, 1]:
+            for split_name, split_list in [('train', train_paths_list),
+                                          ('val', val_paths_list),
+                                          ('test', test_paths_list)]:
+                split_labels = train_labels_list if split_name == 'train' else (
+                    val_labels_list if split_name == 'val' else test_labels_list
+                )
+
+                for embryo_id, _, paths, item_labels in selected_embryos[class_label][split_name]:
+                    split_list.extend(paths)
+                    split_labels.extend(item_labels)
+                    embryo_split_mapping[embryo_id] = split_name
+                    for path in paths:
+                        image_split_mapping[path] = split_name
 
         # 转换为numpy数组
         train_paths = np.array(train_paths_list)
@@ -569,19 +597,43 @@ class STORKDataLoader:
         test_labels = np.array(test_labels_list)
 
         if is_main_process():
-            print(f"\n胚胎级别分割结果:")
-            print(f"  训练集: {len(train_paths)} 张图像，来自 {len(train_embryo_ids)} 个胚胎 ({len(train_paths)/len(image_paths)*100:.1f}%)")
-            print(f"    Class 0: {sum(train_labels == 0)} 张，Class 1: {sum(train_labels == 1)} 张")
-            print(f"  验证集: {len(val_paths)} 张图像，来自 {len(val_embryo_ids)} 个胚胎 ({len(val_paths)/len(image_paths)*100:.1f}%)")
-            print(f"    Class 0: {sum(val_labels == 0)} 张，Class 1: {sum(val_labels == 1)} 张")
-            print(f"  测试集: {len(test_paths)} 张图像，来自 {len(test_embryo_ids)} 个胚胎 ({len(test_paths)/len(image_paths)*100:.1f}%)")
-            print(f"    Class 0: {sum(test_labels == 0)} 张，Class 1: {sum(test_labels == 1)} 张")
+            print(f"\n✅ 图像级别平衡分割结果:")
+            print(f"\n🧬 胚胎数量统计:")
+            train_embryos = sum(len(selected_embryos[c]['train']) for c in [0, 1])
+            val_embryos = sum(len(selected_embryos[c]['val']) for c in [0, 1])
+            test_embryos = sum(len(selected_embryos[c]['test']) for c in [0, 1])
+            total_embryos = train_embryos + val_embryos + test_embryos
+            print(f"   总胚胎数: {total_embryos}")
+            print(f"   训练集胚胎数: {train_embryos}")
+            print(f"   验证集胚胎数: {val_embryos}")
+            print(f"   测试集胚胎数: {test_embryos}")
 
-            # 验证分层：确保类别分布被保持
-            verify_class_distribution(
-                [labels, train_labels, val_labels, test_labels],
-                ["Original", "Train", "Val", "Test"]
-            )
+            print(f"\n📊 总体数据分布:")
+            total_images = len(train_paths) + len(val_paths) + len(test_paths)
+            total_class_0 = sum(train_labels == 0) + sum(val_labels == 0) + sum(test_labels == 0)
+            total_class_1 = sum(train_labels == 1) + sum(val_labels == 1) + sum(test_labels == 1)
+            print(f"   总样本数: {total_images}")
+            print(f"   Class 0 (Poor/Non-viable): {total_class_0} ({total_class_0/total_images*100:.2f}%)")
+            print(f"   Class 1 (Good/Viable): {total_class_1} ({total_class_1/total_images*100:.2f}%)")
+            print(f"   类别比例: {total_class_0/total_class_1:.2f}:1")
+
+            print(f"\n📈 训练集:")
+            print(f"   图像数: {len(train_paths)}")
+            print(f"   胚胎数: {train_embryos}")
+            print(f"   Class 0: {sum(train_labels == 0)} ({sum(train_labels == 0)/len(train_labels)*100:.2f}%)")
+            print(f"   Class 1: {sum(train_labels == 1)} ({sum(train_labels == 1)/len(train_labels)*100:.2f}%)")
+
+            print(f"\n📉 验证集:")
+            print(f"   图像数: {len(val_paths)}")
+            print(f"   胚胎数: {val_embryos}")
+            print(f"   Class 0: {sum(val_labels == 0)} ({sum(val_labels == 0)/len(val_labels)*100:.2f}%)")
+            print(f"   Class 1: {sum(val_labels == 1)} ({sum(val_labels == 1)/len(val_labels)*100:.2f}%)")
+
+            print(f"\n🧪 测试集:")
+            print(f"   图像数: {len(test_paths)}")
+            print(f"   胚胎数: {test_embryos}")
+            print(f"   Class 0: {sum(test_labels == 0)} ({sum(test_labels == 0)/len(test_labels)*100:.2f}%)")
+            print(f"   Class 1: {sum(test_labels == 1)} ({sum(test_labels == 1)/len(test_labels)*100:.2f}%)")
 
         # Step 6: 保存分割映射文件
         self._save_split_mapping(embryo_split_mapping, image_split_mapping)
@@ -589,16 +641,9 @@ class STORKDataLoader:
         # 保存分割信息到对象属性，供后续使用
         self.split_mapping = embryo_split_mapping  # embryo_id -> split
         self.image_split_mapping = image_split_mapping  # image_path -> split
-        self.train_embryo_ids = set(train_embryo_ids)
-        self.val_embryo_ids = set(val_embryo_ids)
-        self.test_embryo_ids = set(test_embryo_ids)
-
-        # 检查是否需要在训练集上进行类别平衡（欠采样）
-        balance_train = self.config.get('data', {}).get('balance_train_classes', False)
-        if balance_train:
-            train_paths, train_labels = self._balance_classes_by_undersampling(
-                train_paths, train_labels, train_embryo_ids
-            )
+        self.train_embryo_ids = set(embryo_split_mapping[eid] == 'train' for eid in embryo_split_mapping)
+        self.val_embryo_ids = set(embryo_split_mapping[eid] == 'val' for eid in embryo_split_mapping)
+        self.test_embryo_ids = set(embryo_split_mapping[eid] == 'test' for eid in embryo_split_mapping)
 
         # 保存各分割的路径和标签供后续使用
         self.train_paths = train_paths
