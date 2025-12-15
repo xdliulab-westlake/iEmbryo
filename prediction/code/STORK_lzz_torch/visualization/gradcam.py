@@ -158,13 +158,14 @@ class GradCAM:
                 return None
         return layer
 
-    def generate_cam(self, input_tensor: torch.Tensor, class_idx: int = None) -> np.ndarray:
+    def generate_cam(self, input_tensor: torch.Tensor, class_idx: int = None, method: str = 'gradcam++') -> np.ndarray:
         """
         生成Grad-CAM热力图
 
         Args:
             input_tensor: 输入张量 [1, C, H, W]
             class_idx: 目标类别索引，如果为None则使用预测类别
+            method: 使用的方法，'gradcam' 或 'gradcam++' (默认使用gradcam++避免边缘效应)
 
         Returns:
             热力图数组
@@ -224,11 +225,26 @@ class GradCAM:
             gradients = self.gradients.detach().clone()  # [1, C, H, W]
             activations = self.activations.detach().clone()  # [1, C, H, W]
 
-            # 计算权重（全局平均池化）
-            weights = torch.mean(gradients, dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
+            # 根据method选择计算方式
+            if method == 'gradcam++':
+                # Grad-CAM++: 使用高阶梯度信息，避免边缘效应
+                grad_2 = gradients.pow(2)
+                grad_3 = gradients.pow(3)
 
-            # 生成CAM
-            cam = torch.sum(weights * activations, dim=1).squeeze(0)  # [H, W]
+                # 计算alpha权重
+                global_sum = (activations * grad_3).sum(dim=(2, 3), keepdim=True)
+                alpha = grad_2 / (2 * grad_2 + global_sum + 1e-8)
+
+                # 计算像素级加权
+                positive_grads = F.relu(gradients)
+                weighted_grads = alpha * positive_grads
+
+                # 加权求和激活
+                cam = (weighted_grads * activations).sum(dim=1).squeeze(0)  # [H, W]
+            else:
+                # 标准Grad-CAM: 全局平均池化
+                weights = torch.mean(gradients, dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
+                cam = torch.sum(weights * activations, dim=1).squeeze(0)  # [H, W]
 
             # ReLU（只保留正值）
             cam = F.relu(cam)

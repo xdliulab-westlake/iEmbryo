@@ -239,6 +239,8 @@ def create_arg_parser() -> argparse.ArgumentParser:
                        help='禁用交叉验证')
 
     # 评估参数
+    parser.add_argument('--eval-only', action='store_true', default=False,
+                       help='仅评估模式（跳过训练，直接评估已保存的最佳模型）')
     parser.add_argument('--no-gradcam', action='store_true', default=False,
                        help='跳过Grad-CAM生成')
     parser.add_argument('--gradcam-samples', type=int, default=None,

@@ -223,8 +223,9 @@ class STORKApplication:
 
     def evaluate(self):
         """执行评估（包括胚胎级别投票评估）"""
+        import json
         print("\n" + "="*80)
-        print("开始全面评估...")
+        print("开始测试集全面评估...")
         print("="*80)
 
         # 加载最佳模型
@@ -270,6 +271,10 @@ class STORKApplication:
         output_dir = self.config['paths']['output_dir']
         model_name = self.config['model']['name']
 
+        print(f"\n在测试集上评估模型性能...")
+        print(f"测试集样本数: {len(self.test_dataset)}")
+        print(f"来自胚胎数: {len(self.data_loader.test_embryo_ids)}")
+
         metrics = evaluate_model(
             model=self.model,
             data_loader=self.test_loader,
@@ -279,11 +284,30 @@ class STORKApplication:
             class_names=['Non-viable', 'Viable']
         )
 
-        print(f"\n【标准图像级别评估结果】")
-        print(f"   准确率:   {metrics.get('accuracy', 0):.4f}")
-        print(f"   精确率:   {metrics.get('precision_weighted', 0):.4f}")
-        print(f"   召回率:   {metrics.get('recall_weighted', 0):.4f}")
-        print(f"   F1分数:   {metrics.get('f1_weighted', 0):.4f}")
+        print("\n" + "="*80)
+        print("【测试集图像级别评估结果】")
+        print("="*80)
+        print(f"准确率:         {metrics.get('accuracy', 0):.4f} ({metrics.get('accuracy', 0)*100:.2f}%)")
+        print(f"精确率 (加权):  {metrics.get('precision_weighted', 0):.4f}")
+        print(f"召回率 (加权):  {metrics.get('recall_weighted', 0):.4f}")
+        print(f"F1分数 (加权):  {metrics.get('f1_weighted', 0):.4f}")
+
+        # 保存测试集结果到文件
+        test_results_file = Path(output_dir) / f'{model_name}_test_results.json'
+        with open(test_results_file, 'w') as f:
+            json.dump({
+                'test_samples': len(self.test_dataset),
+                'test_embryos': len(self.data_loader.test_embryo_ids),
+                'accuracy': float(metrics.get('accuracy', 0)),
+                'precision_weighted': float(metrics.get('precision_weighted', 0)),
+                'recall_weighted': float(metrics.get('recall_weighted', 0)),
+                'f1_weighted': float(metrics.get('f1_weighted', 0)),
+                'precision_per_class': [float(x) for x in metrics.get('precision_per_class', [])],
+                'recall_per_class': [float(x) for x in metrics.get('recall_per_class', [])],
+                'f1_per_class': [float(x) for x in metrics.get('f1_per_class', [])]
+            }, f, indent=2)
+        print(f"\n✓ 测试集结果已保存到: {test_results_file}")
+        print("="*80)
 
         # 胚胎级别评估（使用trainer的内置方法）
         try:
@@ -339,13 +363,25 @@ class STORKApplication:
             self.setup_trainer()
 
             # 训练
-            history = self.train()
+            try:
+                history = self.train()
+                print("\n✓ 训练完成")
+            except KeyboardInterrupt:
+                print("\n⚠ 训练被用户中断")
+            except Exception as e:
+                print(f"\n⚠ 训练过程出错: {e}")
+                import traceback
+                traceback.print_exc()
 
-            # 评估
+            # 无论训练是否完成，都尝试评估（如果有保存的模型）
+            print("\n准备进行测试集评估...")
             metrics = self.evaluate()
 
-            print("\n训练和评估完成!")
+            print("\n" + "="*80)
+            print("训练和评估流程完成!")
+            print("="*80)
             print(f"最终测试准确率: {metrics.get('accuracy', 0)*100:.2f}%")
+            print("="*80)
 
             # 可选：运行交叉验证
             if self.config.get('validation', {}).get('cross_validation', False):

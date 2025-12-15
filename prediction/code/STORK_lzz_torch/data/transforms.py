@@ -37,9 +37,9 @@ def create_train_transforms(config: Dict) -> Callable:
         ])
 
     # 启用数据增强
+    # 注意：STORK预处理已经做了圆形培养皿裁剪，这里直接resize保持圆形
     transform_list = [
-        transforms.Resize((int(img_size * 1.1), int(img_size * 1.1))),  # 稍微放大
-        transforms.RandomCrop((img_size, img_size)),  # 随机裁剪
+        transforms.Resize((img_size, img_size)),  # 直接resize，不做裁剪
     ]
 
     # 旋转
