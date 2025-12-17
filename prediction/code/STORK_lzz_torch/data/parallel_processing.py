@@ -641,9 +641,33 @@ class STORKDataLoader:
         # 保存分割信息到对象属性，供后续使用
         self.split_mapping = embryo_split_mapping  # embryo_id -> split
         self.image_split_mapping = image_split_mapping  # image_path -> split
-        self.train_embryo_ids = set(embryo_split_mapping[eid] == 'train' for eid in embryo_split_mapping)
-        self.val_embryo_ids = set(embryo_split_mapping[eid] == 'val' for eid in embryo_split_mapping)
-        self.test_embryo_ids = set(embryo_split_mapping[eid] == 'test' for eid in embryo_split_mapping)
+        self.train_embryo_ids = {eid for eid, split in embryo_split_mapping.items() if split == 'train'}
+        self.val_embryo_ids = {eid for eid, split in embryo_split_mapping.items() if split == 'val'}
+        self.test_embryo_ids = {eid for eid, split in embryo_split_mapping.items() if split == 'test'}
+
+        # 验证胚胎ID统计
+        if is_main_process():
+            print(f"\n[DEBUG] 胚胎ID提取验证:")
+            print(f"  训练集胚胎数: {len(self.train_embryo_ids)} 个")
+            print(f"  验证集胚胎数: {len(self.val_embryo_ids)} 个")
+            print(f"  测试集胚胎数: {len(self.test_embryo_ids)} 个")
+            print(f"  总胚胎数: {len(embryo_split_mapping)} 个")
+
+            # 检查胚胎是否有重叠
+            train_val_overlap = self.train_embryo_ids & self.val_embryo_ids
+            train_test_overlap = self.train_embryo_ids & self.test_embryo_ids
+            val_test_overlap = self.val_embryo_ids & self.test_embryo_ids
+
+            if train_val_overlap or train_test_overlap or val_test_overlap:
+                print(f"  ⚠️  警告: 检测到胚胎重叠!")
+                if train_val_overlap:
+                    print(f"     训练-验证重叠: {len(train_val_overlap)} 个")
+                if train_test_overlap:
+                    print(f"     训练-测试重叠: {len(train_test_overlap)} 个")
+                if val_test_overlap:
+                    print(f"     验证-测试重叠: {len(val_test_overlap)} 个")
+            else:
+                print(f"  ✓ 确认: 各数据集之间无胚胎重叠（数据泄漏检查通过）")
 
         # 保存各分割的路径和标签供后续使用
         self.train_paths = train_paths

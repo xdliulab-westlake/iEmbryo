@@ -288,9 +288,9 @@ class STORKApplication:
         print("【测试集图像级别评估结果】")
         print("="*80)
         print(f"准确率:         {metrics.get('accuracy', 0):.4f} ({metrics.get('accuracy', 0)*100:.2f}%)")
-        print(f"精确率 (加权):  {metrics.get('precision_weighted', 0):.4f}")
-        print(f"召回率 (加权):  {metrics.get('recall_weighted', 0):.4f}")
-        print(f"F1分数 (加权):  {metrics.get('f1_weighted', 0):.4f}")
+        print(f"精确率 (宏平均):  {metrics.get('precision_macro', 0):.4f}")
+        print(f"召回率 (宏平均):  {metrics.get('recall_macro', 0):.4f}")
+        print(f"F1分数 (宏平均):  {metrics.get('f1_macro', 0):.4f}")
 
         # 保存测试集结果到文件
         test_results_file = Path(output_dir) / f'{model_name}_test_results.json'
@@ -299,9 +299,9 @@ class STORKApplication:
                 'test_samples': len(self.test_dataset),
                 'test_embryos': len(self.data_loader.test_embryo_ids),
                 'accuracy': float(metrics.get('accuracy', 0)),
-                'precision_weighted': float(metrics.get('precision_weighted', 0)),
-                'recall_weighted': float(metrics.get('recall_weighted', 0)),
-                'f1_weighted': float(metrics.get('f1_weighted', 0)),
+                'precision_macro': float(metrics.get('precision_macro', 0)),
+                'recall_macro': float(metrics.get('recall_macro', 0)),
+                'f1_macro': float(metrics.get('f1_macro', 0)),
                 'precision_per_class': [float(x) for x in metrics.get('precision_per_class', [])],
                 'recall_per_class': [float(x) for x in metrics.get('recall_per_class', [])],
                 'f1_per_class': [float(x) for x in metrics.get('f1_per_class', [])]
@@ -319,16 +319,17 @@ class STORKApplication:
                     metrics['embryo_metrics'] = embryo_metrics
 
                     # 打印对比报告
-                    if 'metrics_result' in embryo_metrics:
-                        # 延迟导入以避免循环导入
-                        from evaluation import EmbryoMetricsCalculator
-                        calculator = EmbryoMetricsCalculator(num_classes=2)
-                        calculator.print_comparison_report(embryo_metrics['metrics_result'])
+                    # 延迟导入以避免循环导入
+                    from evaluation import EmbryoMetricsCalculator
+                    calculator = EmbryoMetricsCalculator(num_classes=2)
+                    calculator.print_comparison_report(embryo_metrics)
 
-                        # 保存到文件
-                        output_dir = Path(self.config['paths']['output_dir']) / 'embryo_evaluation'
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        calculator.save_metrics_report(embryo_metrics['metrics_result'], output_dir / 'embryo_metrics.json')
+                    # 保存到文件
+                    output_dir = Path(self.config['paths']['output_dir']) / 'embryo_evaluation'
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    calculator.save_metrics_report(embryo_metrics, output_dir / 'embryo_metrics.json')
+                else:
+                    print("⚠ 未能获取胚胎级别评估数据，可能是图像路径信息缺失")
         except Exception as e:
             print(f"⚠ 胚胎级别评估失败: {e}")
             import traceback

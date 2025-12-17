@@ -77,13 +77,10 @@ class MetricsCalculator:
             'accuracy': accuracy_score(y_true, y_pred),
             'precision_macro': precision_score(y_true, y_pred, average='macro'),
             'precision_micro': precision_score(y_true, y_pred, average='micro'),
-            'precision_weighted': precision_score(y_true, y_pred, average='weighted'),
             'recall_macro': recall_score(y_true, y_pred, average='macro'),
             'recall_micro': recall_score(y_true, y_pred, average='micro'),
-            'recall_weighted': recall_score(y_true, y_pred, average='weighted'),
             'f1_macro': f1_score(y_true, y_pred, average='macro'),
             'f1_micro': f1_score(y_true, y_pred, average='micro'),
-            'f1_weighted': f1_score(y_true, y_pred, average='weighted'),
         }
 
         return metrics
@@ -271,16 +268,16 @@ class ReportGenerator:
                 <div class="metric-label">准确率</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">{metrics.get('precision_weighted', 0):.4f}</div>
-                <div class="metric-label">精确率 (加权)</div>
+                <div class="metric-value">{metrics.get('precision_macro', 0):.4f}</div>
+                <div class="metric-label">精确率 (宏平均)</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">{metrics.get('recall_weighted', 0):.4f}</div>
-                <div class="metric-label">召回率 (加权)</div>
+                <div class="metric-value">{metrics.get('recall_macro', 0):.4f}</div>
+                <div class="metric-label">召回率 (宏平均)</div>
             </div>
             <div class="metric-card">
-                <div class="metric-value">{metrics.get('f1_weighted', 0):.4f}</div>
-                <div class="metric-label">F1分数 (加权)</div>
+                <div class="metric-value">{metrics.get('f1_macro', 0):.4f}</div>
+                <div class="metric-label">F1分数 (宏平均)</div>
             </div>
         </div>
     </div>
@@ -327,13 +324,10 @@ class ReportGenerator:
             ('accuracy', '准确率'),
             ('precision_macro', '精确率 (宏平均)'),
             ('precision_micro', '精确率 (微平均)'),
-            ('precision_weighted', '精确率 (加权平均)'),
             ('recall_macro', '召回率 (宏平均)'),
             ('recall_micro', '召回率 (微平均)'),
-            ('recall_weighted', '召回率 (加权平均)'),
             ('f1_macro', 'F1分数 (宏平均)'),
             ('f1_micro', 'F1分数 (微平均)'),
-            ('f1_weighted', 'F1分数 (加权平均)'),
         ]
 
         if 'auc_roc' in metrics:
@@ -461,9 +455,9 @@ class ReportGenerator:
         # 提取主要指标
         main_metrics = {
             'Accuracy': metrics.get('accuracy', 0),
-            'Precision': metrics.get('precision_weighted', 0),
-            'Recall': metrics.get('recall_weighted', 0),
-            'F1-Score': metrics.get('f1_weighted', 0),
+            'Precision': metrics.get('precision_macro', 0),
+            'Recall': metrics.get('recall_macro', 0),
+            'F1-Score': metrics.get('f1_macro', 0),
         }
 
         if 'auc_roc' in metrics:
