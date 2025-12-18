@@ -155,7 +155,17 @@ class EmbryoMetricsCalculator:
             # 预测标签：根据投票方法
             if voting_method == 'majority':
                 # 多数投票
-                pred_label = int(np.round(np.mean(group['y_pred'])))
+                mean_pred = np.mean(group['y_pred'])
+
+                # 检查是否平票
+                if mean_pred == 0.5:  # 平票情况：预测为0和1的图像数量相等
+                    # 平票时比较平均的softmax概率，选择概率更高的类别
+                    avg_proba = np.mean(group['y_proba'], axis=0)
+                    pred_label = int(np.argmax(avg_proba))
+                else:
+                    # 非平票情况：正常多数投票
+                    pred_label = int(np.round(mean_pred))
+
                 y_pred_embryo.append(pred_label)
 
                 if y_proba_embryo is not None and group['y_proba'] is not None:
