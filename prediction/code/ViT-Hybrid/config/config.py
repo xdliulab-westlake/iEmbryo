@@ -1,25 +1,36 @@
 """
-Configuration for ViT-Hybrid Model (PyTorch)
+Configuration for TMFI-Net Model (PyTorch)
+Based on "Transformer-Based Multi-Scale Feature Integration Network for Video Saliency Prediction"
+Adapted for Embryo Quality Assessment
+
 Author: Liao Zizhuo
-Date: 2025-10-27
+Date: 2025-12-22
 """
 
 from pathlib import Path
 
 
 class ModelConfig:
-    """模型配置"""
+    """TMFI-Net 模型配置"""
+    # 基本参数
     TIME_STEPS = 33
     FOCAL_PLANES = 11
     IMAGE_SIZE = 224
 
-    NUM_TRANSFORMER_LAYERS = 4
-    NUM_HEADS = 8
-    D_MODEL = 4096  # 与VGG16输出维度保持一致（STORK风格）
-    DFF = 2048      # 前馈网络维度
+    # Transformer参数
+    NUM_TRANSFORMER_LAYERS = 4  # Total number of transformer layers
+    NUM_HEADS = 8               # Number of attention heads
+    D_MODEL = 512               # Transformer feature dimension (平衡性能和内存)
+    DFF = 1024                  # Feed-forward network dimension
     DROPOUT_RATE = 0.1
 
-    FUSION_TYPE = 'average'
+    # 焦平面融合
+    FUSION_TYPE = 'average'     # Focal plane fusion method: 'average', 'max', or 'weighted'
+
+    # TMFI-Net特定参数
+    NUM_HIERARCHICAL_LEVELS = 4  # Number of hierarchical levels in decoder (推荐4)
+    SEMANTIC_CHANNELS = 192      # Output channels for semantic-guided encoder
+    NUM_CLASSES = 2              # Number of output classes (2 for binary classification)
 
 
 class TrainingConfig:
@@ -77,16 +88,26 @@ class PathConfig:
 
 
 def get_model_config():
-    """获取模型配置字典"""
+    """获取TMFI-Net模型配置字典"""
     return {
+        # 基本参数
         'time_steps': ModelConfig.TIME_STEPS,
         'focal_planes': ModelConfig.FOCAL_PLANES,
+
+        # Transformer参数
         'num_transformer_layers': ModelConfig.NUM_TRANSFORMER_LAYERS,
         'num_heads': ModelConfig.NUM_HEADS,
         'd_model': ModelConfig.D_MODEL,
         'dff': ModelConfig.DFF,
         'dropout_rate': ModelConfig.DROPOUT_RATE,
-        'fusion_type': ModelConfig.FUSION_TYPE
+
+        # 焦平面融合
+        'fusion_type': ModelConfig.FUSION_TYPE,
+
+        # TMFI-Net特定参数
+        'num_hierarchical_levels': ModelConfig.NUM_HIERARCHICAL_LEVELS,
+        'semantic_channels': ModelConfig.SEMANTIC_CHANNELS,
+        'num_classes': ModelConfig.NUM_CLASSES
     }
 
 

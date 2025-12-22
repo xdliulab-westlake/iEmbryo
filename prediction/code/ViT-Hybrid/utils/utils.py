@@ -251,3 +251,24 @@ def print_dataset_distribution(train_loader, val_loader, test_loader):
     print(f"  Good: {test_good:4d} ({test_good_pct:6.2f}%) | Poor: {test_poor:4d} ({100-test_good_pct:6.2f}%)")
 
     print("="*70)
+
+
+class AverageMeter:
+    """
+    Computes and stores the average and current value
+    Copied from TMFI-Net utils1.py
+    """
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
