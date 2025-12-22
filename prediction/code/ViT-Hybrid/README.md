@@ -202,6 +202,16 @@ ViT-Hybrid/
 
 ## 🚀 快速开始
 
+### 运行方式说明
+
+本项目提供**3种运行方式**：
+
+| 方式 | 命令 | 优点 | 适用场景 |
+|------|------|------|----------|
+| **方式1** | `python train.py` | 最简单，直接运行 | ✅ 推荐日常使用 |
+| **方式2** | `bash run_training.sh` | 参数配置在脚本中 | ✅ 批量实验 |
+| **方式3** | `python -m training.train_tmfi` | 标准Python模块方式 | 开发调试 |
+
 ### 环境配置
 
 #### 1. Python环境
@@ -253,6 +263,14 @@ E001,0,1,/path/to/E001_t0_f1.jpg
 ...
 ```
 
+**📖 完整的数据要求和格式说明请参考 [DATA_REQUIREMENTS.md](DATA_REQUIREMENTS.md)**
+
+**数据要求概览**:
+- ✅ 每个胚胎: **33个时间点** (96-112h, 0.5h间隔)
+- ✅ 每个时间点: **11个焦平面**
+- ✅ 总计每个胚胎: **363张图像** (33×11)
+- ✅ 质量标签: **Good (1) 或 Poor (0)**
+
 #### 2. 生成评分字典（可选）
 
 ```bash
@@ -264,10 +282,10 @@ python generate_score_dict.py \
 
 ### 训练模型
 
-#### 基本训练
+#### 方式1: 直接运行（最简单）⭐
 
 ```bash
-python -m training.train_tmfi \
+python train.py \
     --maindb /path/to/MainDB.csv \
     --selected_images /path/to/selected_image_paths.csv \
     --fusion_type average \
@@ -276,21 +294,54 @@ python -m training.train_tmfi \
     --lr 1e-4
 ```
 
+#### 方式2: 使用Shell脚本（批量实验）
+
+```bash
+# 1. 编辑 run_training.sh，修改数据路径和参数
+vim run_training.sh
+
+# 2. 运行脚本
+bash run_training.sh
+```
+
+#### 方式3: 模块方式（开发调试）
+
+```bash
+# 需要在项目根目录下运行
+cd /path/to/ViT-Hybrid
+python -m training.train_tmfi \
+    --maindb /path/to/MainDB.csv \
+    --selected_images /path/to/selected_image_paths.csv \
+    --epochs 100 \
+    --batch_size 4
+```
+
 #### 完整参数说明
 
 ```bash
-python -m training.train_tmfi \
+python train.py \
     --maindb /path/to/MainDB.csv \              # 必需：标签文件
     --selected_images /path/to/paths.csv \      # 必需：图像路径
-    --filtered_clean /path/to/filtered.csv \    # 可选：额外标签
-    --fusion_type average \                     # 焦平面融合策略
+    --filtered /path/to/filtered.csv \          # 可选：额外标签
+    --fusion_type average \                     # 焦平面融合策略 (average/max/middle/learned)
     --epochs 100 \                              # 训练轮数
     --batch_size 4 \                            # 批次大小
     --lr 1e-4 \                                 # 学习率
     --num_workers 4 \                           # 数据加载线程
-    --use_saliency_loss False \                 # 是否使用saliency loss
+    --pretrained_swin /path/to/swin.pth \       # 可选：预训练Swin Transformer权重
+    --skip_validation \                         # 跳过验证（使用缓存）⚡
+    --force_no_validation \                     # 强制跳过验证（快速但不安全）⚠️
+    --use_saliency_loss \                       # 是否使用saliency loss (需要GT)
     --saliency_weight 0.1                       # saliency loss权重
 ```
+
+#### 数据验证选项说明
+
+| 选项 | 说明 | 速度 | 安全性 | 推荐 |
+|------|------|------|--------|------|
+| 默认 | 完整验证数据完整性 | 慢（首次） | ✅ 安全 | ✅ 首次训练 |
+| `--skip_validation` | 使用缓存结果（如有） | 快 | ✅ 安全 | ✅ 后续训练 |
+| `--force_no_validation` | 完全跳过验证 | ⚡ 最快 | ⚠️ 风险 | 仅调试用 |
 
 #### 焦平面融合策略
 

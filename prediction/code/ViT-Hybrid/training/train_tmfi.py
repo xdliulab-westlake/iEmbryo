@@ -372,7 +372,8 @@ def main(args):
     validated_df, embryo_to_label = data_loader.load_multi_focal_data(
         selected_images_csv=args.selected_images,
         score_dict=score_dict,
-        skip_validation=args.skip_validation
+        skip_validation=args.skip_validation,
+        force_no_validation=getattr(args, 'force_no_validation', False)
     )
 
     # Create data loaders
@@ -443,7 +444,8 @@ if __name__ == "__main__":
     parser.add_argument('--maindb', type=str, required=True, help='Path to MainDB.csv')
     parser.add_argument('--selected_images', type=str, required=True, help='Path to selected_image_paths.csv')
     parser.add_argument('--filtered', type=str, default=None, help='Path to filtered_clean_embryos.csv (optional)')
-    parser.add_argument('--skip_validation', action='store_true', help='Skip validation and use cached results')
+    parser.add_argument('--skip_validation', action='store_true', help='Skip validation and use cached results (if cache exists)')
+    parser.add_argument('--force_no_validation', action='store_true', help='Force skip validation completely (use all data without completeness check)')
 
     # Model
     parser.add_argument('--pretrained_swin', type=str, default=None, help='Path to pretrained Swin Transformer weights')

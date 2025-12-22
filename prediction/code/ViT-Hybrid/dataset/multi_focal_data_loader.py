@@ -161,7 +161,8 @@ class MultiFocalDataLoader:
     def load_multi_focal_data(self,
                             selected_images_csv: str,
                             score_dict: Dict,
-                            skip_validation=False) -> Tuple[pd.DataFrame, Dict]:
+                            skip_validation=False,
+                            force_no_validation=False) -> Tuple[pd.DataFrame, Dict]:
         """
         Load multi-focal data from selected_image_paths.csv with optional validation caching
 
@@ -169,6 +170,7 @@ class MultiFocalDataLoader:
             selected_images_csv: Path to selected_image_paths.csv
             score_dict: Quality labels dictionary
             skip_validation: If True and cache exists, skip validation and use cached results
+            force_no_validation: If True, completely skip validation (use all data)
 
         Returns:
             Tuple of (validated_df, embryo_to_label)
@@ -191,7 +193,29 @@ class MultiFocalDataLoader:
                 multi_focal_df['EmbryoNumber'].astype(str)
             )
 
-        # Try to load cached validation results
+        # OPTION 1: Force skip validation - use all data directly
+        if force_no_validation:
+            print("⚠️  跳过验证 - 使用所有数据（不检查完整性）")
+
+            # Create embryo_to_label from score_dict for all embryos
+            all_embryo_ids = multi_focal_df['EmbryoID'].unique()
+            embryo_to_label = {}
+
+            for embryo_id in all_embryo_ids:
+                if embryo_id in score_dict:
+                    embryo_to_label[embryo_id] = score_dict[embryo_id]['quality']
+
+            # Filter to embryos with labels
+            validated_df = multi_focal_df[multi_focal_df['EmbryoID'].isin(embryo_to_label.keys())].copy()
+
+            print(f"✓ 使用 {len(embryo_to_label)} 个胚胎（跳过完整性检查）")
+            print(f"  总图像: {len(validated_df)} 张")
+            print(f"  Good: {sum(1 for v in embryo_to_label.values() if v == 1)} 个")
+            print(f"  Poor: {sum(1 for v in embryo_to_label.values() if v == 0)} 个")
+
+            return validated_df, embryo_to_label
+
+        # OPTION 2: Try to load cached validation results
         cached_results = None
         if self.use_cache and skip_validation:
             cached_results = self.validator.cache.load_cache(selected_images_csv)
@@ -206,7 +230,7 @@ class MultiFocalDataLoader:
                 print(f"\nFinal dataset: {len(validated_df)} images from {len(valid_embryo_ids)} embryos")
                 return validated_df, embryo_to_label
 
-        # Otherwise, perform validation
+        # OPTION 3: Perform full validation
         print("🔍 验证胚胎质量标签和时间点完整性...")
         valid_embryo_ids = []
         embryo_to_label = {}
