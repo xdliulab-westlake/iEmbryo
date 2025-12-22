@@ -403,6 +403,36 @@ class CrossValidator:
         all_labels = np.array(all_labels)
         all_probs = np.array(all_probs)
 
+        # 计算混淆矩阵
+        from sklearn.metrics import confusion_matrix
+        cm = confusion_matrix(all_labels, all_preds)
+
+        # 打印混淆矩阵和对称性分析
+        print(f"\n   【混淆矩阵】")
+        print(f"     真实\\预测    0(Non-viable)    1(Viable)")
+        print(f"     0           {cm[0,0]:6d}           {cm[0,1]:6d}")
+        print(f"     1           {cm[1,0]:6d}           {cm[1,1]:6d}")
+
+        # 分析对称性
+        fp, fn = cm[0, 1], cm[1, 0]
+        class_0_count = cm[0, 0] + cm[0, 1]
+        class_1_count = cm[1, 0] + cm[1, 1]
+        class_balance = class_0_count / class_1_count if class_1_count > 0 else 0
+
+        print(f"\n   【对称性分析】")
+        print(f"     FP = {fp}, FN = {fn}, 差异 = {abs(fp - fn)}")
+        print(f"     类别分布: Class 0 = {class_0_count}, Class 1 = {class_1_count}")
+        print(f"     类别平衡比 = {class_balance:.4f} (1.0 = 完美平衡)")
+
+        # 计算每个类别的指标
+        prec_per_class = precision_score(all_labels, all_preds, average=None, zero_division=0)
+        rec_per_class = recall_score(all_labels, all_preds, average=None, zero_division=0)
+        f1_per_class = f1_score(all_labels, all_preds, average=None, zero_division=0)
+
+        print(f"\n   【每个类别的指标】")
+        print(f"     Class 0: Prec={prec_per_class[0]:.6f}, Rec={rec_per_class[0]:.6f}, F1={f1_per_class[0]:.6f}")
+        print(f"     Class 1: Prec={prec_per_class[1]:.6f}, Rec={rec_per_class[1]:.6f}, F1={f1_per_class[1]:.6f}")
+
         # 图像级别指标
         image_metrics = {
             'fold': fold,
@@ -412,7 +442,15 @@ class CrossValidator:
             'f1': f1_score(all_labels, all_preds, average='macro'),
             'predictions': all_preds.tolist(),
             'true_labels': all_labels.tolist(),
-            'probabilities': all_probs.tolist()
+            'probabilities': all_probs.tolist(),
+            # 添加混淆矩阵和对称性信息
+            'confusion_matrix': cm.tolist(),
+            'fp': int(fp),
+            'fn': int(fn),
+            'class_balance': float(class_balance),
+            'precision_per_class': prec_per_class.tolist(),
+            'recall_per_class': rec_per_class.tolist(),
+            'f1_per_class': f1_per_class.tolist()
         }
 
         # 计算AUC（如果是二分类）
@@ -584,6 +622,13 @@ class CrossValidator:
                 column_name = f"Image_{metric.capitalize()}"
                 row[column_name] = f"{result[metric]:.4f}"
 
+            # 添加混淆矩阵信息
+            if 'fp' in result and 'fn' in result:
+                row['FP'] = result['fp']
+                row['FN'] = result['fn']
+                row['FP_FN_Diff'] = abs(result['fp'] - result['fn'])
+                row['Class_Balance'] = f"{result.get('class_balance', 0):.4f}"
+
             # 胚胎级别指标
             if has_embryo_metrics:
                 for metric in embryo_metrics:
@@ -608,6 +653,18 @@ class CrossValidator:
             std_val = summary[f'std_{metric}']
             column_name = f"Image_{metric.capitalize()}"
             mean_row[column_name] = f"{mean_val:.4f} ± {std_val:.4f}"
+
+        # 添加混淆矩阵统计
+        if all('fp' in result for result in self.fold_results):
+            fp_values = [result['fp'] for result in self.fold_results]
+            fn_values = [result['fn'] for result in self.fold_results]
+            diff_values = [abs(result['fp'] - result['fn']) for result in self.fold_results]
+            balance_values = [result.get('class_balance', 0) for result in self.fold_results]
+
+            mean_row['FP'] = f"{np.mean(fp_values):.1f}"
+            mean_row['FN'] = f"{np.mean(fn_values):.1f}"
+            mean_row['FP_FN_Diff'] = f"{np.mean(diff_values):.1f}"
+            mean_row['Class_Balance'] = f"{np.mean(balance_values):.4f}"
 
         # 胚胎级别平均值
         if has_embryo_metrics:
