@@ -80,7 +80,7 @@ if __name__ == "__main__":
     os.chdir(new_directory)
 
     # Define absolute paths for image root directory and output directory
-    abs_data_root = os.path.abspath('../images/selected_images/train')  # Absolute path to the folder containing images
+    abs_data_root = os.path.abspath('../images/selected_images_tM/train')  # Absolute path to the folder containing images
     abs_output = os.path.abspath('../output')
 
     # Ensure output directories exist

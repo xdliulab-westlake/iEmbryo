@@ -18,9 +18,9 @@ MODELS = [
 ]
 
 # 数据路径配置
-CSV_PATH = '/Users/lzz/Documents/GitHub/IVF_AI/extracted_samples/embryos_all_focal_planes.csv'
+CSV_PATH = '/Users/lzz/Desktop/IVF/good_embryos/embryos_all_focal_planes.csv'
 BASE_DIR = '/Users/lzz/Documents/GitHub/IVF_AI'
-FAIR_DIR = '/Users/lzz/Downloads/fair_embryos'
+FAIR_DIR = '/Users/lzz/Desktop/IVF/fair_embryos'
 
 # 可视化参数
 OUTPUT_ROOT = 'outputs'

@@ -47,7 +47,7 @@ class BackboneModel(nn.Module):
             'description': 'ResNet152: 更深的残差网络'
         },
         'inceptionv3': {
-            'loader': lambda pretrained=False: models.inception_v3(pretrained=pretrained, aux_logits=False),
+            'loader': lambda pretrained=False: models.inception_v3(pretrained=pretrained, aux_logits=True if pretrained else False),
             'classifier_attr': 'fc',
             'last_layer_in_features': 2048,
             'description': 'InceptionV3: 多尺度特征提取'

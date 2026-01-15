@@ -18,15 +18,15 @@ from collections import Counter, defaultdict
 import argparse
 
 
-def load_fair_embryo_ids(csv_path="../MainDB.csv"):
+def load_embryo_quality_from_maindb(csv_path="../MainDB.csv"):
     """
-    从MainDB.csv加载Fair胚胎的ID列表
+    从MainDB.csv加载所有胚胎的质量标签
 
     Args:
         csv_path: MainDB.csv文件路径
 
     Returns:
-        set of fair embryo IDs
+        dict: {embryo_id: quality_label} 其中 quality_label 为 'good', 'poor', 或 'fair'
     """
     try:
         import pandas as pd
@@ -40,30 +40,46 @@ def load_fair_embryo_ids(csv_path="../MainDB.csv"):
         else:
             raise ValueError(f"CSV文件中找不到'EmbryoID'或'RowName'列。可用列: {df.columns.tolist()}")
 
-        fair_embryos = set(df[df['Quality'] == 'fair'][id_column].values)
-        print(f"从 {csv_path} 加载了 {len(fair_embryos)} 个Fair胚胎ID (使用列: {id_column})")
-        if len(fair_embryos) > 0:
-            sample_ids = sorted(fair_embryos)[:3]
-            print(f"  示例Fair胚胎ID: {sample_ids}")
-        return fair_embryos
+        # 创建胚胎ID到质量标签的映射
+        embryo_quality = {}
+        for _, row in df.iterrows():
+            embryo_id = row[id_column]
+            quality = row['Quality'].lower()  # 转换为小写
+            embryo_quality[embryo_id] = quality
+
+        # 统计各质量等级的数量
+        quality_counts = Counter(embryo_quality.values())
+        print(f"从 {csv_path} 加载了 {len(embryo_quality)} 个胚胎的质量标签 (使用列: {id_column})")
+        print(f"  质量分布:")
+        for quality, count in sorted(quality_counts.items()):
+            print(f"    {quality.capitalize()}: {count} 个胚胎")
+
+        # Debug: 显示一些示例ID
+        sample_ids = list(embryo_quality.keys())[:3]
+        print(f"  🔍 调试: MainDB中的示例ID:")
+        for sid in sample_ids:
+            print(f"    {sid} -> {embryo_quality[sid]}")
+
+        return embryo_quality
     except Exception as e:
-        print(f"警告: 无法加载Fair胚胎列表: {e}")
-        print("将不进行Fair胚胎筛选")
+        print(f"警告: 无法加载胚胎质量标签: {e}")
+        print("将使用默认标签")
         import traceback
         traceback.print_exc()
         return None
 
 
-def load_images_from_data_dir(data_dir, fair_embryo_ids=None):
+def load_images_from_data_dir(data_dir, embryo_quality=None, filter_quality=None):
     """
-    直接从原始数据目录加载图片路径（用于Fair胚胎）
+    直接从原始数据目录加载图片路径
 
     Args:
         data_dir: 原始数据目录路径
-        fair_embryo_ids: Fair胚胎ID集合
+        embryo_quality: 胚胎ID到质量标签的映射字典
+        filter_quality: 只加载特定质量的胚胎（None=全部, 'good', 'poor', 'fair'）
 
     Returns:
-        (图片路径列表, 标签列表)
+        (图片路径列表, 标签列表, 胚胎ID列表)
     """
     data_path = Path(data_dir)
     if not data_path.exists():
@@ -71,17 +87,19 @@ def load_images_from_data_dir(data_dir, fair_embryo_ids=None):
 
     all_paths = []
     all_labels = []
+    all_embryo_ids = []
 
-    print(f"从原始数据目录加载Fair胚胎图片: {data_dir}")
+    filter_text = f"{filter_quality} " if filter_quality else ""
+    print(f"从原始数据目录加载{filter_text}胚胎图片: {data_dir}")
 
-    # Debug: 显示前几个目录名和Fair胚胎ID
+    # Debug: 显示前几个目录名
     all_dirs = [d.name for d in data_path.iterdir() if d.is_dir()]
     print(f"\n🔍 调试信息:")
     print(f"  数据目录中总共有 {len(all_dirs)} 个子目录")
     print(f"  前5个目录名示例: {all_dirs[:5]}")
-    if fair_embryo_ids:
-        fair_list = list(fair_embryo_ids)
-        print(f"  Fair胚胎ID示例 (前5个): {fair_list[:5]}")
+    if embryo_quality and filter_quality:
+        filtered_ids = [eid for eid, q in embryo_quality.items() if q == filter_quality]
+        print(f"  {filter_quality.capitalize()}胚胎ID示例 (前5个): {filtered_ids[:5]}")
 
     matched_count = 0
 
@@ -92,21 +110,27 @@ def load_images_from_data_dir(data_dir, fair_embryo_ids=None):
 
         embryo_id = embryo_dir.name
 
-        # 如果提供了Fair胚胎列表，只处理Fair胚胎
-        if fair_embryo_ids:
+        # 如果提供了胚胎质量字典，进行筛选
+        if embryo_quality:
             # 直接比较（格式应该一致）
-            if embryo_id in fair_embryo_ids:
+            if embryo_id in embryo_quality:
+                if filter_quality and embryo_quality[embryo_id] != filter_quality:
+                    continue
                 matched_count += 1
                 if matched_count <= 3:
-                    print(f"  ✓ 匹配到Fair胚胎目录: {embryo_id}")
+                    quality = embryo_quality[embryo_id]
+                    print(f"  ✓ 匹配到{quality.capitalize()}胚胎目录: {embryo_id}")
             else:
                 # 如果直接匹配失败，尝试格式转换（兼容不同格式）
                 # D2024_10_04_S01672_I4425_P_5 <-> D2024.10.04_S01672_I4425_P_5
                 embryo_id_alt = embryo_id.replace('_', '.', 2) if '_' in embryo_id[:10] else embryo_id.replace('.', '_', 2)
-                if embryo_id_alt in fair_embryo_ids:
+                if embryo_id_alt in embryo_quality:
+                    if filter_quality and embryo_quality[embryo_id_alt] != filter_quality:
+                        continue
                     matched_count += 1
                     if matched_count <= 3:
-                        print(f"  ✓ 匹配到Fair胚胎目录: {embryo_id} (转换后匹配)")
+                        quality = embryo_quality[embryo_id_alt]
+                        print(f"  ✓ 匹配到{quality.capitalize()}胚胎目录: {embryo_id} (转换后匹配)")
                 else:
                     continue
         else:
@@ -129,33 +153,33 @@ def load_images_from_data_dir(data_dir, fair_embryo_ids=None):
                 continue
 
             # 在焦面目录中查找图片
-            # 对于Fair胚胎，文件名不包含焦面信息，焦面信息在目录名中
+            # 文件名不包含焦面信息，焦面信息在目录名中
             # 例如: images/F0/D2024.10.04_S01672_I4425_P_WELL3_RUN500.jpeg
             for img_file in focal_dir.iterdir():
                 if img_file.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
-                    # 检查是否有RUN号码（可选）
-                    # Fair胚胎的图片路径会被记录，焦面信息需要从目录名提取
                     all_paths.append(str(img_file))
-                    # Fair胚胎的标签设为-1（表示未知），后续可以根据需要调整
+                    # 标签设为-1（表示从MainDB获取），后续会根据embryo_quality设置
                     all_labels.append(-1)
+                    all_embryo_ids.append(embryo_id)
 
     print(f"\n📊 匹配统计:")
-    print(f"  匹配到的Fair胚胎目录数: {matched_count}")
-    print(f"✅ 找到 {len(all_paths)} 张Fair胚胎图片")
+    print(f"  匹配到的{filter_text}胚胎目录数: {matched_count}")
+    print(f"✅ 找到 {len(all_paths)} 张{filter_text}胚胎图片")
 
-    return all_paths, all_labels
+    return all_paths, all_labels, all_embryo_ids
 
 
-def load_all_cache_data(cache_dir="./batch_cache", fair_embryo_ids=None):
+def load_all_cache_data(cache_dir="./batch_cache", embryo_quality=None, filter_quality=None):
     """
-    加载所有缓存数据（训练集+测试集），可选筛选Fair胚胎
+    加载所有缓存数据（训练集+测试集），可选筛选特定质量的胚胎
 
     Args:
         cache_dir: 缓存目录路径
-        fair_embryo_ids: Fair胚胎ID集合，如果提供则只加载Fair胚胎
+        embryo_quality: 胚胎ID到质量标签的映射字典
+        filter_quality: 只加载特定质量的胚胎（None=全部, 'good', 'poor', 'fair'）
 
     Returns:
-        (图片路径列表, 标签列表)
+        (图片路径列表, 标签列表, 胚胎ID列表)
     """
     cache_path = Path(cache_dir)
     index_file = cache_path / "index.json"
@@ -171,13 +195,16 @@ def load_all_cache_data(cache_dir="./batch_cache", fair_embryo_ids=None):
 
     all_paths = []
     all_labels = []
+    all_embryo_ids = []
     total_caches = len(index)
-    fair_filtered_count = 0
+    filtered_count = 0
     total_processed = 0
 
+    filter_text = f"{filter_quality} " if filter_quality else ""
     print(f"找到 {total_caches} 个缓存集")
-    if fair_embryo_ids:
-        print(f"将只加载Fair胚胎的图片 (共 {len(fair_embryo_ids)} 个Fair胚胎)")
+    if filter_quality and embryo_quality:
+        quality_count = sum(1 for q in embryo_quality.values() if q == filter_quality)
+        print(f"将只加载{filter_quality.capitalize()}胚胎的图片 (共 {quality_count} 个{filter_quality.capitalize()}胚胎)")
 
     # 加载所有缓存集的数据
     for cache_idx, (cache_key, cache_info) in enumerate(index.items(), 1):
@@ -198,37 +225,54 @@ def load_all_cache_data(cache_dir="./batch_cache", fair_embryo_ids=None):
                 chunk_paths = chunk_data['paths']
                 chunk_labels = chunk_data['labels'].tolist()
 
-                # 如果提供了Fair胚胎列表，进行筛选
-                if fair_embryo_ids:
+                # 如果提供了胚胎质量字典，进行筛选
+                if embryo_quality and filter_quality:
                     filtered_paths = []
                     filtered_labels = []
+                    filtered_embryo_ids = []
+
+                    # Debug: 显示第一个文件名和提取的ID（仅第一个chunk）
+                    if total_processed == 0 and len(chunk_paths) > 0:
+                        sample_filename = Path(chunk_paths[0]).name
+                        sample_id = extract_embryo_id(sample_filename)
+                        print(f"  🔍 调试: 文件名示例: {sample_filename}")
+                        print(f"  🔍 调试: 提取的ID: {sample_id}")
+                        print(f"  🔍 调试: ID在质量字典中? {sample_id in embryo_quality}")
+                        if sample_id in embryo_quality:
+                            print(f"  🔍 调试: 该ID的质量: {embryo_quality[sample_id]}")
+
                     for path, label in zip(chunk_paths, chunk_labels):
                         total_processed += 1
                         # 从路径中提取胚胎ID
                         embryo_id = extract_embryo_id(Path(path).name)
-                        if embryo_id in fair_embryo_ids:
+                        if embryo_id in embryo_quality and embryo_quality[embryo_id] == filter_quality:
                             filtered_paths.append(path)
                             filtered_labels.append(label)
-                            fair_filtered_count += 1
+                            filtered_embryo_ids.append(embryo_id)
+                            filtered_count += 1
 
                     all_paths.extend(filtered_paths)
                     all_labels.extend(filtered_labels)
-                    print(f"  ✓ 加载块: {chunk_info['filename']} (筛选出 {len(filtered_paths)}/{len(chunk_paths)} 张Fair胚胎图片)")
+                    all_embryo_ids.extend(filtered_embryo_ids)
+                    print(f"  ✓ 加载块: {chunk_info['filename']} (筛选出 {len(filtered_paths)}/{len(chunk_paths)} 张{filter_quality.capitalize()}胚胎图片)")
                 else:
                     all_paths.extend(chunk_paths)
                     all_labels.extend(chunk_labels)
+                    # 提取胚胎ID
+                    chunk_embryo_ids = [extract_embryo_id(Path(p).name) for p in chunk_paths]
+                    all_embryo_ids.extend(chunk_embryo_ids)
                     print(f"  ✓ 加载块: {chunk_info['filename']} ({len(chunk_paths)} 张)")
 
             except Exception as e:
                 print(f"  ✗ 加载失败: {chunk_info['filename']}, 错误: {e}")
                 continue
 
-    if fair_embryo_ids:
-        print(f"\n✅ 从 {total_processed} 张图片中筛选出 {len(all_paths)} 张Fair胚胎图片")
+    if filter_quality and embryo_quality:
+        print(f"\n✅ 从 {total_processed} 张图片中筛选出 {len(all_paths)} 张{filter_quality.capitalize()}胚胎图片")
     else:
         print(f"\n✅ 总共加载 {len(all_paths)} 张图片（来自所有缓存集）")
 
-    return all_paths, all_labels
+    return all_paths, all_labels, all_embryo_ids
 
 
 def extract_focal_plane_from_filename(filename_or_path):
@@ -263,46 +307,69 @@ def extract_focal_plane_from_filename(filename_or_path):
     return "Unknown"
 
 
+def normalize_embryo_id(embryo_id):
+    """
+    规范化胚胎ID，将WELL格式转换为数字格式以匹配MainDB.csv
+    D2023.05.31_S00744_I4424_P_WELL12 -> D2023.05.31_S00744_I4424_P_12
+    D2024.03.18_S00006_I5068_P_5 -> D2024.03.18_S00006_I5068_P_5 (保持不变)
+
+    Args:
+        embryo_id: 胚胎ID字符串
+
+    Returns:
+        规范化后的胚胎ID
+    """
+    # 将 P_WELL12 格式转换为 P_12 格式
+    normalized = re.sub(r'_P_WELL(\d+)', r'_P_\1', embryo_id)
+    return normalized
+
+
 def extract_embryo_id(filename):
     """
-    从文件名中提取胚胎ID
-    兼容以下形式：
-      - D2023.05.31_S00744_I4424_P_WELL12_RUN595_F-15.jpeg -> D2023.05.31_S00744_I4424_P_WELL12
-      - D2022.04.15_S00003_I4425_P_8.png                   -> D2022.04.15_S00003_I4425_P_8
-    """
-    stem = Path(filename).stem
-    stem = re.split(r'_(?:RUN\d+.*|F-?\d+|FOCUS-?\d+|FRAME\d+|IMG\d+)$', stem)[0]
+    从文件名中提取胚胎ID并规范化
+    支持两种格式:
+    1. D2023.05.31_S00744_I4424_P_WELL12_RUN595_F-15.jpeg -> D2023.05.31_S00744_I4424_P_12
+    2. D2024.03.18_S00006_I5068_P_5 -> D2024.03.18_S00006_I5068_P_5
 
-    match = re.match(
-        r'(D\d{4}\.\d{2}\.\d{2}_S\d+_I\d+_P(?:_[A-Za-z0-9]+)*)',
-        stem,
-        flags=re.IGNORECASE
-    )
+    Args:
+        filename: 文件名字符串
+
+    Returns:
+        规范化后的胚胎ID字符串
+    """
+    # 先尝试提取包含 WELL 的格式
+    match = re.search(r'(D\d{4}\.\d{2}\.\d{2}_S\d+_I\d+_P_WELL\d+)', filename)
+    if match:
+        return normalize_embryo_id(match.group(1))
+
+    # 尝试提取不包含 WELL 的格式 (MainDB.csv中的格式)
+    match = re.search(r'(D\d{4}\.\d{2}\.\d{2}_S\d+_I\d+_P_\d+)', filename)
     if match:
         return match.group(1)
 
-    return stem
+    # 如果都没有匹配到，返回完整文件名用于排序
+    return filename
 
 
-def group_images_by_embryo(image_paths, labels, required_focal_planes=11, filter_label=None):
+def group_images_by_embryo(image_paths, labels, embryo_ids, embryo_quality=None, required_focal_planes=11, filter_quality=None):
     """
     将图片按胚胎分组，并筛选出含有完整焦面的胚胎
 
     Args:
         image_paths: 图片路径列表
         labels: 标签列表
+        embryo_ids: 胚胎ID列表
+        embryo_quality: 胚胎ID到质量标签的映射字典
         required_focal_planes: 要求的焦面数量（默认11）
-        filter_label: 筛选特定标签的胚胎 (None=全部, 0=Non-viable, 1=Viable, "fair"=Fair)
+        filter_quality: 筛选特定质量的胚胎 (None=全部, 'good', 'poor', 'fair')
 
     Returns:
-        embryo_dict: {embryo_id: {'paths': [...], 'label': 0/1, 'focal_planes': [...]}}
+        embryo_dict: {embryo_id: {'paths': [...], 'label': 0/1, 'quality': 'good'/'poor'/'fair', 'focal_planes': [...]}}
     """
     embryo_dict_all = defaultdict(lambda: {'paths': [], 'labels': [], 'focal_planes': []})
 
     print("\n按胚胎分组图片...")
-    for path, label in zip(image_paths, labels):
-        filename = Path(path).name
-        embryo_id = extract_embryo_id(filename)
+    for path, label, embryo_id in zip(image_paths, labels, embryo_ids):
         # 传递完整路径以支持从目录结构中提取焦面信息
         focal_plane = extract_focal_plane_from_filename(path)
 
@@ -320,7 +387,7 @@ def group_images_by_embryo(image_paths, labels, required_focal_planes=11, filter
     print(f"  最多: {max(focal_counts_all)} 个焦面")
 
     # 筛选出含有完整焦面的胚胎
-    filter_text = f"标签为 {filter_label} 且" if filter_label is not None else ""
+    filter_text = f"质量为 {filter_quality} 且" if filter_quality is not None else ""
     print(f"\n筛选{filter_text}含有完整 {required_focal_planes} 个焦面的胚胎...")
     embryo_dict = {}
 
@@ -332,14 +399,21 @@ def group_images_by_embryo(image_paths, labels, required_focal_planes=11, filter
             labels_list = data['labels']
             data['label'] = max(set(labels_list), key=labels_list.count)
 
-            # 如果指定了标签筛选
-            if filter_label is not None:
-                if filter_label == "fair":
-                    # Fair胚胎的特殊处理 - 检查路径中是否包含fair标记
-                    path_lower = str(data['paths'][0]).lower()
-                    if 'fair' not in path_lower:
-                        continue
-                elif isinstance(filter_label, int) and data['label'] != filter_label:
+            # 从 embryo_quality 字典获取质量标签
+            if embryo_quality and embryo_id in embryo_quality:
+                data['quality'] = embryo_quality[embryo_id]
+            else:
+                # 如果没有质量标签，根据 label 推断
+                if data['label'] == 1:
+                    data['quality'] = 'good'
+                elif data['label'] == 0:
+                    data['quality'] = 'poor'
+                else:
+                    data['quality'] = 'unknown'
+
+            # 如果指定了质量筛选
+            if filter_quality is not None:
+                if data['quality'] != filter_quality:
                     continue
 
             embryo_dict[embryo_id] = data
@@ -353,16 +427,17 @@ def group_images_by_embryo(image_paths, labels, required_focal_planes=11, filter
         for count, num_embryos in sorted(focal_count_dist.items()):
             print(f"  {count} 个焦面: {num_embryos} 个胚胎")
 
-        # 显示标签分布
-        if filter_label is not None:
-            print("\n提示: 请检查数据中是否存在指定标签的胚胎")
+        # 显示质量分布
+        if filter_quality is not None:
+            print("\n提示: 请检查数据中是否存在指定质量的胚胎")
     else:
         # 统计完整胚胎中的质量分布
-        viable_count = sum(1 for data in embryo_dict.values() if data['label'] == 1)
-        non_viable_count = len(embryo_dict) - viable_count
+        quality_counts = Counter(data['quality'] for data in embryo_dict.values())
         print(f"完整焦面胚胎的质量分布:")
-        print(f"  Viable (可行): {viable_count} ({viable_count/len(embryo_dict)*100:.1f}%)")
-        print(f"  Non-viable (非可行): {non_viable_count} ({non_viable_count/len(embryo_dict)*100:.1f}%)")
+        for quality in ['good', 'poor', 'fair', 'unknown']:
+            count = quality_counts.get(quality, 0)
+            if count > 0:
+                print(f"  {quality.capitalize()}: {count} ({count/len(embryo_dict)*100:.1f}%)")
 
     return embryo_dict
 
@@ -414,13 +489,13 @@ def extract_random_embryos(embryo_dict, num_embryos=100, output_dir="./extracted
     for embryo_idx, embryo_id in enumerate(selected_embryo_ids, 1):
         embryo_data = embryo_dict[embryo_id]
         embryo_label = embryo_data['label']
-        quality_label = "Viable" if embryo_label == 1 else "Non-viable"
+        quality_label = embryo_data.get('quality', 'unknown')
 
         paths = embryo_data['paths']
         focal_planes = embryo_data['focal_planes']
 
         if embryo_idx % 20 == 0 or embryo_idx == 1:
-            print(f"胚胎 {embryo_idx}/{num_embryos}: {embryo_id} ({quality_label}, {len(paths)} 个焦面)")
+            print(f"胚胎 {embryo_idx}/{num_embryos}: {embryo_id} ({quality_label.capitalize()}, {len(paths)} 个焦面)")
 
         # 为每个胚胎创建单独的目录
         embryo_output_dir = output_path / embryo_id
@@ -477,12 +552,17 @@ def extract_random_embryos(embryo_dict, num_embryos=100, output_dir="./extracted
     if not df.empty:
         # 按胚胎统计
         unique_embryos = df['Embryo_ID'].unique()
-        viable_embryos = len(df[df['Label'] == 1]['Embryo_ID'].unique())
-        non_viable_embryos = len(unique_embryos) - viable_embryos
+
+        # 统计每个质量等级的胚胎数
+        quality_counts = {}
+        for quality in ['good', 'poor', 'fair', 'unknown']:
+            count = len(df[df['Quality'] == quality]['Embryo_ID'].unique())
+            if count > 0:
+                quality_counts[quality] = count
 
         print(f"\n📊 胚胎质量分布:")
-        print(f"  Viable (可行): {viable_embryos} ({viable_embryos/len(unique_embryos)*100:.1f}%)")
-        print(f"  Non-viable (非可行): {non_viable_embryos} ({non_viable_embryos/len(unique_embryos)*100:.1f}%)")
+        for quality, count in quality_counts.items():
+            print(f"  {quality.capitalize()}: {count} ({count/len(unique_embryos)*100:.1f}%)")
 
         # 焦面统计
         focal_planes_list = df[df['Focal_Plane'] != 'Unknown']['Focal_Plane'].tolist()
@@ -539,10 +619,16 @@ def main():
   python extract_samples.py
 
   # 提取100个Fair胚胎（需要MainDB.csv）
-  python extract_samples.py --fair-only --maindb-path ./MainDB.csv
+  python extract_samples.py --quality fair --maindb-path ./MainDB.csv
 
-  # 提取200个Fair胚胎到自定义目录
-  python extract_samples.py --fair-only --num-embryos 200 --output-dir ./fair_embryos
+  # 提取200个Good胚胎到自定义目录
+  python extract_samples.py --quality good --num-embryos 200 --output-dir ./good_embryos
+
+  # 提取Poor胚胎
+  python extract_samples.py --quality poor --maindb-path ./MainDB.csv
+
+  # 每种质量各提取200个胚胎（good/poor/fair各200个）
+  python extract_samples.py --num-per-quality 200 --maindb-path ./MainDB.csv
 
   # 要求胚胎必须有15个焦面
   python extract_samples.py --required-focal-planes 15
@@ -554,17 +640,21 @@ def main():
     parser.add_argument('--cache-dir', type=str, default='./batch_cache',
                         help='缓存目录路径 (默认: ./batch_cache)')
     parser.add_argument('--data-dir', type=str, default='/liaozizhuo/selected_images',
-                        help='原始数据目录路径（用于Fair胚胎）(默认: /liaozizhuo/selected_images)')
+                        help='原始数据目录路径（用于从原始数据加载）(默认: /liaozizhuo/selected_images)')
     parser.add_argument('--output-dir', type=str, default='./extracted_samples',
                         help='输出目录路径 (默认: ./extracted_samples)')
     parser.add_argument('--num-embryos', type=int, default=100,
                         help='要提取的胚胎数量 (默认: 100)')
+    parser.add_argument('--num-per-quality', type=int, default=None,
+                        help='每种质量各提取的胚胎数量（自动提取good/poor/fair各N个），与--quality互斥')
     parser.add_argument('--required-focal-planes', type=int, default=11,
                         help='要求的焦面数量 (默认: 11)')
-    parser.add_argument('--fair-only', action='store_true',
-                        help='只提取Fair胚胎（需要配合--maindb-path和--data-dir使用）')
-    parser.add_argument('--maindb-path', type=str, default='/Users/lzz/Documents/GitHub/IVF_AI/MainDB.csv',
-                        help='MainDB.csv文件路径 (默认: /Users/lzz/Documents/GitHub/IVF_AI/MainDB.csv)')
+    parser.add_argument('--quality', type=str, choices=['good', 'poor', 'fair'], default=None,
+                        help='只提取特定质量的胚胎 (good/poor/fair)，需要配合--maindb-path使用')
+    parser.add_argument('--use-data-dir', action='store_true',
+                        help='从原始数据目录加载而不是从缓存加载')
+    parser.add_argument('--maindb-path', type=str, default='../MainDB.csv',
+                        help='MainDB.csv文件路径 (默认: ../MainDB.csv)')
     parser.add_argument('--csv-filename', type=str, default='embryos_all_focal_planes.csv',
                         help='CSV文件名 (默认: embryos_all_focal_planes.csv)')
     parser.add_argument('--random-seed', type=int, default=42,
@@ -573,53 +663,172 @@ def main():
     args = parser.parse_args()
 
     try:
-        embryo_type_text = "Fair胚胎 " if args.fair_only else ""
+        # 检查参数冲突
+        if args.num_per_quality and args.quality:
+            print("❌ 错误: --num-per-quality 和 --quality 参数不能同时使用")
+            return 1
+
+        embryo_type_text = f"{args.quality.capitalize()} " if args.quality else ""
+        if args.num_per_quality:
+            embryo_type_text = "各质量等级 "
+
         print("=" * 80)
         print(f"胚胎样本提取工具 (仅含完整 {args.required_focal_planes} 个焦面的{embryo_type_text}胚胎)")
         print("=" * 80)
 
-        # 如果指定了fair-only，加载Fair胚胎列表
-        fair_embryo_ids = None
-        if args.fair_only:
-            print(f"\n📋 加载Fair胚胎列表: {args.maindb_path}")
-            fair_embryo_ids = load_fair_embryo_ids(args.maindb_path)
-            if not fair_embryo_ids:
-                print("❌ 错误: 无法加载Fair胚胎列表")
+        # 加载胚胎质量标签（如果提供了MainDB.csv）
+        embryo_quality = None
+        if args.quality or args.num_per_quality or Path(args.maindb_path).exists():
+            print(f"\n📋 加载胚胎质量标签: {args.maindb_path}")
+            embryo_quality = load_embryo_quality_from_maindb(args.maindb_path)
+            if not embryo_quality:
+                print("⚠️  警告: 无法加载胚胎质量标签，将使用默认标签")
+
+        # 如果使用 num_per_quality，需要分别处理每个质量等级
+        if args.num_per_quality:
+            all_dfs = []
+            for quality in ['good', 'poor', 'fair']:
+                print(f"\n{'='*80}")
+                print(f"处理 {quality.capitalize()} 质量胚胎...")
+                print(f"{'='*80}")
+
+                # 加载数据：从原始数据目录或缓存
+                if args.use_data_dir:
+                    print(f"\n📂 原始数据目录: {args.data_dir}")
+                    image_paths, labels, embryo_ids = load_images_from_data_dir(
+                        args.data_dir,
+                        embryo_quality=embryo_quality,
+                        filter_quality=quality
+                    )
+                else:
+                    print(f"\n📂 缓存目录: {args.cache_dir}")
+                    image_paths, labels, embryo_ids = load_all_cache_data(
+                        args.cache_dir,
+                        embryo_quality=embryo_quality,
+                        filter_quality=quality
+                    )
+
+                if not image_paths:
+                    print(f"⚠️  警告: 没有找到 {quality.capitalize()} 质量的图片，跳过...")
+                    continue
+
+                # 按胚胎分组
+                embryo_dict = group_images_by_embryo(
+                    image_paths,
+                    labels,
+                    embryo_ids,
+                    embryo_quality=embryo_quality,
+                    required_focal_planes=args.required_focal_planes,
+                    filter_quality=quality
+                )
+
+                if not embryo_dict:
+                    print(f"⚠️  警告: 没有找到含有完整 {args.required_focal_planes} 个焦面的 {quality.capitalize()} 胚胎，跳过...")
+                    continue
+
+                # 检查是否有足够的胚胎
+                available_embryos = len(embryo_dict)
+                num_to_extract = min(args.num_per_quality, available_embryos)
+                if args.num_per_quality > available_embryos:
+                    print(f"\n⚠️  警告: 请求 {args.num_per_quality} 个胚胎，但只有 {available_embryos} 个符合条件")
+                    print(f"将提取所有 {available_embryos} 个 {quality.capitalize()} 胚胎")
+
+                # 提取随机胚胎
+                df = extract_random_embryos(
+                    embryo_dict,
+                    num_embryos=num_to_extract,
+                    output_dir=args.output_dir,
+                    random_seed=args.random_seed
+                )
+
+                if not df.empty:
+                    all_dfs.append(df)
+
+            # 合并所有DataFrame
+            if not all_dfs:
+                print("\n❌ 错误: 未能提取任何样本")
                 return 1
 
-        # 加载数据：Fair胚胎从原始数据目录，其他从缓存
-        if args.fair_only:
-            print(f"\n📂 原始数据目录: {args.data_dir}")
-            image_paths, labels = load_images_from_data_dir(args.data_dir, fair_embryo_ids)
+            df = pd.concat(all_dfs, ignore_index=True)
+
+            # 重新计算 Embryo_Index，确保索引连续
+            embryo_id_to_index = {}
+            current_index = 1
+            for idx, row in df.iterrows():
+                embryo_id = row['Embryo_ID']
+                if embryo_id not in embryo_id_to_index:
+                    embryo_id_to_index[embryo_id] = current_index
+                    current_index += 1
+                df.at[idx, 'Embryo_Index'] = embryo_id_to_index[embryo_id]
+
+            print("\n" + "=" * 80)
+            print("汇总统计:")
+            print("=" * 80)
+            unique_embryos = df['Embryo_ID'].unique()
+            print(f"✅ 成功提取: {len(unique_embryos)} 个胚胎")
+            print(f"✅ 成功复制: {len(df)} 张图片")
+
+            # 按质量统计
+            quality_counts = {}
+            for quality in ['good', 'poor', 'fair']:
+                count = len(df[df['Quality'] == quality]['Embryo_ID'].unique())
+                if count > 0:
+                    quality_counts[quality] = count
+
+            print(f"\n📊 胚胎质量分布:")
+            for quality, count in quality_counts.items():
+                print(f"  {quality.capitalize()}: {count} 个胚胎 ({count*args.required_focal_planes} 张图片)")
+
         else:
-            print(f"\n📂 缓存目录: {args.cache_dir}")
-            image_paths, labels = load_all_cache_data(args.cache_dir, None)
+            # 单一质量或所有质量的处理
+            # 加载数据：从原始数据目录或缓存
+            if args.use_data_dir:
+                print(f"\n📂 原始数据目录: {args.data_dir}")
+                image_paths, labels, embryo_ids = load_images_from_data_dir(
+                    args.data_dir,
+                    embryo_quality=embryo_quality,
+                    filter_quality=args.quality
+                )
+            else:
+                print(f"\n📂 缓存目录: {args.cache_dir}")
+                image_paths, labels, embryo_ids = load_all_cache_data(
+                    args.cache_dir,
+                    embryo_quality=embryo_quality,
+                    filter_quality=args.quality
+                )
 
-        if not image_paths:
-            print("错误: 未能加载任何数据")
-            return 1
+            if not image_paths:
+                print("错误: 未能加载任何数据")
+                return 1
 
-        # 按胚胎分组（只保留含有完整焦面的胚胎）
-        embryo_dict = group_images_by_embryo(image_paths, labels, args.required_focal_planes, None)
+            # 按胚胎分组（只保留含有完整焦面的胚胎）
+            embryo_dict = group_images_by_embryo(
+                image_paths,
+                labels,
+                embryo_ids,
+                embryo_quality=embryo_quality,
+                required_focal_planes=args.required_focal_planes,
+                filter_quality=args.quality
+            )
 
-        if not embryo_dict:
-            print(f"\n❌ 错误: 没有找到含有完整 {args.required_focal_planes} 个焦面的{embryo_type_text}胚胎")
-            print("请尝试调整 --required-focal-planes 参数")
-            return 1
+            if not embryo_dict:
+                print(f"\n❌ 错误: 没有找到含有完整 {args.required_focal_planes} 个焦面的{embryo_type_text}胚胎")
+                print("请尝试调整 --required-focal-planes 参数")
+                return 1
 
-        # 检查是否有足够的胚胎
-        available_embryos = len(embryo_dict)
-        if args.num_embryos > available_embryos:
-            print(f"\n⚠️  警告: 请求 {args.num_embryos} 个胚胎，但只有 {available_embryos} 个符合条件")
-            print(f"将提取所有 {available_embryos} 个胚胎")
+            # 检查是否有足够的胚胎
+            available_embryos = len(embryo_dict)
+            if args.num_embryos > available_embryos:
+                print(f"\n⚠️  警告: 请求 {args.num_embryos} 个胚胎，但只有 {available_embryos} 个符合条件")
+                print(f"将提取所有 {available_embryos} 个胚胎")
 
-        # 提取随机胚胎及其所有焦面
-        df = extract_random_embryos(
-            embryo_dict,
-            num_embryos=args.num_embryos,
-            output_dir=args.output_dir,
-            random_seed=args.random_seed
-        )
+            # 提取随机胚胎及其所有焦面
+            df = extract_random_embryos(
+                embryo_dict,
+                num_embryos=args.num_embryos,
+                output_dir=args.output_dir,
+                random_seed=args.random_seed
+            )
 
         if df.empty:
             print("错误: 未能提取任何样本")
@@ -632,8 +841,11 @@ def main():
         print("✅ 提取完成!")
         print(f"📁 图片保存在: {args.output_dir}")
         print(f"📄 CSV文件: {Path(args.output_dir) / args.csv_filename}")
-        if args.fair_only:
-            print(f"🏷️  胚胎类型: Fair胚胎（未训练）")
+        if args.quality:
+            print(f"🏷️  胚胎质量: {args.quality.capitalize()}")
+        elif args.num_per_quality:
+            print(f"🏷️  胚胎质量: 每种质量各 {args.num_per_quality} 个 (Good/Poor/Fair)")
+        if args.use_data_dir:
             print(f"📂 数据来源: 原始数据目录")
         else:
             print(f"📂 数据来源: 缓存")

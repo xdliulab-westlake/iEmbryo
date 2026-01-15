@@ -13,6 +13,9 @@ from torch.cuda.amp import GradScaler, autocast
 from typing import Dict, Any, Optional, Tuple, Union, List
 import numpy as np
 from tqdm import tqdm
+import shutil
+import json
+from pathlib import Path
 
 # 添加相对路径到sys.path以支持导入
 import sys
@@ -793,7 +796,199 @@ class STORKTrainer:
             except Exception as e:
                 print(f"⚠ 胚胎级别评估失败: {e}")
 
+        # 自动保存预测错误的图片
+        if all_image_paths and len(all_y_true) > 0:
+            try:
+                error_report = self.save_misclassified_images(
+                    y_true=results['y_true'],
+                    y_pred=results['y_pred'],
+                    y_proba=results['y_proba'],
+                    image_paths=all_image_paths
+                )
+                results['error_analysis'] = error_report
+            except Exception as e:
+                print(f"⚠ 保存错误预测图片失败: {e}")
+                import traceback
+                traceback.print_exc()
+
         return results
+
+    def save_misclassified_images(self,
+                                   y_true: np.ndarray,
+                                   y_pred: np.ndarray,
+                                   y_proba: np.ndarray,
+                                   image_paths: List[str],
+                                   output_dir: str = None) -> Dict[str, Any]:
+        """
+        保存测试集上预测错误的图片
+
+        Args:
+            y_true: 真实标签数组
+            y_pred: 预测标签数组
+            y_proba: 预测概率数组
+            image_paths: 图片路径列表
+            output_dir: 输出目录（如果为None，则使用config中的路径）
+
+        Returns:
+            包含错误分析信息的字典
+        """
+        if output_dir is None:
+            output_dir = self.config.get('paths', {}).get('output_dir', 'outputs')
+
+        output_dir = Path(output_dir) / 'misclassified_images'
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 类别名称
+        class_names = {0: 'Non-viable', 1: 'Viable'}
+
+        # 找出错误预测的样本
+        misclassified_mask = y_true != y_pred
+        misclassified_indices = np.where(misclassified_mask)[0]
+
+        total_samples = len(y_true)
+        num_errors = len(misclassified_indices)
+
+        if num_errors == 0:
+            print("✓ 所有测试样本都预测正确！")
+            return {'num_errors': 0, 'total_samples': total_samples}
+
+        accuracy = (total_samples - num_errors) / total_samples
+        print(f"\n保存预测错误的图片... (错误数: {num_errors}/{total_samples})")
+
+        # 为每种错误类型创建子目录
+        for true_label in [0, 1]:
+            for pred_label in [0, 1]:
+                if true_label != pred_label:
+                    subdir_name = f"true_{class_names[true_label]}_pred_{class_names[pred_label]}"
+                    subdir_path = output_dir / subdir_name
+                    subdir_path.mkdir(parents=True, exist_ok=True)
+
+        # 保存错误预测的图片
+        error_details = []
+        saved_count = 0
+
+        for idx in tqdm(misclassified_indices, desc="保存错误图片"):
+            if idx >= len(image_paths):
+                continue
+
+            true_label = int(y_true[idx])
+            pred_label = int(y_pred[idx])
+            pred_proba = y_proba[idx]
+
+            # 获取原始图片路径
+            image_path = image_paths[idx]
+            if not os.path.exists(image_path):
+                continue
+
+            image_filename = Path(image_path).name
+
+            # 确定目标子目录
+            subdir_name = f"true_{class_names[true_label]}_pred_{class_names[pred_label]}"
+            target_dir = output_dir / subdir_name
+
+            # 生成新的文件名（包含预测信息）
+            name_without_ext = Path(image_filename).stem
+            ext = Path(image_filename).suffix
+            new_filename = f"{name_without_ext}_prob_{pred_proba[pred_label]:.4f}{ext}"
+            target_path = target_dir / new_filename
+
+            # 复制图片
+            try:
+                shutil.copy2(image_path, target_path)
+                saved_count += 1
+
+                # 记录错误详情
+                error_details.append({
+                    'original_path': str(image_path),
+                    'saved_path': str(target_path),
+                    'true_label': true_label,
+                    'true_label_name': class_names[true_label],
+                    'pred_label': pred_label,
+                    'pred_label_name': class_names[pred_label],
+                    'pred_probability': {
+                        'Non-viable': float(pred_proba[0]),
+                        'Viable': float(pred_proba[1])
+                    },
+                    'confidence': float(pred_proba[pred_label])
+                })
+            except Exception as e:
+                print(f"⚠ 复制图片失败 {image_path}: {e}")
+
+        # 统计不同类型的错误
+        error_types = {}
+        for true_label in [0, 1]:
+            for pred_label in [0, 1]:
+                if true_label != pred_label:
+                    key = f"true_{class_names[true_label]}_pred_{class_names[pred_label]}"
+                    count = sum(1 for d in error_details
+                               if d['true_label'] == true_label and d['pred_label'] == pred_label)
+                    error_types[key] = count
+
+        # 计算平均置信度
+        avg_confidence = np.mean([d['confidence'] for d in error_details]) if error_details else 0.0
+
+        # 生成错误分析报告
+        report = {
+            'summary': {
+                'total_samples': int(total_samples),
+                'correct_predictions': int(total_samples - num_errors),
+                'incorrect_predictions': int(num_errors),
+                'saved_images': saved_count,
+                'accuracy': float(accuracy),
+                'error_rate': float(num_errors / total_samples),
+                'average_error_confidence': float(avg_confidence)
+            },
+            'error_types': error_types,
+            'misclassified_samples': error_details,
+            'class_names': class_names,
+            'model_name': self.config.get('model', {}).get('name', 'model')
+        }
+
+        # 保存JSON报告
+        report_path = output_dir / 'error_analysis_report.json'
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+        # 生成可读的文本报告
+        text_report_path = output_dir / 'error_analysis_report.txt'
+        with open(text_report_path, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("测试集错误预测分析报告\n")
+            f.write("="*80 + "\n\n")
+
+            f.write(f"模型名称: {report['model_name']}\n")
+            f.write(f"总样本数: {total_samples}\n")
+            f.write(f"正确预测: {total_samples - num_errors} ({(1-num_errors/total_samples)*100:.2f}%)\n")
+            f.write(f"错误预测: {num_errors} ({num_errors/total_samples*100:.2f}%)\n")
+            f.write(f"保存图片: {saved_count}\n")
+            f.write(f"准确率: {accuracy:.4f}\n")
+            f.write(f"平均错误预测置信度: {avg_confidence:.4f}\n\n")
+
+            f.write("="*80 + "\n")
+            f.write("错误类型分布\n")
+            f.write("="*80 + "\n\n")
+
+            for error_type, count in error_types.items():
+                percentage = (count/num_errors*100) if num_errors > 0 else 0
+                f.write(f"{error_type}: {count} 个样本 ({percentage:.2f}%)\n")
+
+            f.write("\n" + "="*80 + "\n")
+            f.write("详细错误列表（前50个）\n")
+            f.write("="*80 + "\n\n")
+
+            for i, detail in enumerate(error_details[:50], 1):
+                f.write(f"\n错误样本 #{i}:\n")
+                f.write(f"  原始路径: {detail['original_path']}\n")
+                f.write(f"  真实标签: {detail['true_label_name']}\n")
+                f.write(f"  预测标签: {detail['pred_label_name']}\n")
+                f.write(f"  预测置信度: {detail['confidence']:.4f}\n")
+                f.write(f"  预测概率: Non-viable={detail['pred_probability']['Non-viable']:.4f}, "
+                       f"Viable={detail['pred_probability']['Viable']:.4f}\n")
+
+        print(f"✓ 已保存 {saved_count} 张错误预测图片到: {output_dir}")
+        print(f"  报告: {report_path.name}")
+
+        return report
 
 
 class FocalLoss(nn.Module):

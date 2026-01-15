@@ -146,33 +146,46 @@ def patch_legacy_model(legacy_model):
 class ThreeClassEmbryoDataset(Dataset):
     """三类胚胎数据集：Good, Fair, Poor"""
 
-    def __init__(self, csv_path: str, base_dir: str, fair_dir: str, transform=None, max_samples_per_class=None, max_fair_samples=None):
+    def __init__(self, csv_path: str, base_dir: str, fair_dir: str, transform=None, max_samples_per_class=None, max_fair_samples=None, poor_csv_path: str = None, poor_base_dir: str = None, random_seed: int = None):
         """
         初始化数据集
 
         Args:
-            csv_path: CSV文件路径（包含Good和Poor）
+            csv_path: CSV文件路径（包含Good）
             base_dir: CSV中图片的基础目录
             fair_dir: Fair胚胎的目录
             transform: 图像转换
             max_samples_per_class: 每个类别的最大样本数
             max_fair_samples: Fair类别的最大样本数（优先于max_samples_per_class）
+            poor_csv_path: Poor胚胎的CSV文件路径（可选）
+            poor_base_dir: Poor胚胎的基础目录（可选）
+            random_seed: 随机种子，确保采样可重复（可选）
         """
         self.transform = transform
+        self.random_seed = random_seed
         self.image_paths = []
         self.labels = []
         self.embryo_ids = []
 
-        # 1. 从CSV加载Good和Poor
-        print("\n📂 从CSV加载Good和Poor胚胎...")
-        df = pd.read_csv(csv_path)
+        # 设置随机种子（如果提供）
+        if random_seed is not None:
+            np.random.seed(random_seed)
+            print(f"🎲 设置随机种子: {random_seed}")
+
+        # 1. 从CSV加载Good胚胎
+        print("\n📂 从CSV加载Good胚胎...")
+        df_good = pd.read_csv(csv_path)
         base_path = Path(base_dir)
 
         good_count = 0
-        poor_count = 0
 
-        for _, row in df.iterrows():
-            img_path = base_path / row['Saved_Path']
+        for _, row in df_good.iterrows():
+            # Remove 'all_quality_samples/' prefix if present
+            saved_path = row['Saved_Path']
+            if saved_path.startswith('all_quality_samples/'):
+                saved_path = saved_path[len('all_quality_samples/'):]
+
+            img_path = base_path / saved_path
             if img_path.exists():
                 quality = int(row['Label'])
                 if quality == 1:  # Viable → Good
@@ -180,13 +193,31 @@ class ThreeClassEmbryoDataset(Dataset):
                     self.labels.append(2)  # Good = 2
                     self.embryo_ids.append(row['Embryo_ID'])
                     good_count += 1
-                elif quality == 0:  # Non-viable → Poor
-                    self.image_paths.append(str(img_path))
-                    self.labels.append(0)  # Poor = 0
-                    self.embryo_ids.append(row['Embryo_ID'])
-                    poor_count += 1
 
         print(f"  ✓ Good胚胎: {good_count} 张图片")
+
+        # 2. 从CSV加载Poor胚胎（如果提供）
+        poor_count = 0
+        if poor_csv_path and poor_base_dir:
+            print("\n📂 从CSV加载Poor胚胎...")
+            df_poor = pd.read_csv(poor_csv_path)
+            poor_base_path = Path(poor_base_dir)
+
+            for _, row in df_poor.iterrows():
+                # Remove 'poor_embryos/' prefix if present
+                saved_path = row['Saved_Path']
+                if saved_path.startswith('poor_embryos/'):
+                    saved_path = saved_path[len('poor_embryos/'):]
+
+                img_path = poor_base_path / saved_path
+                if img_path.exists():
+                    quality = int(row['Label'])
+                    if quality == 0:  # Non-viable → Poor
+                        self.image_paths.append(str(img_path))
+                        self.labels.append(0)  # Poor = 0
+                        self.embryo_ids.append(row['Embryo_ID'])
+                        poor_count += 1
+
         print(f"  ✓ Poor胚胎: {poor_count} 张图片")
 
         # 2. 从目录加载Fair胚胎
@@ -292,13 +323,15 @@ def visualize_three_classes(model_path: str,
                             max_samples_per_class: int = None,
                             max_fair_samples: int = None,
                             batch_size: int = 64,
-                            methods: list = ['pca', 'tsne', 'umap']):
+                            methods: list = ['pca', 'tsne', 'umap'],
+                            poor_csv_path: str = None,
+                            poor_base_dir: str = None):
     """
     可视化三类胚胎特征空间
 
     Args:
         model_path: 模型路径
-        csv_path: CSV文件路径（Good和Poor）
+        csv_path: CSV文件路径（Good）
         base_dir: CSV图片基础目录
         fair_dir: Fair胚胎目录
         output_dir: 输出目录
@@ -308,6 +341,8 @@ def visualize_three_classes(model_path: str,
         max_fair_samples: Fair类别的最大样本数
         batch_size: 批次大小
         methods: 降维方法
+        poor_csv_path: Poor胚胎CSV路径（可选）
+        poor_base_dir: Poor胚胎基础目录（可选）
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\n🖥️  使用设备: {device}")
@@ -348,7 +383,9 @@ def visualize_three_classes(model_path: str,
         fair_dir=fair_dir,
         transform=transform,
         max_samples_per_class=max_samples_per_class,
-        max_fair_samples=max_fair_samples
+        max_fair_samples=max_fair_samples,
+        poor_csv_path=poor_csv_path,
+        poor_base_dir=poor_base_dir
     )
 
     dataloader = DataLoader(
@@ -460,6 +497,10 @@ if __name__ == '__main__':
     parser.add_argument('--methods', type=str, nargs='+',
                        default=['pca', 'tsne', 'umap'],
                        help='降维方法: pca, tsne, umap')
+    parser.add_argument('--poor_csv_path', type=str, default=None,
+                       help='Poor胚胎CSV文件路径（可选）')
+    parser.add_argument('--poor_base_dir', type=str, default=None,
+                       help='Poor胚胎基础目录（可选）')
 
     args = parser.parse_args()
 
@@ -474,5 +515,7 @@ if __name__ == '__main__':
         max_samples_per_class=args.max_samples_per_class,
         max_fair_samples=args.max_fair_samples,
         batch_size=args.batch_size,
-        methods=args.methods
+        methods=args.methods,
+        poor_csv_path=args.poor_csv_path,
+        poor_base_dir=args.poor_base_dir
     )
