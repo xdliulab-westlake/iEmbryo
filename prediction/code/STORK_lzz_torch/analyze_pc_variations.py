@@ -286,23 +286,43 @@ def visualize_image_pairs(results, output_dir, comparison_name="Good_vs_Poor"):
 
         for i, pair in enumerate(results['pc1_similar_pc2_opposite']):
             # Class1图片
-            class1_img = Image.open(pair['class1_path']).convert('RGB')
-            axes[i, 0].imshow(class1_img)
-            axes[i, 0].axis('off')
-            axes[i, 0].set_title(
-                f"#{i+1} {class1_name}\nPC1:{pair['class1_pc1']:.2f}, PC2:{pair['class1_pc2']:.2f}",
-                fontsize=9, color=class1_color
-            )
+            try:
+                if not Path(pair['class1_path']).exists():
+                    print(f"  ⚠️  文件不存在，跳过: {pair['class1_path']}")
+                    axes[i, 0].text(0.5, 0.5, 'File Not Found', ha='center', va='center')
+                    axes[i, 0].axis('off')
+                else:
+                    class1_img = Image.open(pair['class1_path']).convert('RGB')
+                    axes[i, 0].imshow(class1_img)
+                    axes[i, 0].axis('off')
+                    axes[i, 0].set_title(
+                        f"#{i+1} {class1_name}\nPC1:{pair['class1_pc1']:.2f}, PC2:{pair['class1_pc2']:.2f}",
+                        fontsize=9, color=class1_color
+                    )
+            except Exception as e:
+                print(f"  ⚠️  处理图片失败 {pair['class1_path']}: {e}")
+                axes[i, 0].text(0.5, 0.5, 'Error', ha='center', va='center')
+                axes[i, 0].axis('off')
 
             # Class2图片
-            class2_img = Image.open(pair['class2_path']).convert('RGB')
-            axes[i, 1].imshow(class2_img)
-            axes[i, 1].axis('off')
-            axes[i, 1].set_title(
-                f"#{i+1} {class2_name}\nPC1:{pair['class2_pc1']:.2f}, PC2:{pair['class2_pc2']:.2f}\n"
-                f"ΔPC1:{pair['pc1_diff']:.3f}, ΔPC2:{pair['pc2_diff']:.3f}",
-                fontsize=9, color=class2_color
-            )
+            try:
+                if not Path(pair['class2_path']).exists():
+                    print(f"  ⚠️  文件不存在，跳过: {pair['class2_path']}")
+                    axes[i, 1].text(0.5, 0.5, 'File Not Found', ha='center', va='center')
+                    axes[i, 1].axis('off')
+                else:
+                    class2_img = Image.open(pair['class2_path']).convert('RGB')
+                    axes[i, 1].imshow(class2_img)
+                    axes[i, 1].axis('off')
+                    axes[i, 1].set_title(
+                        f"#{i+1} {class2_name}\nPC1:{pair['class2_pc1']:.2f}, PC2:{pair['class2_pc2']:.2f}\n"
+                        f"ΔPC1:{pair['pc1_diff']:.3f}, ΔPC2:{pair['pc2_diff']:.3f}",
+                        fontsize=9, color=class2_color
+                    )
+            except Exception as e:
+                print(f"  ⚠️  处理图片失败 {pair['class2_path']}: {e}")
+                axes[i, 1].text(0.5, 0.5, 'Error', ha='center', va='center')
+                axes[i, 1].axis('off')
 
         plt.tight_layout()
         save_path = output_dir / f'{comparison_name}_pc1_similar_pc2_opposite.pdf'
@@ -323,23 +343,43 @@ def visualize_image_pairs(results, output_dir, comparison_name="Good_vs_Poor"):
 
         for i, pair in enumerate(results['pc2_similar_pc1_opposite']):
             # Class1图片
-            class1_img = Image.open(pair['class1_path']).convert('RGB')
-            axes[i, 0].imshow(class1_img)
-            axes[i, 0].axis('off')
-            axes[i, 0].set_title(
-                f"#{i+1} {class1_name}\nPC1:{pair['class1_pc1']:.2f}, PC2:{pair['class1_pc2']:.2f}",
-                fontsize=9, color=class1_color
-            )
+            try:
+                if not Path(pair['class1_path']).exists():
+                    print(f"  ⚠️  文件不存在，跳过: {pair['class1_path']}")
+                    axes[i, 0].text(0.5, 0.5, 'File Not Found', ha='center', va='center')
+                    axes[i, 0].axis('off')
+                else:
+                    class1_img = Image.open(pair['class1_path']).convert('RGB')
+                    axes[i, 0].imshow(class1_img)
+                    axes[i, 0].axis('off')
+                    axes[i, 0].set_title(
+                        f"#{i+1} {class1_name}\nPC1:{pair['class1_pc1']:.2f}, PC2:{pair['class1_pc2']:.2f}",
+                        fontsize=9, color=class1_color
+                    )
+            except Exception as e:
+                print(f"  ⚠️  处理图片失败 {pair['class1_path']}: {e}")
+                axes[i, 0].text(0.5, 0.5, 'Error', ha='center', va='center')
+                axes[i, 0].axis('off')
 
             # Class2图片
-            class2_img = Image.open(pair['class2_path']).convert('RGB')
-            axes[i, 1].imshow(class2_img)
-            axes[i, 1].axis('off')
-            axes[i, 1].set_title(
-                f"#{i+1} {class2_name}\nPC1:{pair['class2_pc1']:.2f}, PC2:{pair['class2_pc2']:.2f}\n"
-                f"ΔPC1:{pair['pc1_diff']:.3f}, ΔPC2:{pair['pc2_diff']:.3f}",
-                fontsize=9, color=class2_color
-            )
+            try:
+                if not Path(pair['class2_path']).exists():
+                    print(f"  ⚠️  文件不存在，跳过: {pair['class2_path']}")
+                    axes[i, 1].text(0.5, 0.5, 'File Not Found', ha='center', va='center')
+                    axes[i, 1].axis('off')
+                else:
+                    class2_img = Image.open(pair['class2_path']).convert('RGB')
+                    axes[i, 1].imshow(class2_img)
+                    axes[i, 1].axis('off')
+                    axes[i, 1].set_title(
+                        f"#{i+1} {class2_name}\nPC1:{pair['class2_pc1']:.2f}, PC2:{pair['class2_pc2']:.2f}\n"
+                        f"ΔPC1:{pair['pc1_diff']:.3f}, ΔPC2:{pair['pc2_diff']:.3f}",
+                        fontsize=9, color=class2_color
+                    )
+            except Exception as e:
+                print(f"  ⚠️  处理图片失败 {pair['class2_path']}: {e}")
+                axes[i, 1].text(0.5, 0.5, 'Error', ha='center', va='center')
+                axes[i, 1].axis('off')
 
         plt.tight_layout()
         save_path = output_dir / f'{comparison_name}_pc2_similar_pc1_opposite.pdf'
@@ -403,23 +443,35 @@ def visualize_pc_sorted_sequence(features_pca, labels, paths, output_dir, pc_com
 
     # 绘制每张图片
     for i, idx in enumerate(selected_indices):
-        img = Image.open(paths[idx]).convert('RGB')
-        pc1_val = features_pca[idx, 0]
-        pc2_val = features_pca[idx, 1]
-        label = labels[idx]
-        class_name = class_names.get(label, 'Unknown')
-        color = color_map.get(class_name, 'blue')
+        try:
+            # 检查文件是否存在
+            if not Path(paths[idx]).exists():
+                print(f"⚠️  文件不存在，跳过: {paths[idx]}")
+                axes[i].text(0.5, 0.5, 'File Not Found', ha='center', va='center')
+                axes[i].axis('off')
+                continue
 
-        # 构建标题 - 根据维度决定显示哪些PC值
-        if features_pca.shape[1] >= 3:
-            pc3_val = features_pca[idx, 2]
-            title_text = f"#{i+1} {class_name}\nPC1:{pc1_val:.2f}, PC2:{pc2_val:.2f}, PC3:{pc3_val:.2f}"
-        else:
-            title_text = f"#{i+1} {class_name}\nPC1:{pc1_val:.2f}, PC2:{pc2_val:.2f}"
+            img = Image.open(paths[idx]).convert('RGB')
+            pc1_val = features_pca[idx, 0]
+            pc2_val = features_pca[idx, 1]
+            label = labels[idx]
+            class_name = class_names.get(label, 'Unknown')
+            color = color_map.get(class_name, 'blue')
 
-        axes[i].imshow(img)
-        axes[i].axis('off')
-        axes[i].set_title(title_text, fontsize=8, color=color)
+            # 构建标题 - 根据维度决定显示哪些PC值
+            if features_pca.shape[1] >= 3:
+                pc3_val = features_pca[idx, 2]
+                title_text = f"#{i+1} {class_name}\nPC1:{pc1_val:.2f}, PC2:{pc2_val:.2f}, PC3:{pc3_val:.2f}"
+            else:
+                title_text = f"#{i+1} {class_name}\nPC1:{pc1_val:.2f}, PC2:{pc2_val:.2f}"
+
+            axes[i].imshow(img)
+            axes[i].axis('off')
+            axes[i].set_title(title_text, fontsize=8, color=color)
+        except Exception as e:
+            print(f"⚠️  处理图片失败 {paths[idx]}: {e}")
+            axes[i].text(0.5, 0.5, 'Error Loading', ha='center', va='center')
+            axes[i].axis('off')
 
     # 隐藏多余的子图
     for i in range(len(selected_indices), len(axes)):

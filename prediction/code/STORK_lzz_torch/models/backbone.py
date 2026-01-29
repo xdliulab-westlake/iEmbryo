@@ -87,6 +87,18 @@ class BackboneModel(nn.Module):
             'classifier_attr': 'head.fc',
             'last_layer_in_features': 768,
             'description': 'ConvNeXt-Tiny: 现代纯卷积网络(小)'
+        },
+        'convnext_base': {
+            'loader': lambda pretrained=False: timm.create_model('convnext_base', pretrained=pretrained),
+            'classifier_attr': 'head.fc',
+            'last_layer_in_features': 1024,
+            'description': 'ConvNeXt-Base: 现代纯卷积网络(标准版)'
+        },
+        'coatnet_1': {
+            'loader': lambda pretrained=False: timm.create_model('coatnet_1_rw_224', pretrained=pretrained),
+            'classifier_attr': 'head.fc',
+            'last_layer_in_features': 768,
+            'description': 'CoAtNet-1: CNN-Transformer混合架构'
         }
     }
 
@@ -156,9 +168,9 @@ class BackboneModel(nn.Module):
                 nn.Dropout(),
                 nn.Linear(2048, num_classes)
             )
-        # ConvNeXt特殊处理（分类层名称是head.fc）
-        elif model_name.startswith('convnext'):
-            # ConvNeXt的head.fc是一个Linear层，可以直接替换
+        # ConvNeXt和CoAtNet特殊处理（分类层名称是head.fc）
+        elif model_name.startswith('convnext') or model_name.startswith('coatnet'):
+            # ConvNeXt/CoAtNet的head.fc是一个Linear层，可以直接替换
             setattr(self.model.head, 'fc', nn.Linear(in_features, num_classes))
         else:
             # 其他模型直接替换最后一层
