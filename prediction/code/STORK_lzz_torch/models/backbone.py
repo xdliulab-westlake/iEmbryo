@@ -23,7 +23,9 @@ class BackboneModel(nn.Module):
         'efficientnetb0': "/liaozizhuo/scripts/pretrain_models/efficientnet-b0-355c32eb.pth",
         'densenet121': "/liaozizhuo/scripts/pretrain_models/densenet121-a639ec97.pth",
         'densenet169': "/liaozizhuo/scripts/pretrain_models/densenet169-b2777c0a.pth",
-        'densenet201': "/liaozizhuo/scripts/pretrain_models/densenet201-c1103571.pth"
+        'densenet201': "/liaozizhuo/scripts/pretrain_models/densenet201-c1103571.pth",
+        'convnext_base': "/liaozizhuo/scripts/pretrain_models/convnext_base_fb_in22k_ft_in1k.pth",
+        'coatnet_1': "/liaozizhuo/scripts/pretrain_models/coatnet_1_rw_224.pth"
     }
 
     # 模型配置（包含最后一层的输入维度和属性名）
