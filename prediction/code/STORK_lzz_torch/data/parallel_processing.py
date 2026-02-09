@@ -396,7 +396,12 @@ class STORKDataLoader:
 
     def load_data(self) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset]:
         """
-        加载数据并返回PyTorch数据集（三个独立的数据集）
+        加载数据并返回PyTorch数据集
+
+        新策略 (70/30):
+        - 70% 训练集 → 内部分为 train (80%) 和 val (20%) 用于常规训练
+        - 30% 测试集 → 用于最终评估
+        - 交叉验证时使用完整的70%训练集
 
         Returns:
             训练数据集, 验证数据集, 测试数据集
@@ -404,21 +409,46 @@ class STORKDataLoader:
         if is_main_process():
             print("开始收集图片路径信息...")
 
-        # 收集图片路径，返回三个独立的数据集
-        train_paths, train_labels, val_paths, val_labels, test_paths, test_labels = self._collect_image_paths()
+        # 收集图片路径，现在返回两个独立的数据集 (70% train, 30% test)
+        train_paths, train_labels, test_paths, test_labels = self._collect_image_paths()
+
+        # 将70%训练集进一步分为 train (80%) 和 val (20%) 用于常规训练
+        # 这样可以在训练时有验证集，同时保持交叉验证使用完整70%
+        from sklearn.model_selection import train_test_split
+        random_state = self.config.get('data', {}).get('random_state', 42)
+
+        train_paths_split, val_paths_split, train_labels_split, val_labels_split = train_test_split(
+            train_paths, train_labels,
+            test_size=0.2,  # 从70%中取20%作为验证集
+            stratify=train_labels,
+            random_state=random_state
+        )
+
+        if is_main_process():
+            print(f"\n📊 常规训练的数据划分 (从70%训练集中):")
+            print(f"   训练子集: {len(train_paths_split)} 样本 (56% of total)")
+            print(f"   验证子集: {len(val_paths_split)} 样本 (14% of total)")
+            print(f"   测试集: {len(test_paths)} 样本 (30% of total)")
+            print(f"\n   注意: 交叉验证将使用完整的70%训练集 ({len(train_paths)} 样本)")
 
         # 获取缓存配置
         cache_dir = self.config.get('paths', {}).get('cache_dir', './batch_cache')
         chunk_size = self.config.get('data', {}).get('cache_chunk_size', 1000)
 
-        # 创建批量缓存PyTorch数据集，传递完整配置参数
+        # 创建批量缓存PyTorch数据集
         train_dataset, val_dataset, test_dataset = self._create_cached_datasets(
-            train_paths, train_labels, val_paths, val_labels, test_paths, test_labels,
+            train_paths_split, train_labels_split,
+            val_paths_split, val_labels_split,
+            test_paths, test_labels,
             cache_dir, chunk_size
         )
 
+        # 保存完整的70%训练集路径和标签，供交叉验证使用
+        self.full_train_paths = train_paths
+        self.full_train_labels = train_labels
+
         if is_main_process():
-            print(f"数据加载完成")
+            print(f"\n✅ 数据加载完成")
             print(f"   训练集: {len(train_dataset)} 样本")
             print(f"   验证集: {len(val_dataset)} 样本")
             print(f"   测试集: {len(test_dataset)} 样本")
@@ -521,39 +551,37 @@ class STORKDataLoader:
 
         target_images_per_class = min(total_class_0_images, total_class_1_images)
 
-        # 分配到各个集合（70:15:15）
+        # 分配到各个集合（70:30 - 训练集:测试集）
         train_target_per_class = int(target_images_per_class * 0.70)
-        val_target_per_class = int(target_images_per_class * 0.15)
-        test_target_per_class = target_images_per_class - train_target_per_class - val_target_per_class
+        test_target_per_class = target_images_per_class - train_target_per_class
 
         if is_main_process():
             print(f"\n🎯 目标图像数量（下采样到少数类）:")
             print(f"  每个类别总数: {target_images_per_class} 张")
-            print(f"  训练集（每类）: {train_target_per_class} 张")
-            print(f"  验证集（每类）: {val_target_per_class} 张")
-            print(f"  测试集（每类）: {test_target_per_class} 张")
+            print(f"  训练集（每类）: {train_target_per_class} 张 (70%)")
+            print(f"  测试集（每类）: {test_target_per_class} 张 (30%)")
             print(f"  总图像数: {target_images_per_class * 2} 张")
+            print(f"\n  注意: 交叉验证将在训练集内部进行5折分割")
 
         # ===== Step 4: 为每个类别选择胚胎，达到目标图像数量 =====
         random_state = self.config.get('data', {}).get('random_state', 42)
         rng = np.random.RandomState(random_state)
 
-        selected_embryos = {0: {'train': [], 'val': [], 'test': []},
-                           1: {'train': [], 'val': [], 'test': []}}
+        selected_embryos = {0: {'train': [], 'test': []},
+                           1: {'train': [], 'test': []}}
 
         for class_label in [0, 1]:
             embryo_list = class_embryo_info[class_label].copy()
             rng.shuffle(embryo_list)  # 随机打乱
 
-            # 依次分配到 train, val, test
-            current_counts = {'train': 0, 'val': 0, 'test': 0}
+            # 依次分配到 train, test
+            current_counts = {'train': 0, 'test': 0}
             targets = {'train': train_target_per_class,
-                      'val': val_target_per_class,
                       'test': test_target_per_class}
 
             for embryo_id, num_images, paths, item_labels in embryo_list:
                 # 找到还需要图像的集合
-                for split in ['train', 'val', 'test']:
+                for split in ['train', 'test']:
                     if current_counts[split] < targets[split]:
                         selected_embryos[class_label][split].append(
                             (embryo_id, num_images, paths, item_labels)
@@ -562,12 +590,11 @@ class STORKDataLoader:
                         break
 
                 # 如果所有集合都已满，停止
-                if all(current_counts[s] >= targets[s] for s in ['train', 'val', 'test']):
+                if all(current_counts[s] >= targets[s] for s in ['train', 'test']):
                     break
 
         # ===== Step 5: 组装最终的数据集 =====
         train_paths_list, train_labels_list = [], []
-        val_paths_list, val_labels_list = [], []
         test_paths_list, test_labels_list = [], []
 
         embryo_split_mapping = {}
@@ -575,11 +602,8 @@ class STORKDataLoader:
 
         for class_label in [0, 1]:
             for split_name, split_list in [('train', train_paths_list),
-                                          ('val', val_paths_list),
                                           ('test', test_paths_list)]:
-                split_labels = train_labels_list if split_name == 'train' else (
-                    val_labels_list if split_name == 'val' else test_labels_list
-                )
+                split_labels = train_labels_list if split_name == 'train' else test_labels_list
 
                 for embryo_id, _, paths, item_labels in selected_embryos[class_label][split_name]:
                     split_list.extend(paths)
@@ -590,46 +614,36 @@ class STORKDataLoader:
 
         # 转换为numpy数组
         train_paths = np.array(train_paths_list)
-        val_paths = np.array(val_paths_list)
         test_paths = np.array(test_paths_list)
         train_labels = np.array(train_labels_list)
-        val_labels = np.array(val_labels_list)
         test_labels = np.array(test_labels_list)
 
         if is_main_process():
             print(f"\n✅ 图像级别平衡分割结果:")
             print(f"\n🧬 胚胎数量统计:")
             train_embryos = sum(len(selected_embryos[c]['train']) for c in [0, 1])
-            val_embryos = sum(len(selected_embryos[c]['val']) for c in [0, 1])
             test_embryos = sum(len(selected_embryos[c]['test']) for c in [0, 1])
-            total_embryos = train_embryos + val_embryos + test_embryos
+            total_embryos = train_embryos + test_embryos
             print(f"   总胚胎数: {total_embryos}")
-            print(f"   训练集胚胎数: {train_embryos}")
-            print(f"   验证集胚胎数: {val_embryos}")
-            print(f"   测试集胚胎数: {test_embryos}")
+            print(f"   训练集胚胎数: {train_embryos} ({train_embryos/total_embryos*100:.1f}%)")
+            print(f"   测试集胚胎数: {test_embryos} ({test_embryos/total_embryos*100:.1f}%)")
 
             print(f"\n📊 总体数据分布:")
-            total_images = len(train_paths) + len(val_paths) + len(test_paths)
-            total_class_0 = sum(train_labels == 0) + sum(val_labels == 0) + sum(test_labels == 0)
-            total_class_1 = sum(train_labels == 1) + sum(val_labels == 1) + sum(test_labels == 1)
+            total_images = len(train_paths) + len(test_paths)
+            total_class_0 = sum(train_labels == 0) + sum(test_labels == 0)
+            total_class_1 = sum(train_labels == 1) + sum(test_labels == 1)
             print(f"   总样本数: {total_images}")
             print(f"   Class 0 (Poor/Non-viable): {total_class_0} ({total_class_0/total_images*100:.2f}%)")
             print(f"   Class 1 (Good/Viable): {total_class_1} ({total_class_1/total_images*100:.2f}%)")
             print(f"   类别比例: {total_class_0/total_class_1:.2f}:1")
 
-            print(f"\n📈 训练集:")
+            print(f"\n📈 训练集 (70%):")
             print(f"   图像数: {len(train_paths)}")
             print(f"   胚胎数: {train_embryos}")
             print(f"   Class 0: {sum(train_labels == 0)} ({sum(train_labels == 0)/len(train_labels)*100:.2f}%)")
             print(f"   Class 1: {sum(train_labels == 1)} ({sum(train_labels == 1)/len(train_labels)*100:.2f}%)")
 
-            print(f"\n📉 验证集:")
-            print(f"   图像数: {len(val_paths)}")
-            print(f"   胚胎数: {val_embryos}")
-            print(f"   Class 0: {sum(val_labels == 0)} ({sum(val_labels == 0)/len(val_labels)*100:.2f}%)")
-            print(f"   Class 1: {sum(val_labels == 1)} ({sum(val_labels == 1)/len(val_labels)*100:.2f}%)")
-
-            print(f"\n🧪 测试集:")
+            print(f"\n🧪 测试集 (30%):")
             print(f"   图像数: {len(test_paths)}")
             print(f"   胚胎数: {test_embryos}")
             print(f"   Class 0: {sum(test_labels == 0)} ({sum(test_labels == 0)/len(test_labels)*100:.2f}%)")
@@ -642,44 +656,34 @@ class STORKDataLoader:
         self.split_mapping = embryo_split_mapping  # embryo_id -> split
         self.image_split_mapping = image_split_mapping  # image_path -> split
         self.train_embryo_ids = {eid for eid, split in embryo_split_mapping.items() if split == 'train'}
-        self.val_embryo_ids = {eid for eid, split in embryo_split_mapping.items() if split == 'val'}
         self.test_embryo_ids = {eid for eid, split in embryo_split_mapping.items() if split == 'test'}
 
         # 验证胚胎ID统计
         if is_main_process():
             print(f"\n[DEBUG] 胚胎ID提取验证:")
             print(f"  训练集胚胎数: {len(self.train_embryo_ids)} 个")
-            print(f"  验证集胚胎数: {len(self.val_embryo_ids)} 个")
             print(f"  测试集胚胎数: {len(self.test_embryo_ids)} 个")
             print(f"  总胚胎数: {len(embryo_split_mapping)} 个")
 
             # 检查胚胎是否有重叠
-            train_val_overlap = self.train_embryo_ids & self.val_embryo_ids
             train_test_overlap = self.train_embryo_ids & self.test_embryo_ids
-            val_test_overlap = self.val_embryo_ids & self.test_embryo_ids
 
-            if train_val_overlap or train_test_overlap or val_test_overlap:
+            if train_test_overlap:
                 print(f"  ⚠️  警告: 检测到胚胎重叠!")
-                if train_val_overlap:
-                    print(f"     训练-验证重叠: {len(train_val_overlap)} 个")
-                if train_test_overlap:
-                    print(f"     训练-测试重叠: {len(train_test_overlap)} 个")
-                if val_test_overlap:
-                    print(f"     验证-测试重叠: {len(val_test_overlap)} 个")
+                print(f"     训练-测试重叠: {len(train_test_overlap)} 个")
             else:
-                print(f"  ✓ 确认: 各数据集之间无胚胎重叠（数据泄漏检查通过）")
+                print(f"  ✓ 确认: 训练集和测试集无胚胎重叠（数据泄漏检查通过）")
 
         # 保存各分割的路径和标签供后续使用
         self.train_paths = train_paths
         self.train_labels = train_labels
-        self.val_paths = val_paths
-        self.val_labels = val_labels
         self.test_paths = test_paths
         self.test_labels = test_labels
 
-        # 返回三个独立的数据集 (train, val, test) - 确保胚胎级别的完全分离
+        # 返回两个独立的数据集 (train, test) - 确保胚胎级别的完全分离
         # 每个胚胎仅在一个集合中出现，没有数据泄漏
-        return train_paths, train_labels, val_paths, val_labels, test_paths, test_labels
+        # 注意: 交叉验证将在训练集内部进行
+        return train_paths, train_labels, test_paths, test_labels
 
     def _balance_classes_by_undersampling(self, paths, labels, embryo_ids):
         """

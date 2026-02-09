@@ -63,14 +63,20 @@ class CrossValidator:
         """
         运行交叉验证（按胚胎ID分组，避免数据泄漏）
 
+        重要说明:
+        - 此方法应该只在70%训练集上运行，不包含30%测试集
+        - 测试集应该保留用于最终模型评估
+        - 交叉验证用于评估模型性能和选择超参数
+
         Args:
-            dataset: 完整数据集
+            dataset: 完整的70%训练数据集（不包含测试集）
             create_model_fn: 创建模型的函数
 
         Returns:
             交叉验证结果字典
         """
         print(f"开始 {self.n_folds} 折交叉验证（胚胎级别分组）...")
+        print(f"⚠️  重要: 交叉验证仅使用训练集，测试集不参与")
 
         # ===== Step 1: 提取胚胎ID和分组 =====
         from collections import defaultdict

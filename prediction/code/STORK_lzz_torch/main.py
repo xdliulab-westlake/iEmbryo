@@ -98,9 +98,10 @@ class STORKApplication:
 
         if self.is_main_process:
             print(f"✓ 成功应用胚胎级别分割:")
-            print(f"  训练集: {len(self.train_dataset)} 张图像，来自 {len(self.data_loader.train_embryo_ids)} 个胚胎")
-            print(f"  验证集: {len(self.val_dataset)} 张图像，来自 {len(self.data_loader.val_embryo_ids)} 个胚胎")
-            print(f"  测试集: {len(self.test_dataset)} 张图像，来自 {len(self.data_loader.test_embryo_ids)} 个胚胎")
+            print(f"  训练集: {len(self.train_dataset)} 张图像 (从70%训练集中分出)")
+            print(f"  验证集: {len(self.val_dataset)} 张图像 (从70%训练集中分出)")
+            print(f"  测试集: {len(self.test_dataset)} 张图像，来自 {len(self.data_loader.test_embryo_ids)} 个胚胎 (30%)")
+            print(f"\n  注意: 完整70%训练集包含 {len(self.data_loader.train_embryo_ids)} 个胚胎，用于交叉验证")
 
         # 直接使用来自 _collect_image_paths 的数据集
         train_subset = self.train_dataset
@@ -386,22 +387,40 @@ class STORKApplication:
 
             # 可选：运行交叉验证
             if self.config.get('validation', {}).get('cross_validation', False):
-                print("\n开始交叉验证...")
+                print("\n" + "="*80)
+                print("开始交叉验证 (仅使用70%训练集)...")
+                print("="*80)
                 try:
                     cv_validator = create_cross_validator(self.config, self.device)
 
-                    # 创建完整数据集用于交叉验证
-                    from torch.utils.data import ConcatDataset
-                    full_dataset = ConcatDataset([self.train_dataset, self.val_dataset, self.test_dataset])
+                    # 创建完整的70%训练集用于交叉验证
+                    # 注意: 不包含30%测试集，避免数据泄漏
+                    if hasattr(self.data_loader, 'full_train_paths') and hasattr(self.data_loader, 'full_train_labels'):
+                        # 使用完整的70%训练集创建数据集
+                        from data.dataset import EmbryoDataset
+                        full_train_dataset = EmbryoDataset(
+                            image_paths=self.data_loader.full_train_paths,
+                            labels=self.data_loader.full_train_labels,
+                            transform=self.train_dataset.transform if hasattr(self.train_dataset, 'transform') else None,
+                            config=self.config
+                        )
 
-                    # 运行交叉验证
-                    cv_results = cv_validator.run_cross_validation(
-                        full_dataset,
-                        lambda: create_model(self.config['model'])
-                    )
-                    print("交叉验证完成")
+                        print(f"交叉验证数据集: {len(full_train_dataset)} 样本 (70%训练集)")
+                        print(f"测试集: {len(self.test_dataset)} 样本 (30%, 不参与交叉验证)")
+
+                        # 运行交叉验证
+                        cv_results = cv_validator.run_cross_validation(
+                            full_train_dataset,
+                            lambda: create_model(self.config['model'])
+                        )
+                        print("\n✅ 交叉验证完成")
+                    else:
+                        print("⚠️  警告: 无法获取完整训练集，跳过交叉验证")
+
                 except Exception as e:
-                    print(f"交叉验证失败: {e}")
+                    print(f"❌ 交叉验证失败: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             # 显示模型摘要
             if hasattr(self, 'model_manager') and self.model_manager:

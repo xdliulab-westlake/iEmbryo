@@ -8,6 +8,7 @@
 !**/*.md
 !**/*.ipynb
 !*.ipynb
+!*.jpg
 !api/code/*.js
 .Rproj.user
 ref_code/
