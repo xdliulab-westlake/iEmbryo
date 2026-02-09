@@ -11,12 +11,6 @@ Deep Learning-Based IVF Embryo Quality Analysis Platform
 
 **iEmbryo** is an advanced AI-powered platform for embryo quality assessment and selection in reproductive medicine. Leveraging state-of-the-art computer vision and deep learning technologies, iEmbryo provides precise and efficient embryo quality assessment solutions to support clinical decision-making in IVF procedures.
 
-### Key Performance Metrics
-
-- **98.5%** Accuracy
-- **< 0.2s** Analysis Time
-- **24/7** Online Service
-
 ---
 
 ## 🎯 Main Features
@@ -56,7 +50,7 @@ AI-based embryo optimization and clinical decision support system featuring:
 IVF_AI/
 ├── prediction/
 │   └── code/
-│       ├── STORK_lzz_torch/          # Main implementation (iEmbryo core)
+│       ├── iEmbryo/                  # Main implementation (iEmbryo core)
 │       │   ├── config/               # Configuration management
 │       │   ├── data/                 # Data loading and preprocessing
 │       │   ├── models/               # Neural network architectures
@@ -65,6 +59,7 @@ IVF_AI/
 │       │   ├── visualization/        # GradCAM and feature visualization
 │       │   ├── utils/                # Utility functions
 │       │   ├── embryo_info/          # Embryo analysis tools
+│       │   ├── outputs/              # Training outputs and results
 │       │   └── main.py               # Main entry point
 │       │
 │       ├── BiLSTM/                   # Temporal analysis module
@@ -72,9 +67,7 @@ IVF_AI/
 │       │   ├── preprocessing/        # Time-lapse data preprocessing
 │       │   └── main.py               # BiLSTM training
 │       │
-│       └── ViT-Hybrid/               # Vision Transformer hybrid models
-│           ├── model/                # Transformer architectures
-│           └── training/             # Hybrid model training
+│       └── iEmbryo.py                # iEmbryo main script
 │
 ├── database/                         # Database management
 ├── Figures/                          # Result visualizations
