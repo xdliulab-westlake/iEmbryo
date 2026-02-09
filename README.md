@@ -83,58 +83,6 @@ IVF_AI/
 
 ---
 
-## 🚀 Getting Started
-
-### Prerequisites
-
-```bash
-Python >= 3.8
-PyTorch >= 1.10
-CUDA >= 11.0 (for GPU acceleration)
-```
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/IVF_AI.git
-cd IVF_AI
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Quick Start
-
-#### 1. Quality Detection (STORK Model)
-
-```bash
-cd prediction/code/STORK_lzz_torch
-
-# Train a model
-python main.py --mode train --backbone vgg16 --num_classes 3
-
-# Evaluate a model
-python main.py --mode evaluate --backbone vgg16 --checkpoint path/to/checkpoint.pth
-
-# Generate visualizations
-python main.py --mode visualize --backbone vgg16 --checkpoint path/to/checkpoint.pth
-```
-
-#### 2. Temporal Analysis (BiLSTM)
-
-```bash
-cd prediction/code/BiLSTM
-
-# Train BiLSTM model
-python main.py --mode train --epochs 100
-
-# Cross-validation
-python cross_validation.py --folds 5
-```
-
----
-
 ## 🏗️ Model Architectures
 
 ### Supported Backbones
