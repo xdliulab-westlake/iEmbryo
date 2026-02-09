@@ -232,13 +232,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 For questions or collaboration inquiries:
 - Website: [https://iembryo.westlake.edu.cn/](https://iembryo.westlake.edu.cn/)
-- Email: your.email@example.com
+- Email: liaozizhuo@westlake.edu.cn
 
 ---
 
 ## 🙏 Acknowledgments
 
-This work was supported by [Your Institution/Funding Agency].
+This work was supported by Westlake University, Liuxiaodong Lab.
 
 Special thanks to all contributors and the reproductive medicine community for their valuable feedback.
 
