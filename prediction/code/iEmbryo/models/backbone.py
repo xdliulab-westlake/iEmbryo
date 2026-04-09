@@ -25,7 +25,8 @@ class BackboneModel(nn.Module):
         'densenet169': "/liaozizhuo/scripts/pretrain_models/densenet169-b2777c0a.pth",
         'densenet201': "/liaozizhuo/scripts/pretrain_models/densenet201-c1103571.pth",
         'convnext_base': "/liaozizhuo/scripts/pretrain_models/convnext_base_fb_in22k_ft_in1k.pth",
-        'coatnet_1': "/liaozizhuo/scripts/pretrain_models/coatnet_1_rw_224.pth"
+        'coatnet_1': "/liaozizhuo/scripts/pretrain_models/coatnet_1_rw_224.pth",
+        'vit_base_16': "/liaozizhuo/scripts/pretrain_models/vit_base_patch16_224.pth",
     }
 
     # 模型配置（包含最后一层的输入维度和属性名）
@@ -101,7 +102,13 @@ class BackboneModel(nn.Module):
             'classifier_attr': 'head.fc',
             'last_layer_in_features': 768,
             'description': 'CoAtNet-1: CNN-Transformer混合架构'
-        }
+        },
+        'vit_base_16': {
+            'loader': lambda pretrained=False: timm.create_model('vit_base_patch16_224', pretrained=pretrained),
+            'classifier_attr': 'head',
+            'last_layer_in_features': 768,
+            'description': 'ViT-B/16: Vision Transformer，patch=16，全量微调'
+        },
     }
 
     def __init__(self,
@@ -174,6 +181,9 @@ class BackboneModel(nn.Module):
         elif model_name.startswith('convnext') or model_name.startswith('coatnet'):
             # ConvNeXt/CoAtNet的head.fc是一个Linear层，可以直接替换
             setattr(self.model.head, 'fc', nn.Linear(in_features, num_classes))
+        # ViT系列：model.head 直接是 Linear
+        elif model_name.startswith('vit'):
+            self.model.head = nn.Linear(in_features, num_classes)
         else:
             # 其他模型直接替换最后一层
             setattr(self.model, classifier_attr, nn.Linear(in_features, num_classes))
@@ -182,7 +192,12 @@ class BackboneModel(nn.Module):
         print(f"   输出类别数: {num_classes}")
 
         # 设置微调策略
-        if fine_tune:
+        # ViT 全量微调，所有参数均参与训练
+        if model_name.startswith('vit'):
+            for param in self.model.parameters():
+                param.requires_grad = True
+            print(f"微调配置: ViT 全量微调，所有参数可训练")
+        elif fine_tune:
             self._setup_fine_tuning(fine_tune_layers)
         else:
             # 冻结所有参数，仅训练分类头
