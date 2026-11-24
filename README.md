@@ -10,13 +10,19 @@ Open the [iEmbryo workspace](https://iembryo.westlake.edu.cn/) and sign in with 
 
 ![Current iEmbryo sign-in page showing the assessment, interpretation, and comparison workflows](docs/images/iembryo-sign-in.png)
 
+The following screenshots show the demo workspace with its default form values.
+
 ### Quality assessment
+
+![Quality assessment workspace with image upload, model selection, and analysis history](docs/images/iembryo-quality-assessment.png)
 
 1. Choose **Single File**, **Batch**, or **Folder** in the analysis workspace.
 2. Add embryo images and run the analysis. Review the predicted quality scores and Grad-CAM overlays where available.
 3. Export batch results as CSV or JSON, or revisit earlier results under **Analysis history**.
 
 ### Embryo selection
+
+![Embryo selection workspace with folder import, PC1 score comparison, and pregnancy estimate form](docs/images/iembryo-embryo-selection.png)
 
 1. Under **Import embryo images**, add one folder per embryo.
 2. Under **Compare quality scores**, calculate the mean first principal component (PC1) score for each embryo and compare the resulting rankings. Use **Export CSV** to save the scores.
